@@ -1,0 +1,16 @@
+#cloud-config
+# Written by terraform/modules/jumpbox, jumpbox_setup_method = "cloud-init" only
+# (Round 19). Holds no secret: the setup script only downloads public tools.
+# runcmd runs after the admin user exists: the script is copied to its home
+# there, then run once as root; its output goes to /var/log/cloud-init-output.log
+# and to /var/log/tpg-jumpbox/setup-cloud-init.log.
+write_files:
+  - path: /usr/local/lib/tpg-jumpbox/setup-jumpbox.sh
+    owner: root:root
+    permissions: "0755"
+    encoding: gz+b64
+    content: ${setup_script_gz_b64}
+runcmd:
+  - [install, -d, -m, "0755", /var/log/tpg-jumpbox]
+  - [install, -o, "${admin_username}", -g, "${admin_username}", -m, "0755", /usr/local/lib/tpg-jumpbox/setup-jumpbox.sh, "/home/${admin_username}/setup-jumpbox.sh"]
+  - [bash, -o, pipefail, -c, "TPG_FROM_CLOUD_INIT=1 bash /home/${admin_username}/setup-jumpbox.sh 2>&1 | tee /var/log/tpg-jumpbox/setup-cloud-init.log"]

@@ -1,0 +1,28 @@
+# Example postgres patch file (postgresPatchFilePath of tpg-patch, tpg-create-instance
+# and tpg-day0), referenced by clusters/fleet.example.yaml. The workflows store the
+# postgres documents of an instance as <instance>-postgres-<hash>.yaml; this example
+# keeps a fixed name. Write the documents in files on the machine that submits the run
+# (or in a team file of this folder, named repo:charts/tpg-instance/patches/<file>).
+# One or more documents of the kinds Postgres, PostgresBackupLocation,
+# PostgresBackupSchedule and PostgresFerretDocumentDB, each checked against its CRD.
+# The chart merges each document into the object of its kind: maps key by key, any
+# other value (including false, 0 and "") replaces the rendered one, a list replaces
+# the whole list, null removes a key. tpg-patch refuses spec.postgresVersion
+# (tpg-upgrade), spec.highAvailability (tpg-scale-instance), spec.storageClassName
+# and a smaller storageSize or walStorageSize.
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  resources:
+    data:
+      requests:
+        memory: 4Gi
+      limits:
+        memory: 8Gi
+---
+apiVersion: sql.tanzu.vmware.com/v1
+kind: PostgresBackupLocation
+spec:
+  retentionPolicy:
+    fullRetention:
+      number: 8

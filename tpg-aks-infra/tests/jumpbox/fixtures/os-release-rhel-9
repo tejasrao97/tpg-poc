@@ -1,0 +1,7 @@
+NAME="Red Hat Enterprise Linux"
+VERSION="9.6 (Plow)"
+ID="rhel"
+ID_LIKE="fedora"
+VERSION_ID="9.6"
+PLATFORM_ID="platform:el9"
+PRETTY_NAME="Red Hat Enterprise Linux 9.6 (Plow)"

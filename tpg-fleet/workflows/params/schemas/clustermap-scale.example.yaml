@@ -1,0 +1,11 @@
+# clusterMap of tpg-scale-instance: every key the workflow takes (generated; see
+# workflows/params/schemas/clustermap-scale.schema.json). Local files are packed
+# into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
+# yaml-language-server: $schema=clustermap-scale.schema.json
+aks-tpg-poc-01:
+  maxReadReplicas: 3
+  instances:
+    orders-db:
+      postgresVersion: postgres-17.6
+      replicas: 2
+      enableHAIfNeeded: true

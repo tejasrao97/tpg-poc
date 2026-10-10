@@ -1,0 +1,28 @@
+# Fields of a postgres patch document (postgresPatchFilePath, Round 15, D81) that a
+# tpg-instance chart values key also sets. The patch wins: the chart merges the
+# document into the object it renders. The workflows report every such field whose
+# value differs from the chart value as the warning PATCH_OVERRIDES_VALUE (D82), and
+# scripts/validate.sh prints it for every current patch of clusters/fleet.yaml.
+#   key     the object: the kind, or PostgresBackupSchedule/<full|incremental>
+#   patch   the path in the document
+#   values  the chart values path (clusters/_template, clusters/fleet.yaml, the
+#           instance's postgresValues patch)
+# Only fields whose values mean the same on both sides are listed: ferret.exposure
+# (clusterIP, internalLoadBalancer, loadBalancer) is not, because the chart turns it
+# into a serviceType and annotations. Values are compared as sorted JSON.
+# Read by workflows/scripts/lib.sh (patch_overrides; it ships in the tpg-scripts
+# ConfigMap) and scripts/validate.sh.
+- {key: Postgres, patch: .spec.storageSize, values: .instance.storageSize}
+- {key: Postgres, patch: .spec.walStorageSize, values: .instance.walStorageSize}
+- {key: Postgres, patch: .spec.resources, values: .instance.resources}
+- {key: PostgresBackupLocation, patch: .spec.retentionPolicy.fullRetention.number, values: .backup.fullRetention}
+- {key: PostgresBackupLocation, patch: .spec.retentionPolicy.fullRetention.type, values: .backup.fullRetentionType}
+- {key: PostgresBackupLocation, patch: .spec.retentionPolicy.diffRetention.number, values: .backup.diffRetention}
+- {key: PostgresBackupLocation, patch: .spec.storage.azure.container, values: .backup.container}
+- {key: PostgresBackupLocation, patch: .spec.storage.azure.endpoint, values: .backup.endpoint}
+- {key: PostgresBackupSchedule/full, patch: .spec.schedule, values: .backup.operatorSchedules.full}
+- {key: PostgresBackupSchedule/incremental, patch: .spec.schedule, values: .backup.operatorSchedules.incremental}
+- {key: PostgresFerretDocumentDB, patch: .spec.readWrite.replicas, values: .ferret.replicas}
+- {key: PostgresFerretDocumentDB, patch: .spec.readOnly.replicas, values: .ferret.readOnlyReplicas}
+- {key: PostgresFerretDocumentDB, patch: .spec.postgres.connectionDetails.readWrite.secretName, values: .ferret.secretName}
+- {key: PostgresFerretDocumentDB, patch: .spec.postgres.connectionDetails.readOnly.secretName, values: .ferret.readOnlySecretName}

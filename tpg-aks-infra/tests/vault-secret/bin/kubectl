@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# stub kubectl for tests/vault-secret: contexts, create token, exec into vault-0
+args=("$@"); rest=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in --) rest+=("$@"); break ;; --context|-n|-c) shift 2 ;; -i) shift ;; *) rest+=("$1"); shift ;; esac
+done
+set -- "${rest[@]}"
+case "$1" in
+  config) exit 0 ;;
+  create) [[ "$2 $3" == "token tpg-setup" ]] && { printf 'jwt-tpg-setup'; exit 0; }; exit 1 ;;
+  exec)
+    [[ "$2" == vault-0 && "$3" == "--" ]] || { echo "stub kubectl: ${args[*]}" >&2; exit 1; }
+    shift 3
+    if [[ "$1" == sh ]]; then IFS= read -r VAULT_TOKEN; export VAULT_TOKEN; shift 4; fi
+    [[ "$1" == vault ]] && shift
+    exec python3 "$(dirname "$0")/../fake-vault.py" "$@" ;;
+esac
+echo "stub kubectl: unsupported ${args[*]}" >&2; exit 1

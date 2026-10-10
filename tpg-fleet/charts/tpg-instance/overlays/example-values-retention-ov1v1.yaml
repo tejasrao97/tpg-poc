@@ -1,0 +1,9 @@
+# Example values overlay file (postgresValuesOverlayFilePath of tpg-day0 and
+# tpg-create-instance), as the workflows store it: <name>-<uid>.yaml, referenced by
+# clusters/fleet.example.yaml. Write the same content in a file on the machine that
+# submits the run and pass its path; the workflow stores it here under its own name
+# plus a 5-character UID. A fragment of the chart values (every key must exist in
+# charts/tpg-instance/values.yaml or clusters/_template/), merged over the instance's
+# values before the chart renders; a values patch of tpg-patch is merged after it.
+backup:
+  fullRetention: 4

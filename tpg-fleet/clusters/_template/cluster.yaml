@@ -1,0 +1,41 @@
+# Cluster defaults shared by every target cluster.
+#
+# The tpg-instances ApplicationSet passes this file to charts/tpg-instance as
+# the first value file; the workflows read it for cluster settings. Override
+# any key for one cluster under clusters.<name> in clusters/fleet.yaml.
+cluster:
+  # Upper bound for tpg-scale-instance (read replicas per instance)
+  maxReadReplicas: 3
+
+backup:
+  # Empty: pg-backups-<cluster> (the container Terraform creates per target)
+  container: ""
+  endpoint: blob.core.windows.net
+  # The pgBackRest repository path inside the container. Empty: /<namespace>/<instance>
+  # (Round 22), so no two instances share a repository. An instance created before
+  # Round 22 used /<namespace> (for example /pg-orders-db): pin it under backup.repoPath
+  # in its fleet.yaml entry before the next sync, or its stanza and backups are left behind.
+  # Never change it on a running instance.
+  repoPath: ""
+  # PostgresBackupLocation enableSSL: false talks plain HTTP to Azure Blob (the
+  # storage account must accept HTTP: Terraform backup_storage_https_only =
+  # false), true uses HTTPS. Override per cluster or per instance under backup in
+  # fleet.yaml, or with the tpg-day0 and tpg-create-instance input backupEnableSSL.
+  # With true, the workflows also write backup.caBundle (the storage account's
+  # root CAs from tpg-settings backupCaBundle); the chart refuses true without it.
+  enableSSL: false
+  # Schedule (CronWorkflows): full on Sunday, incremental Monday to Saturday.
+  # pgBackRest keeps a chain (a full and the incrementals after it) together:
+  # an incremental depends on every earlier backup of its chain, so a chain
+  # always expires as a whole.
+  # Retention, applied by the operator (PostgresBackupLocation retentionPolicy,
+  # Round 15, D84): fullRetentionType count keeps the newest fullRetention full
+  # backups with their incrementals; time keeps them for fullRetention days.
+  # Override per cluster or per instance under backup in fleet.yaml, with the
+  # tpg-day0 and tpg-create-instance inputs backupFullRetention and
+  # backupFullRetentionType, or a tpg-patch values file. A change restarts every
+  # instance that uses the backup location (operator 4.5 documentation).
+  fullRetention: 4
+  fullRetentionType: count
+  # Differential backups are only taken by hand (tpg-backup backupType=differential)
+  diffRetention: 6

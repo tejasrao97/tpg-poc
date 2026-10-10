@@ -1,0 +1,21 @@
+# Local working files (kubeconfigs, temporary manifests)
+.work/
+*.kubeconfig
+
+# Terraform / OpenTofu
+terraform/.terraform/
+terraform/.terraform.lock.hcl.bak
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/terraform.tfvars
+# Values of deploy-scripts/ (no secret, but names and addresses of this deployment)
+terraform/deploy.tfvars
+terraform/deploy.tfvars.*
+terraform/crash.log
+terraform/*.tfplan
+
+# Environment with names and optional secrets
+env.sh
+
+# Inventory for pre-created clusters (subscription and resource names)
+inventory/clusters.yaml

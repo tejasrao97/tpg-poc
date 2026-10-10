@@ -1,0 +1,139 @@
+# Cluster inventory for pre-created AKS clusters (scenario: --targets precreated).
+# Copy to inventory/clusters.yaml (git-ignored) and edit.
+# With --targets terraform, run.sh generates .work/inventory.yaml from the
+# Terraform outputs instead, in this same format.
+
+subscriptionId: <subscription-id>
+
+# Workstation or jump host CIDRs: Argo UI load balancers (hub install) and
+# the preflight authorized IP check.
+adminAllowedCidrs:
+  - <203.0.113.10/32>
+
+hub:
+  name: <aks-hub-name>
+  resourceGroup: <hub-resource-group>
+  # az: az aks get-credentials (needs Azure RBAC on the cluster resource)
+  # kubeconfig: read a context from an existing kubeconfig file
+  access: az
+  # az access only: true = --admin credentials (local accounts enabled);
+  # false = user credentials converted with kubelogin (Entra ID clusters)
+  adminCredentials: true
+  # kubeconfig access only
+  kubeconfig: ""
+  context: ""
+  # Outbound CIDRs of the hub. Leave empty to discover them with az
+  # (load balancer outbound IPs). Set them for NAT gateway or UDR egress.
+  egressCidrs: []
+
+targets:
+  - name: <aks-target-01>
+    resourceGroup: <target-resource-group>
+    wave: 0 # canary
+    access: az
+    adminCredentials: true
+    kubeconfig: ""
+    context: ""
+    backupContainer: pg-backups-<aks-target-01>
+    # Outbound CIDRs of this target, for vault.exposure public. Leave empty to
+    # discover them with az (load balancer or managed NAT gateway egress); set
+    # them for access: kubeconfig, user-defined routing or a firewall.
+    egressCidrs: []
+  - name: <aks-target-02>
+    resourceGroup: <target-resource-group>
+    wave: 1
+    access: az
+    adminCredentials: true
+    kubeconfig: ""
+    context: ""
+    backupContainer: pg-backups-<aks-target-02>
+    egressCidrs: []
+  - name: <aks-target-03>
+    resourceGroup: <target-resource-group>
+    wave: 1
+    access: az
+    adminCredentials: true
+    kubeconfig: ""
+    context: ""
+    backupContainer: pg-backups-<aks-target-03>
+    egressCidrs: []
+
+backup:
+  # Existing StorageV2 account for pgBackRest (shared key access enabled).
+  storageAccount: <storage-account-name>
+  resourceGroup: <storage-resource-group>
+  # Create missing backupContainer containers during preflight.
+  createContainers: true
+  # Where the account key comes from: az (az storage account keys list),
+  # env (BACKUP_STORAGE_KEY) or terraform.
+  keySource: az
+  # Container for the archived Argo Workflows logs in the same account (the
+  # preflight creates it with createContainers: true). Delete old logs with a
+  # lifecycle rule on the account (see docs/README-manual-steps.md 3.3).
+  logsContainer: argo-logs
+  # true when every instance uses enableSSL: true. The fleet default is
+  # enableSSL: false (plain HTTP to Blob), which needs "Secure transfer
+  # required" off on the account; the preflight fails when the account
+  # refuses HTTP and this is false.
+  httpsOnly: false
+  # PEM bundle of the certificate authorities the blob endpoint chains to, for
+  # instances with enableSSL: true (PostgresBackupLocation caBundle). Relative
+  # paths are taken from the tpg-aks-infra root. Empty: the Azure root CAs in
+  # terraform/modules/storage/azure-ca-roots.pem. The hub-secrets step checks
+  # the endpoint against it (openssl) and stores it in tpg-settings.
+  caBundleFile: ""
+
+network:
+  # true when the clusters run Advanced Container Networking Services (AKS
+  # advanced networking, security): the Postgres network policies then allow
+  # backup egress to *.blob.core.windows.net only and accept egressToFqdns.
+  acnsEnabled: false
+
+storage:
+  # Managed-disk SKU of the StorageClass tpg-data-retain, used by the Postgres data
+  # and WAL volumes and by the Vault server volume on the hub:
+  #   StandardSSD_LRS, StandardSSD_ZRS, Premium_LRS, Premium_ZRS, PremiumV2_LRS
+  # The ZRS options need a region with availability zones.
+  dataDiskSku: Premium_ZRS
+
+monitoring:
+  # Standalone option: how the target Prometheus agents reach the hub
+  # remote-write gateway (https with basic auth, credential in Vault):
+  #   internal  Azure internal load balancer; targets need a network path to the hub
+  #   public    public load balancer limited to the target egress CIDRs
+  #             (targets[].egressCidrs or discovered with az) and extraSourceCidrs
+  remoteWriteExposure: public
+  extraSourceCidrs: []
+  # Azure option: Azure Monitor workspace that every cluster sends its
+  # Prometheus metrics to (resource ID). The addons step enables the managed
+  # Prometheus add-on on a cluster that does not have it.
+  azureMonitorWorkspaceId: ""
+  # Azure option: Azure Managed Grafana (resource group and name) for the dashboards and alerts
+  grafanaResourceGroup: ""
+  grafanaName: ""
+
+vault:
+  # Required. How HashiCorp Vault on the hub unseals (there is no default: the
+  # deployment states the choice, as Terraform does with vault_unseal_mode):
+  #   shamir          5 unseal key shares (threshold 3) shown once at init; unseal by
+  #                   hand after every vault-0 restart: scripts/run.sh ... --only vault-unseal
+  #   azure-keyvault  auto-unseal with an Azure Key Vault key through workload identity
+  #                   (fill in azureKeyVault; preflight checks the role and federation)
+  unsealMode: shamir
+  # How the target clusters reach Vault (their Vault Secrets Operator):
+  #   internal  Azure internal load balancer on the hub node subnet; targets need a
+  #             network path to it (same VNet or peering)
+  #   public    public load balancer limited to the target egress CIDRs
+  #             (targets[].egressCidrs or discovered with az) and extraSourceCidrs
+  exposure: public
+  extraSourceCidrs: []
+  # azure-keyvault mode only. The Key Vault is created with purge protection off, so
+  # deleting it (or the key) destroys the Vault data for good: the recovery keys allow a
+  # rekey or a new root token, they do not decrypt the storage.
+  azureKeyVault:
+    name: ""                 # Key Vault; access is granted with access policies, not RBAC
+    keyName: vault-unseal    # RSA key, operations wrapKey and unwrapKey
+    tenantId: ""
+    clientId: ""             # user-assigned identity with an access policy on the vault
+                             # (Get, WrapKey, UnwrapKey) and a federated credential for
+                             # system:serviceaccount:vault:vault on the hub OIDC issuer

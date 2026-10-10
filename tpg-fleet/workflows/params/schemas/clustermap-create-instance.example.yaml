@@ -1,0 +1,47 @@
+# clusterMap of tpg-create-instance: every key the workflow takes (generated; see
+# workflows/params/schemas/clustermap-create-instance.schema.json). Local files are packed
+# into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
+# yaml-language-server: $schema=clustermap-create-instance.schema.json
+aks-tpg-poc-01:
+  maxReadReplicas: 3
+  # backupCaBundleFile: ./azure-ca.pem   # or this instead of backupCaBundleVaultSecret (one source per level)
+  backupCaBundleVaultSecret: azure-storage
+  instances:
+    orders-db:
+      postgresVersion: postgres-17.6
+      highAvailability: true
+      readReplicas: 1
+      storageSize: 50Gi
+      walStorageSize: 10Gi
+      storageClass: tpg-data-retain
+      cpu: '2'
+      memory: 8Gi
+      backupSchedule: operator
+      operatorFullSchedule: 0 1 * * 0
+      operatorIncrementalSchedule: 0 1 * * 1-6
+      ferret: true
+      ferretReplicas: 2
+      ferretReadOnlyReplicas: 1
+      ferretExposure: clusterIP
+      ferretSecretName: orders-db-app-user-db-secret
+      ferretReadOnlySecretName: orders-db-read-only-user-db-secret
+      backupEnableSSL: true
+      disableInitialBackup: false
+      backupCaBundleFile: 'repo:ca-bundles/azure-storage.pem'
+      # backupCaBundleVaultSecret: azure-storage   # or this instead of backupCaBundleFile (one source per level)
+      backupFullRetention: 4
+      backupFullRetentionType: count
+      postgresOverlayFilePath: [./orders-resources.yaml, 'repo:charts/tpg-instance/overlays/team-backup-schedule.yaml']
+      postgresValuesOverlayFilePath: ~/overlays/orders-values.yaml
+      exposure: internalLoadBalancer
+      serviceAnnotations: {service.beta.kubernetes.io/azure-dns-label-name: orders}
+      readOnlyExposure: clusterIP
+      readOnlyServiceAnnotations: {team: orders}
+      allowedSourceRanges: [10.20.0.0/16]
+      internalLoadBalancerSubnet: snet-apps
+      networkPolicy: baseline
+      ingressFromNamespaces: [orders-app]
+      ingressFromPodLabels: {app: orders-api}
+      ingressFromCidrs: [10.30.0.0/24]
+      egressToCidrs: [10.40.0.0/24]
+      egressToFqdns: [api.example.com]

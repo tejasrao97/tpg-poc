@@ -1,0 +1,13 @@
+# clusterMap of tpg-network-policy: every key the workflow takes (generated; see
+# workflows/params/schemas/clustermap-network-policy.schema.json). Local files are packed
+# into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
+# yaml-language-server: $schema=clustermap-network-policy.schema.json
+aks-tpg-poc-01:
+  instances:
+    orders-db:
+      postgresVersion: postgres-17.6
+      ingressFromNamespaces: [orders-app]
+      ingressFromPodLabels: {app: orders-api}
+      ingressFromCidrs: [10.30.0.0/24]
+      egressToCidrs: [10.40.0.0/24]
+      egressToFqdns: [api.example.com]

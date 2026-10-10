@@ -1,0 +1,10 @@
+# clusterMap of tpg-backup: every key the workflow takes (generated; see
+# workflows/params/schemas/clustermap-backup.schema.json). Local files are packed
+# into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
+# yaml-language-server: $schema=clustermap-backup.schema.json
+aks-tpg-poc-01:
+  instances:
+    orders-db:
+      postgresVersion: postgres-17.6
+      backupType: full
+      backupTimeoutSeconds: 3600

@@ -1,0 +1,13 @@
+# clusterMap of tpg-delete-apps: every key the workflow takes (generated; see
+# workflows/params/schemas/clustermap-delete-apps.schema.json). Local files are packed
+# into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
+# yaml-language-server: $schema=clustermap-delete-apps.schema.json
+aks-tpg-poc-01:
+  deleteOperator: true
+  force: false
+  instances:
+    orders-db:
+      postgresVersion: postgres-17.6
+      purgePvcs: true
+      purgeNamespace: true
+      finalBackup: required

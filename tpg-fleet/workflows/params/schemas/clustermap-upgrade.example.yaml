@@ -1,0 +1,11 @@
+# clusterMap of tpg-upgrade: every key the workflow takes (generated; see
+# workflows/params/schemas/clustermap-upgrade.schema.json). Local files are packed
+# into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
+# yaml-language-server: $schema=clustermap-upgrade.schema.json
+aks-tpg-poc-01:
+  operatorVersion: v4.5.0
+  instances:
+    orders-db:
+      postgresVersion: postgres-17.6
+      preUpgradeBackup: true
+      allowMajor: false

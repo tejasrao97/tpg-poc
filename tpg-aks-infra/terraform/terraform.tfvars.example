@@ -1,0 +1,172 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is git-ignored.
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+location              = "eastus2"
+prefix                = "tpgpoc"
+resource_group_name   = "rg-tpgpoc" # every Terraform resource is created in this group
+hub_cluster_name      = "aks-tpg-hub"
+target_cluster_prefix = "aks-tpg-poc"
+target_cluster_count  = 3
+
+# --- Access --------------------------------------------------------------
+# Your workstation public IP (curl -s https://ifconfig.me): limits the UI load
+# balancers and SSH to the jumpbox, and with byo also the API servers.
+admin_allowed_cidrs = ["203.0.113.10/32"]
+
+# --- Networking ----------------------------------------------------------
+# managed (default since Round 19): AKS-managed VNets; public API servers
+#   (api_access_mode is not used); no Network Contributor role assignments needed.
+# byo: VNet + /22 subnet per cluster + static hub egress IP; needs
+#   create_role_assignments = true (the cluster identities need Network
+#   Contributor on their subnets before the clusters exist).
+network_mode = "managed"
+
+# byo only: restricted (default) limits the API servers to admin_allowed_cidrs
+# (targets also the hub egress IP); public opens them. ["0.0.0.0/0"] in
+# admin_allowed_cidrs is public as well.
+# api_access_mode = "restricted"
+
+# --- Clusters ------------------------------------------------------------
+# null = AKS default version. List: az aks get-versions -l eastus2 -o table
+kubernetes_version = null
+sku_tier           = "Standard"
+os_sku             = "Ubuntu2404"
+
+enable_autoscaling = true
+
+# Each pool picks its own availability zones: 1 to 3 of "1", "2" and "3".
+# node_count is the initial count; min_count and max_count bound the autoscaler
+# (length(zones) <= min_count <= node_count <= max_count), so every selected
+# zone can hold a node. With enable_autoscaling = false only node_count is used.
+
+# System pool: no Postgres data, so no zone rule applies. One zone and one node
+# keeps the POC cheap; the hub's Argo CD, Vault and monitoring pods then have no
+# zone redundancy and go down with the node. Use ["1","2","3"] with 3 nodes for
+# a hub that must survive a zone or a node restart.
+system_pool = {
+  vm_size         = "Standard_D8ds_v5"
+  os_disk_type    = "Ephemeral"
+  os_disk_size_gb = 300
+  max_pods        = 110
+  zones           = ["1"]
+  node_count      = 1
+  min_count       = 1
+  max_count       = 5
+}
+
+# pgdata pool: Postgres instances deployed with highAvailability=true need
+# 3 zones and 3 nodes here. Fewer is allowed (Terraform warns) and only
+# single-node instances can then be deployed: tpg-day0 reports such a cluster
+# BLOCKED with PGDATA_POOL_NOT_HA_CAPABLE instead of deploying an HA instance.
+postgres_pool = {
+  vm_size         = "Standard_D8ds_v5"
+  os_disk_type    = "Managed"
+  os_disk_size_gb = 256
+  max_pods        = 30
+  zones           = ["1", "2", "3"]
+  node_count      = 3
+  min_count       = 3
+  max_count       = 6
+}
+
+# Managed-disk SKU of the StorageClass tpg-data-retain, used by the Postgres
+# data and WAL volumes and by the Vault server volume on the hub:
+#   StandardSSD_LRS, StandardSSD_ZRS, Premium_LRS, Premium_ZRS, PremiumV2_LRS
+# The ZRS options need a region with availability zones.
+postgres_data_disk_sku = "Premium_ZRS"
+
+# Backup storage account. false (default) accepts plain HTTP as well as HTTPS,
+# because the Postgres backup locations use enableSSL: false unless a cluster or
+# instance sets it to true. Set true only when every instance uses enableSSL: true.
+backup_storage_https_only = false
+# enableSSL: true needs the CA bundle of the storage account. Terraform reads the
+# chain of the blob endpoint, checks it against the Azure root CAs in
+# modules/storage/azure-ca-roots.pem and outputs backup_storage_ca_bundle; run.sh
+# stores it in tpg-settings (backupCaBundle) for the workflows. Nothing to set here.
+
+# Advanced Container Networking Services (paid AKS feature): FQDN rules in the
+# Postgres network policies (backup egress to *.blob.core.windows.net only, and
+# egressToFqdns). false: backup egress is any address on 443 (and 80).
+acns_enabled = false
+# Archived Argo Workflows logs (container argo-logs): deleted after this many days.
+argo_logs_retention_days = 90
+
+# Role assignments need Microsoft.Authorization/roleAssignments/write, which a
+# Contributor does not have. Set this to false to create everything else and get
+# the az commands in the output role_assignments_to_create instead. The Vault
+# unseal Key Vault never needs it: it uses Key Vault access policies.
+# Default false (Round 19). true needs Owner or User Access Administrator, and
+# run_fleet_setup needs true.
+# create_role_assignments = false
+
+upgrade_max_surge = "10%"
+
+# Upgrades are manual by default. To match the portal cluster:
+# automatic_upgrade_channel = "patch"
+# node_os_upgrade_channel   = "NodeImage"
+# maintenance_window = { day_of_week = "Sunday", start_time = "00:00", duration_hours = 8, utc_offset = "+00:00" }
+
+enable_workload_identity     = true
+image_cleaner_interval_hours = 168
+enable_azure_policy          = true
+
+# --- Monitoring ----------------------------------------------------------
+enable_container_insights = false # true: Log Analytics workspace + Container Insights on every cluster
+enable_azure_monitor      = false # option A: managed Prometheus + Managed Grafana
+grafana_major_version     = 12
+
+# --- Jumpbox (optional) ---------------------------------------------------
+# A Linux VM for operators: static public IP, SSH with a key from
+# admin_allowed_cidrs only, a managed identity with Contributor on the resource
+# group and Cluster Admin on every cluster. Terraform copies scripts/ and env.sh
+# to the admin user's home over SSH and runs scripts/jumpbox/setup-jumpbox.sh
+# there, so the machine running Terraform must be inside admin_allowed_cidrs.
+# With restricted API servers its IP is added to every cluster's authorized IP
+# ranges. README.md, "Jumpbox (optional)".
+enable_jumpbox = false
+# Terraform generates the admin user's key pair; save the private key with
+#   terraform output -raw jumpbox_ssh_private_key > ~/.ssh/tpg-jumpbox && chmod 600 ~/.ssh/tpg-jumpbox
+# Optional: your own key as well, and its private key for the provisioners.
+# jumpbox_ssh_public_key      = "ssh-ed25519 AAAA... you@workstation"  # content of the .pub file
+# jumpbox_ssh_private_key_path = "~/.ssh/id_ed25519"                  # null: the generated key
+# jumpbox_admin_username = "tpgadmin"
+# jumpbox_os             = "ubuntu-24.04" # ubuntu-22.04, rhel-9 (pay-as-you-go) or rocky-9 (accept the Marketplace terms first)
+# jumpbox_vm_size        = "Standard_D4s_v5"
+# jumpbox_os_disk_gb     = 64
+# remote-exec (default): Terraform installs the tools over SSH, output in terraform apply;
+# cloud-init: the VM runs /home/<admin>/setup-jumpbox.sh at first boot (deploy-scripts/deploy.sh)
+# jumpbox_setup_method   = "remote-exec"
+
+# --- Fleet repository and fleet setup from the jumpbox (optional) ----------
+# create_fleet_repo: upload tpg-fleet.zip to the jumpbox, create the private
+# GitHub repository fleet_repo_owner/fleet_repo_name, run set-repo-url.sh and
+# validate.sh, and push to fleet_repo_branch. Token: export TF_VAR_git_admin_pat
+# (classic: scope repo; fine-grained: Administration and Contents, Read and write).
+create_fleet_repo = false
+# fleet_repo_owner    = "<github-user-or-org>"
+# fleet_repo_name     = "poc-tpg-fleet-v15"
+# fleet_repo_branch   = "main"
+# fleet_zip_path      = "/home/<you>/tpg-fleet.zip"   # absolute only; null: tpg-fleet.zip next to the tpg-aks-infra folder
+# fleet_repo_validate = false                   # default; true also needs FLEET_VALIDATE=true (or fleet_repo_validate=true) in env.sh
+# fleet_repo_force    = false                   # default; true also needs FLEET_REPO_FORCE=true (or fleet_repo_force=true) in env.sh                   # true: replace a branch that holds other content
+# github_url          = "https://github.com"    # GitHub Enterprise Server: https://<host>
+
+# run_fleet_setup: on the jumpbox, source env.sh and run
+#   scripts/run.sh --hub install --targets terraform --expose-ui --save-vault-recovery-keys
+# once every cluster exists. Needs env.sh (copied from env.sh.example and edited),
+# create_role_assignments = true, and the tokens exported in your shell:
+#   export TF_VAR_broadcom_token=... TF_VAR_git_read_pat=... TF_VAR_git_push_pat=...
+# The Vault keys are written to ~/.tpg/vault-keys.txt on the jumpbox (output
+# jumpbox_vault_keys_file): copy the file off the jumpbox, then delete it.
+run_fleet_setup = false
+
+# --- HashiCorp Vault (hub) -------------------------------------------------
+# shamir (default): unseal keys shown once at init; unseal by hand after restarts
+#                   (scripts/run.sh ... --only vault-unseal)
+# azure-keyvault:   auto-unseal with a Key Vault key and a workload identity (created here)
+# Required: no default. Pick one of the two.
+vault_unseal_mode = "shamir"
+# azure-keyvault mode only. Purge protection is off so terraform destroy removes the Key
+# Vault; with it off, deleting the Key Vault or the key destroys the Vault data for good.
+# key_vault_purge_protection = false
+# key_vault_soft_delete_days = 7

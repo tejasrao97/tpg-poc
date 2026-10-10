@@ -1,0 +1,110 @@
+# Argo CD Helm values for the hub cluster (chart argo/argo-cd 10.9.1, Argo CD v3.5.3).
+# loadBalancerSourceRanges is injected by scripts/00-install-argo.sh from the
+# Terraform output admin_allowed_cidrs.
+
+dex:
+  enabled: false
+
+configs:
+  cm:
+    # Annotation tracking is the Argo CD 3.x default; set explicitly because the
+    # Day 0 pre-check reads argocd.argoproj.io/tracking-id.
+    application.resourceTrackingMethod: annotation
+    # Local account used by Argo Workflows to call the Argo CD API (sync only).
+    accounts.workflow-bot: apiKey
+    # How often Argo CD re-reads Git and compares every Application (default
+    # 180s). 60s shortens the time an Application lags behind a change the
+    # workflows did not trigger themselves. The workflows do not depend on it:
+    # they hard-refresh the Application and check the target cluster directly.
+    timeout.reconciliation: 60s
+    # Health of Vault Secrets Operator VaultStaticSecrets (backup-storage and
+    # regsecret in every instance namespace): Healthy once the Secret is synced
+    # from Vault, so the Postgres sync wave starts only after the Secrets exist.
+    # The Vault Secrets Operator publishes the conditions SecretSynced, Healthy
+    # and Ready; which of them a given version sets varies, so Ready decides when
+    # it is there and SecretSynced otherwise, and neither means Progressing.
+    # scripts/hub/existing/check-argo.sh reads this key from this file.
+    resource.customizations.health.secrets.hashicorp.com_VaultStaticSecret: |
+      hs = {}
+      if obj.status ~= nil and obj.status.conditions ~= nil then
+        local cond = nil
+        local synced = nil
+        for _, c in ipairs(obj.status.conditions) do
+          if c.type == "SecretSynced" then synced = c end
+          if c.type == "Ready" then
+            cond = c
+          elseif c.type == "SecretSynced" and (cond == nil or cond.type ~= "Ready") then
+            cond = c
+          end
+        end
+        if cond ~= nil then
+          if cond.status == "True" then
+            hs.status = "Healthy"
+            hs.message = "Secret synced from Vault (" .. cond.type .. ")"
+          else
+            hs.status = "Degraded"
+            hs.message = cond.message or (synced ~= nil and synced.message) or cond.reason
+              or ("condition " .. cond.type .. " is " .. tostring(cond.status))
+          end
+          return hs
+        end
+      end
+      hs.status = "Progressing"
+      hs.message = "Waiting for the Vault Secrets Operator"
+      return hs
+    # Health of a Tanzu Postgres instance. Without this check Argo CD knows
+    # nothing about the Postgres kind and calls it Healthy as soon as it is
+    # applied, while the pods are still being created or are failing.
+    # status.currentState: Running is Healthy; Failed and Unavailable are
+    # Degraded; anything else (Created, Pending, no status yet) is Progressing.
+    resource.customizations.health.sql.tanzu.vmware.com_Postgres: |
+      hs = {}
+      if obj.status ~= nil and obj.status.currentState ~= nil then
+        local s = obj.status.currentState
+        if s == "Running" then
+          hs.status = "Healthy"
+          hs.message = "currentState Running"
+        elseif s == "Failed" or s == "Unavailable" then
+          hs.status = "Degraded"
+          hs.message = "currentState " .. s
+        else
+          hs.status = "Progressing"
+          hs.message = "currentState " .. s
+        end
+        return hs
+      end
+      hs.status = "Progressing"
+      hs.message = "Waiting for the operator to report status.currentState"
+      return hs
+  params:
+    # Keep TLS on the server; the LoadBalancer exposes HTTPS 443.
+    server.insecure: false
+  rbac:
+    # role:tpg-sync: the workflows sync the tpg target Applications as workflow-bot.
+    # The marked block denies people sync (also rollback), override, update and
+    # delete on project tpg (scripts/lib/argo-rbac.sh; the admission policy
+    # tpg-application-sync in tpg-fleet refuses the same at the Kubernetes API).
+    # A deny wins over every allow, including role:admin from the built-in policy.
+    # Add the same four lines for every other role or SSO group you grant
+    # applications access in project tpg; steps/60-verify.sh checks it.
+    # The hub Applications are in project tpg-hub and stay manageable.
+    policy.csv: |
+      p, role:tpg-sync, applications, get, tpg/*, allow
+      p, role:tpg-sync, applications, sync, tpg/*, allow
+      p, role:tpg-sync, projects, get, tpg, allow
+      p, role:tpg-sync, repositories, get, *, allow
+      g, workflow-bot, role:tpg-sync
+      # >>> tpg-fleet rbac >>>
+      # People may not sync, override, update or delete the tpg target Applications:
+      # the tpg workflows sync them as workflow-bot (role:tpg-sync). Written by tpg-aks-infra.
+      p, role:admin, applications, sync, tpg/*, deny
+      p, role:admin, applications, override, tpg/*, deny
+      p, role:admin, applications, update, tpg/*, deny
+      p, role:admin, applications, delete, tpg/*, deny
+      # <<< tpg-fleet rbac <<<
+
+server:
+  service:
+    type: LoadBalancer
+    servicePortHttps: 443
+    loadBalancerSourceRanges: []

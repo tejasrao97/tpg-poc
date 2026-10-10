@@ -1,0 +1,446 @@
+# Keys accepted in the clusterMap input of the tpg workflows.
+#
+# clusterMap is optional on tpg-day0, tpg-create-instance, tpg-upgrade,
+# tpg-patch, tpg-backup, tpg-scale-instance,
+# tpg-delete-instance, tpg-delete-apps and tpg-network-policy. It selects the targets (clusters and the instances on each)
+# and carries per-cluster and per-instance values:
+#
+#   <cluster>:                     a registered cluster
+#     <cluster key>: <value>       keys under "cluster" below
+#     instances:
+#       <instance>:                a DNS label (namespace pg-<instance>)
+#         <instance key>: <value>  keys under "instance" below
+#
+# Written as YAML or JSON. Every key is checked by workflows/scripts/clustermap.py
+# in the validate step: its type, whether the workflow accepts it, and whether a
+# required value is present (the map key, else the workflow input named in
+# "flag"). An unknown key fails the run with the closest known key.
+#
+# Adding a key is one entry here:
+#   type       string | name | boolean | integer | posint | quantity | enum |
+#              operatorVersion | postgresVersion |
+#              patchFile (one .yaml/.yml file: a path of the submitting machine,
+#                absolute or relative, whose contents come in patchFiles, or
+#                repo:<path> in the fleet repository) |
+#              patchFileList (a list of such files) |
+#              caFile (one PEM file: a path of the submitting machine or
+#                repo:<path>, .pem, .crt or .cer) |
+#              kindList (Postgres, PostgresBackupLocation, PostgresBackupSchedule,
+#                PostgresFerretDocumentDB, postgresValues, operatorValues, or all) |
+#              nameList (DNS labels) | cidrList (IPv4/IPv6 CIDRs) |
+#              fqdnList (host names, * allowed as the first label) |
+#              stringMap (annotation or label keys to string values) |
+#              cron (5 fields; allowNone: true also takes none or an empty value) |
+#              k8sName (a Kubernetes object name)
+#              A list is a YAML/JSON list or a comma-separated string; a
+#              stringMap is a YAML/JSON mapping. Neither may be empty: a key
+#              that should no longer apply is removed, not set to [] or {}
+#              (an empty value cannot clear a value set at a lower level).
+#   values     enum only: the accepted values
+#   repoDir    patchFile, patchFileList: the folder a repo:<path> must be in
+#   workflows  workflow -> required | optional | guard
+#              required: the key or the workflow input "flag" must be set
+#              optional: used when set, otherwise the workflow input "flag" applies
+#              guard:    when set, a target whose live value differs is skipped
+#                        (SKIPPED_VERSION_MISMATCH); nothing is changed
+#   doc        one sentence for the generated key reference (docs/workflow-commands.md,
+#              section 3) and the descriptions of the clusterMap schemas
+#   flag       the workflow input that supplies the default (default: the key name)
+#   fleet      tpg-day0, tpg-create-instance and tpg-network-policy: clusters/fleet.yaml
+#              paths the value is written to,
+#              relative to clusters.<cluster> or clusters.<cluster>.instances.<instance>
+#   format     tpg-day0 and tpg-create-instance: how the value is written:
+#              string (default) | number | boolean | list | map
+# A key with "fleet" needs no code: fleet-day0.sh writes it. Keys without "fleet"
+# are read by the step script of each workflow that lists them.
+#
+# renamed: keys that were renamed (Round 15); the old name is refused with the new one.
+version: 1
+
+renamed:
+  valuesPatchFilePath: postgresValuesPatchFilePath
+  enableSSL: backupEnableSSL
+
+workflows:
+  - day0
+  - create-instance
+  - upgrade
+  - patch
+  - backup
+  - scale
+  - delete-instance
+  - delete-apps
+  - network-policy
+
+cluster:
+  operatorVersion:
+    doc: "Operator chart version of the cluster. tpg-day0: required (the key or the input operatorVersion); tpg-upgrade: the version to upgrade this cluster to"
+    type: operatorVersion
+    workflows: {day0: required, upgrade: optional}
+    fleet: [.operator.version]
+    format: operatorVersion
+  maxReadReplicas:
+    doc: "The cap on readReplicas of every instance of the cluster (clusters.<c>.cluster.maxReadReplicas, template default 3), 1 or more. tpg-scale-instance: the input maxReadReplicas is its default, and a cluster entry may carry it without instances (only the cap changes)"
+    # the cap on readReplicas of every instance of the cluster (default 3).
+    # tpg-scale-instance (Round 14, D80) writes it through scale-instance.sh and
+    # takes the input of the same name as its default; tpg-day0 and
+    # tpg-create-instance have no input for it
+    type: posint
+    workflows: {day0: optional, create-instance: optional, scale: optional}
+    fleet: [.cluster.maxReadReplicas]
+    format: number
+  operatorValuesPatchFilePath:
+    doc: "An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:patches/operator/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0"
+    # a file of the submitting machine (its contents come in patchFiles) or
+    # repo:patches/operator/<file>; stored as patches/operator/<name>-<uid>.yaml.
+    type: patchFile
+    repoDir: patches/operator/
+    workflows: {patch: optional}
+  operatorValuesOverlayFilePath:
+    doc: "An operator values overlay file (Round 22; tpg-day0 only; was operatorValuesPatchFilePath): a path of the submitting machine (its contents in patchFiles) or repo:overlays/operator/<file>. Applied when the run installs the operator, recorded as clusters.<c>.operator.overlays.values; an operator that runs with another overlay is BLOCKED OVERLAY_USE_TPG_PATCH (use tpg-patch operatorValuesPatchFilePath, which stacks on top)"
+    # stored as overlays/operator/<name>-<uid>.yaml; the tpg-operator ApplicationSet reads
+    # overlays/operator/clusters/<cluster>.yaml before the patch copy
+    type: patchFile
+    repoDir: overlays/operator/
+    workflows: {day0: optional}
+  patchMode:
+    doc: "apply or clear, for the operator file of this cluster and the default of its instances"
+    # apply | clear (Round 14); the default of the cluster's instances too
+    type: enum
+    values: [apply, clear]
+    workflows: {patch: optional}
+  backupCaBundleFile:
+    doc: "The backup CA bundle of the cluster's instances with backupEnableSSL: a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Not together with backupCaBundleVaultSecret on this level; an instance key wins"
+    # enableSSL instances (Round 15, D86): the CA bundle of the storage account as a
+    # PEM file of the submitting machine (contents in patchFiles) or
+    # repo:ca-bundles/<file>. The most specific level wins (instance key, cluster
+    # key, input); a file and a Vault secret on one level are refused.
+    # tpg-patch: replaces the bundle of running enableSSL instances
+    type: caFile
+    repoDir: ca-bundles/
+    flag: ""
+    workflows: {day0: optional, create-instance: optional, patch: optional}
+  backupCaBundleVaultSecret:
+    doc: "The backup CA bundle from Vault tpg/ca-bundles/<name> (key caBundle; tpg-aks-infra scripts/vault-secret.sh ca put). Not together with backupCaBundleFile on this level; an instance key wins"
+    # the CA bundle from Vault: tpg/ca-bundles/<name>, key caBundle (Round 15, D86;
+    # tpg-aks-infra scripts/vault-secret.sh ca put <name> <file> writes it)
+    type: k8sName
+    flag: ""
+    workflows: {day0: optional, create-instance: optional, patch: optional}
+  clearKinds:
+    doc: "patchMode=clear: the kinds whose current file is removed. operatorValues clears the operator file of the cluster; instance kinds are the default of its instances"
+    # patchMode=clear (Round 15): the kinds whose current patch is removed;
+    # operatorValues here, the instance kinds as the default of the cluster's instances
+    type: kindList
+    workflows: {patch: optional}
+  deleteOperator:
+    doc: "true deletes the operator and its CRDs after the listed instances"
+    type: boolean
+    workflows: {delete-apps: optional}
+    flag: ""
+  force:
+    doc: "As the force input, for this cluster"
+    type: boolean
+    workflows: {delete-apps: optional}
+
+instance:
+  postgresVersion:
+    doc: "tpg-day0, tpg-create-instance and tpg-upgrade: the version to deploy or upgrade to. Guard in the other workflows: when set, an instance that runs another version is skipped (SKIPPED_VERSION_MISMATCH) and nothing is changed for it"
+    type: postgresVersion
+    workflows:
+      day0: required
+      create-instance: required
+      upgrade: optional
+      patch: guard
+      backup: guard
+      scale: guard
+      delete-instance: guard
+      delete-apps: guard
+      network-policy: guard
+    fleet: [.instance.postgresVersion]
+    format: postgresVersion
+  highAvailability:
+    doc: "true: primary and standby (plus readReplicas); false: a single node"
+    type: boolean
+    workflows: {day0: required, create-instance: required}
+    fleet: [.instance.highAvailability.enabled]
+    format: boolean
+  readReplicas:
+    doc: "Read replicas: 1 or more with highAvailability true, 0 with false"
+    type: integer
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.highAvailability.readReplicas]
+    format: number
+  storageSize:
+    doc: "Size of the data volume"
+    type: quantity
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.storageSize]
+  walStorageSize:
+    doc: "Size of the WAL volume"
+    type: quantity
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.walStorageSize]
+  storageClass:
+    doc: "StorageClass of the volumes"
+    type: name
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.storageClassName]
+  cpu:
+    doc: "CPU request and limit of the database container"
+    type: quantity
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.resources.data.requests.cpu, .instance.resources.data.limits.cpu]
+  memory:
+    doc: "Memory request and limit of the database container"
+    type: quantity
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.resources.data.requests.memory, .instance.resources.data.limits.memory]
+  backupSchedule:
+    doc: "fleet: the backup CronWorkflows; none: no scheduled backups; operator: PostgresBackupSchedule objects (operatorFullSchedule, operatorIncrementalSchedule)"
+    # fleet: included in the backup CronWorkflows; none: backup.scheduled false;
+    # operator: backup.scheduled false and backup.operatorSchedules (PostgresBackupSchedule
+    # objects, design decision D70), written by fleet-day0.sh
+    type: enum
+    values: [fleet, none, operator]
+    workflows: {day0: optional, create-instance: optional}
+  operatorFullSchedule:
+    doc: "backupSchedule operator: the cron of the full backups (UTC)"
+    # backupSchedule=operator: backup.operatorSchedules.full
+    type: cron
+    workflows: {day0: optional, create-instance: optional}
+  operatorIncrementalSchedule:
+    doc: "backupSchedule operator: the cron of the incremental backups (UTC); none or an empty value: no incremental schedule"
+    # backupSchedule=operator: backup.operatorSchedules.incremental; none (or an
+    # empty value) renders the full schedule only
+    type: cron
+    allowNone: true
+    workflows: {day0: optional, create-instance: optional}
+  # ---- FerretDB (design decision D71): the ferret block of the instance entry,
+  # written by fleet-day0.sh only when ferret is true (false removes the block)
+  ferret:
+    doc: "true: a FerretDB for the instance; false: none (removes it)"
+    type: boolean
+    workflows: {day0: optional, create-instance: optional}
+  ferretReplicas:
+    doc: "FerretDB read-write proxies, 1 or more"
+    type: posint
+    workflows: {day0: optional, create-instance: optional}
+  ferretReadOnlyReplicas:
+    doc: "FerretDB read-only proxies (above 0 needs highAvailability true)"
+    type: integer
+    workflows: {day0: optional, create-instance: optional}
+  ferretExposure:
+    doc: "FerretDB Services: clusterIP, internalLoadBalancer or loadBalancer"
+    type: enum
+    values: [clusterIP, internalLoadBalancer, loadBalancer]
+    workflows: {day0: optional, create-instance: optional}
+  ferretSecretName:
+    doc: "FerretDB connection Secret (default: the operator's <instance>-app-user-db-secret)"
+    type: k8sName
+    workflows: {day0: optional, create-instance: optional}
+  ferretReadOnlySecretName:
+    doc: "FerretDB read-only connection Secret (default: <instance>-read-only-user-db-secret)"
+    type: k8sName
+    workflows: {day0: optional, create-instance: optional}
+  backupEnableSSL:
+    doc: "Backups over HTTPS (spec.storage.azure.enableSSL); the CA bundle comes from backupCaBundleFile, backupCaBundleVaultSecret or ConfigMap tpg-settings backupCaBundle. Renamed from enableSSL in Round 15"
+    # PostgresBackupLocation enableSSL (renamed from enableSSL in Round 15)
+    type: boolean
+    workflows: {day0: optional, create-instance: optional}
+  disableInitialBackup:
+    doc: "Round 22: true writes the annotation sql.tanzu.vmware.com/skip-initial-backup: \"true\" on the new Postgres instance, so the operator takes no initial backup at creation; false (the default) leaves the operator's behaviour. Only new instances"
+    # chart value instance.disableInitialBackup; templates/postgres.yaml writes the annotation only when true
+    type: boolean
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.disableInitialBackup]
+    format: boolean
+    fleet: [.backup.enableSSL]
+    format: boolean
+  backupCaBundleFile:
+    doc: "The backup CA bundle of this instance (backupEnableSSL true): a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Wins over the cluster level and the inputs; not together with backupCaBundleVaultSecret"
+    # enableSSL instances (Round 15, D86): the CA bundle of the storage account as a
+    # PEM file of the submitting machine (contents in patchFiles) or
+    # repo:ca-bundles/<file>. The most specific level wins (instance key, cluster
+    # key, input); a file and a Vault secret on one level are refused.
+    # tpg-patch: replaces the bundle of running enableSSL instances
+    type: caFile
+    repoDir: ca-bundles/
+    flag: ""
+    workflows: {day0: optional, create-instance: optional, patch: optional}
+  backupCaBundleVaultSecret:
+    doc: "The backup CA bundle of this instance from Vault tpg/ca-bundles/<name> (key caBundle). Wins over the cluster level and the inputs; not together with backupCaBundleFile"
+    # the CA bundle from Vault: tpg/ca-bundles/<name>, key caBundle (Round 15, D86;
+    # tpg-aks-infra scripts/vault-secret.sh ca put <name> <file> writes it)
+    type: k8sName
+    flag: ""
+    workflows: {day0: optional, create-instance: optional, patch: optional}
+  backupFullRetention:
+    doc: "Full backups the backup location keeps (retentionPolicy.fullRetention.number), 1 or more"
+    # PostgresBackupLocation retentionPolicy.fullRetention.number (Round 15, D84): a
+    # count of full backups, or days with backupFullRetentionType time
+    type: posint
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.backup.fullRetention]
+    format: number
+  backupFullRetentionType:
+    doc: "count: backupFullRetention is a number of full backups; time: a number of days"
+    type: enum
+    values: [count, time]
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.backup.fullRetentionType]
+  postgresPatchFilePath:
+    doc: "One or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:charts/tpg-instance/patches/<file>. Combined into one stored file charts/tpg-instance/patches/<instance>-postgres-<hash>.yaml; the objects a run does not send are carried over from the current file. Applied on top of the overlay of tpg-day0 and tpg-create-instance"
+    # a list of partial manifests, one Tanzu Postgres kind per document (Postgres,
+    # PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB; at
+    # most one per kind, and per schedule object): files of the submitting machine
+    # (contents in patchFiles) or repo:charts/tpg-instance/patches/<file>. Combined
+    # into one stored multi-document file, recorded as patches.postgres.current
+    # (Round 15, design decision D81); the kinds a run does not send are carried over
+    type: patchFileList
+    repoDir: charts/tpg-instance/patches/
+    workflows: {patch: optional}
+  postgresOverlayFilePath:
+    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresPatchFilePath): one or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:charts/tpg-instance/overlays/<file>. Combined into one stored file charts/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, recorded as overlays.postgres.current and applied at the initial deployment"
+    type: patchFileList
+    repoDir: charts/tpg-instance/overlays/
+    workflows: {create-instance: optional, day0: optional}
+  postgresValuesPatchFilePath:
+    doc: "A tpg-instance chart values file: a path of the submitting machine or repo:charts/tpg-instance/patches/<file>, stored as charts/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay"
+    # tpg-instance chart values (renamed from valuesPatchFilePath in Round 15),
+    # recorded as patches.postgresValues.current
+    type: patchFile
+    repoDir: charts/tpg-instance/patches/
+    workflows: {patch: optional}
+  postgresValuesOverlayFilePath:
+    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:charts/tpg-instance/overlays/<file>, stored as charts/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current"
+    type: patchFile
+    repoDir: charts/tpg-instance/overlays/
+    workflows: {create-instance: optional, day0: optional}
+  patchMode:
+    doc: "apply or clear, for the patch files of this instance"
+    type: enum
+    values: [apply, clear]
+    workflows: {patch: optional}
+  clearKinds:
+    doc: "patchMode=clear: the kinds whose current file or documents are removed: Postgres, PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB, postgresValues, or all"
+    # patchMode=clear: the kinds whose current patch is removed from this instance
+    type: kindList
+    workflows: {patch: optional}
+  backupType:
+    doc: "As the backupType input"
+    type: enum
+    values: [full, incremental, differential]
+    workflows: {backup: optional}
+  backupTimeoutSeconds:
+    doc: "As the backupTimeoutSeconds input, for this instance"
+    type: posint
+    workflows: {backup: optional}
+  replicas:
+    doc: "Read replicas to scale to (required: the key or the input replicas)"
+    type: integer
+    workflows: {scale: required}
+  enableHAIfNeeded:
+    doc: "As the input: turn high availability on when replicas is above 0"
+    type: boolean
+    workflows: {scale: optional}
+  preUpgradeBackup:
+    doc: "As the input"
+    type: boolean
+    workflows: {upgrade: optional}
+  allowMajor:
+    doc: "As the input: allow a major Postgres upgrade"
+    type: boolean
+    workflows: {upgrade: optional}
+  purgePvcs:
+    doc: "As the input: delete the volumes"
+    type: boolean
+    workflows: {delete-instance: optional, delete-apps: optional}
+  purgeNamespace:
+    doc: "As the input: delete the namespace (needs purgePvcs true)"
+    type: boolean
+    workflows: {delete-instance: optional, delete-apps: optional}
+  finalBackup:
+    doc: "As the input: true (a final backup, best effort), false (none) or required (fail when the instance is not Running)"
+    type: enum
+    values: ["true", "false", required]
+    workflows: {delete-instance: optional, delete-apps: optional}
+  # ---- exposure (design decision D64): how the instance's Services are
+  # published. The chart turns exposure into spec.serviceType and the Azure
+  # load balancer annotations; serviceAnnotations are added as given.
+  exposure:
+    doc: "Read-write Service: clusterIP, internalLoadBalancer or loadBalancer"
+    type: enum
+    values: [clusterIP, internalLoadBalancer, loadBalancer]
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.exposure]
+  serviceAnnotations:
+    doc: "Extra annotations of the read-write Service"
+    type: stringMap
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.serviceAnnotations]
+    format: map
+  readOnlyExposure:
+    doc: "Read-only Service: clusterIP, internalLoadBalancer or loadBalancer"
+    type: enum
+    values: [clusterIP, internalLoadBalancer, loadBalancer]
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.readOnlyExposure]
+  readOnlyServiceAnnotations:
+    doc: "Extra annotations of the read-only Service"
+    type: stringMap
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.readOnlyServiceAnnotations]
+    format: map
+  allowedSourceRanges:
+    doc: "Client ranges a load balancer accepts"
+    # Both load balancer Services: service.beta.kubernetes.io/azure-allowed-ip-ranges
+    type: cidrList
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.allowedSourceRanges]
+    format: list
+  internalLoadBalancerSubnet:
+    doc: "Subnet of an internal load balancer"
+    type: azureName
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.internalLoadBalancerSubnet]
+  # ---- network policy (design decision D65): default deny plus the flows the
+  # instance needs, then these client rules. networkPolicy none renders nothing.
+  networkPolicy:
+    doc: "none or baseline (default deny with the allowed clients)"
+    # tpg-network-policy sets baseline itself (mode apply or update)
+    type: enum
+    values: [none, baseline]
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.network.policy]
+  ingressFromNamespaces:
+    doc: "Namespaces whose pods may reach 5432"
+    type: nameList
+    workflows: {day0: optional, create-instance: optional, network-policy: optional}
+    fleet: [.network.ingressFromNamespaces]
+    format: list
+  ingressFromPodLabels:
+    doc: "Pod labels allowed to reach 5432"
+    type: stringMap
+    workflows: {day0: optional, create-instance: optional, network-policy: optional}
+    fleet: [.network.ingressFromPodLabels]
+    format: map
+  ingressFromCidrs:
+    doc: "Client ranges allowed to reach 5432"
+    type: cidrList
+    workflows: {day0: optional, create-instance: optional, network-policy: optional}
+    fleet: [.network.ingressFromCidrs]
+    format: list
+  egressToCidrs:
+    doc: "Extra egress ranges"
+    type: cidrList
+    workflows: {day0: optional, create-instance: optional, network-policy: optional}
+    fleet: [.network.egressToCidrs]
+    format: list
+  egressToFqdns:
+    doc: "Egress host names (needs ACNS)"
+    # CiliumNetworkPolicy toFQDNs: needs ACNS (Terraform acns_enabled = true)
+    type: fqdnList
+    workflows: {day0: optional, create-instance: optional, network-policy: optional}
+    fleet: [.network.egressToFqdns]
+    format: list

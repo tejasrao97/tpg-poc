@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/<org>/tpg-fleet/workflows/params/schemas/clustermap-scale.schema.json",
+  "title": "clusterMap of tpg-scale-instance",
+  "description": "The clusterMap input of the WorkflowTemplate tpg-scale-instance: registered clusters, their keys and their instances. Generated from workflows/params/cluster-map-keys.yaml by workflows/params/clustermap_schema.py; the validate step of the workflow is the authority (registered clusters, required values an input may supply, combinations of values).",
+  "type": "object",
+  "minProperties": 1,
+  "propertyNames": {
+    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+  },
+  "additionalProperties": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "maxReadReplicas": {
+        "anyOf": [
+          {
+            "type": "integer",
+            "minimum": 1
+          },
+          {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          }
+        ],
+        "description": "The cap on readReplicas of every instance of the cluster (clusters.<c>.cluster.maxReadReplicas, template default 3), 1 or more. tpg-scale-instance: the input maxReadReplicas is its default, and a cluster entry may carry it without instances (only the cap changes) [Integer; optional (default: the input maxReadReplicas)]"
+      },
+      "instances": {
+        "type": "object",
+        "minProperties": 0,
+        "description": "The instances of the cluster (namespace pg-<instance>)",
+        "propertyNames": {
+          "pattern": "^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "postgresVersion": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(postgres-)?[0-9]+(\\.[0-9]+)?$"
+                }
+              ],
+              "description": "tpg-day0, tpg-create-instance and tpg-upgrade: the version to deploy or upgrade to. Guard in the other workflows: when set, an instance that runs another version is skipped (SKIPPED_VERSION_MISMATCH) and nothing is changed for it [String (version); guard (skip an instance that runs another version)]"
+            },
+            "replicas": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[0-9]+$"
+                }
+              ],
+              "description": "Read replicas to scale to (required: the key or the input replicas) [Integer; required (this key, or the input replicas)]"
+            },
+            "enableHAIfNeeded": {
+              "enum": [
+                true,
+                false,
+                "true",
+                "false"
+              ],
+              "description": "As the input: turn high availability on when replicas is above 0 [Boolean; optional (default: the input enableHAIfNeeded)]"
+            }
+          }
+        }
+      }
+    }
+  }
+}
