@@ -83,7 +83,8 @@ if [[ "$CMD" == "plan" ]]; then
     for i in $(jq -r --arg c "$c" '.[] | select(.name == $c) | .instances[].name' <<<"$inv"); do
       [[ -z "$cblock" ]] || break
       if ! g="$(cmap_guard "$c" "$i")"; then record_entry "result.${c}.${i}" SKIPPED_VERSION_MISMATCH "" "$g"; continue; fi
-      ins="$(instance_ns "$c" "$i")"
+      ins="$(instance_ns "$c" "$i")" \
+        || { record_entry "result.${c}.${i}" FAILED FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"; continue; }
       tk -n "$ins" get postgres "$i" >/dev/null 2>&1 \
         || { record_entry "result.${c}.${i}" FAILED INSTANCE_NOT_FOUND "${ins}/${i} does not exist on ${c}"; continue; }
       rules="$(jq -c --arg c "$c" --arg i "$i" '.[$c].instances[$i] // {}' "$WORK/targets.json")"
@@ -111,7 +112,8 @@ if [[ "$CMD" == "plan" ]]; then
         if ! out="$(instance_render "$REPO" "$c" "$i" 2>&1)"; then cblock="RENDER_FAILED:${i}: $(tail -n 2 <<<"$out" | tr '\n' ' ')"; break; fi
         pol="$(yq 'select(.kind == "NetworkPolicy" or .kind == "CiliumNetworkPolicy")' <<<"$out")"
         [[ -n "$(tr -d '[:space:]-' <<<"$pol")" ]] || { cblock="RENDER_FAILED:${i}: no policy rendered"; break; }
-        if ! out="$(printf '%s\n' "$pol" | tk -n "$(instance_ns "$c" "$i")" apply --dry-run=server -f - 2>&1)"; then
+        ins="$(instance_ns "$c" "$i")" || { cblock="FLEET_UNREADABLE:${i}: ${FLEET_UNREADABLE_DETAIL}"; break; }
+        if ! out="$(printf '%s\n' "$pol" | tk -n "$ins" apply --dry-run=server -f - 2>&1)"; then
           cblock="DRY_RUN_REJECTED:${i}: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; break
         fi
       done
@@ -158,7 +160,7 @@ failed=0
 
 archive_check() {  # archive_check INSTANCE -> 0 when a WAL switch is archived after the policy change
   local i="$1" pod before after f0 f1 n ins
-  ins="$(instance_ns "$C" "$i")"
+  ins="$(instance_ns "$C" "$i")" || { CHECK_DETAIL="$FLEET_UNREADABLE_DETAIL"; return 1; }
   pod="$(tk -n "$ins" get pod -l "postgres-instance=${i},role=primary" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   [[ -n "$pod" ]] || { CHECK_DETAIL="no primary pod (label role=primary)"; return 1; }
   q() { tk -n "$ins" exec "$pod" -c pg-container -- psql -tAc "$1" 2>/dev/null | tr -d '[:space:]'; }
@@ -199,13 +201,17 @@ for i in $(tr ',' ' ' <<<"$targets"); do
   opts=(); [[ "$NP_MODE" == "remove" ]] && opts=(--prune)
   rc=0; sync_instance_app "$C" "$i" "$TIMEOUT" "$rev" "${opts[@]}" || rc=$?
   if [[ "$rc" -ne 0 ]]; then record_entry "$ikey" FAILED "$SYNC_FAIL_REASON" "$SYNC_FAIL_DETAIL"; failed=1; continue; fi
-  ins="$(instance_ns "$C" "$i")"
+  ins="$(instance_ns "$C" "$i")" || { record_entry "$ikey" FAILED FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"; failed=1; continue; }
   n_np="$(tk -n "$ins" get networkpolicy "tpg-ingress-${i}" -o name 2>/dev/null | wc -l)"
   n_cnp="$(tk -n "$ins" get ciliumnetworkpolicy "tpg-egress-${i}" -o name 2>/dev/null | wc -l)"
+  # with FerretDB the FerretDB pods have a pair of their own (tpg-ingress-ferretdb-<i>, tpg-egress-ferretdb-<i>)
+  n_fnp="$(tk -n "$ins" get networkpolicy "tpg-ingress-ferretdb-${i}" -o name 2>/dev/null | wc -l)"
+  n_fcnp="$(tk -n "$ins" get ciliumnetworkpolicy "tpg-egress-ferretdb-${i}" -o name 2>/dev/null | wc -l)"
+  want_f=0; [[ "$(instance_effective "$WORK/repo" "$C" "$i" '.ferret.enabled' false)" != "true" ]] || want_f=1
   if [[ "$NP_MODE" == "remove" ]]; then
-    [[ "$n_np" -eq 0 && "$n_cnp" -eq 0 ]] || { record_entry "$ikey" FAILED POLICY_NOT_REMOVED "tpg-ingress-${i} or tpg-egress-${i} still exists in ${ins}"; failed=1; continue; }
+    [[ "$n_np" -eq 0 && "$n_cnp" -eq 0 && "$n_fnp" -eq 0 && "$n_fcnp" -eq 0 ]] || { record_entry "$ikey" FAILED POLICY_NOT_REMOVED "tpg-ingress-${i}, tpg-egress-${i} or their FerretDB policies still exist in ${ins}"; failed=1; continue; }
   else
-    [[ "$n_np" -eq 1 && "$n_cnp" -eq 1 ]] || { record_entry "$ikey" FAILED POLICY_NOT_APPLIED "NetworkPolicy tpg-ingress-${i} and CiliumNetworkPolicy tpg-egress-${i} expected in ${ins}"; failed=1; continue; }
+    [[ "$n_np" -eq 1 && "$n_cnp" -eq 1 && "$n_fnp" -eq "$want_f" && "$n_fcnp" -eq "$want_f" ]] || { record_entry "$ikey" FAILED POLICY_NOT_APPLIED "NetworkPolicy tpg-ingress-${i} and CiliumNetworkPolicy tpg-egress-${i} (and, with FerretDB, tpg-ingress-ferretdb-${i} and tpg-egress-ferretdb-${i}) expected in ${ins}"; failed=1; continue; }
   fi
   detail="${NP_MODE}"
   if [[ "${CONNECTIVITY_CHECK:-true}" == "true" ]]; then

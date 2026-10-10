@@ -149,13 +149,24 @@ ${OPV}
   valid "${wf}: key namespace is accepted, also the same one on two instances (a shared namespace)"
   jq -e '.["aks-tpg-poc-01"].instances["orders-db"].namespace == "team-orders"' "$TMP/work/cmap.json" >/dev/null \
     && ok "${wf}: the namespace is kept in the normalized map" || bad "${wf} namespace normalized" "$(cat "$TMP/work/cmap.json")"
-  for r in kube-system kube-public kube-node-lease default argocd argo vault cert-manager monitoring tanzu-postgres-operator; do
+  # the reserved list is the one in cluster-map-keys.yaml (Round 23 review: every namespace the fleet installs
+  # into, and any name starting with kube-)
+  for r in $(yq -r '.instance.namespace.reserved[]' "$ROOT/workflows/params/cluster-map-keys.yaml") kube-other kube-x; do
     vp "$wf" P_CLUSTER_MAP="aks-tpg-poc-01:
 ${OPV}
   instances:
     orders-db: {postgresVersion: \"17.6\", highAvailability: true, namespace: ${r}}" P_PUSH_MODE=direct
     invalid "${wf}: reserved namespace ${r} is refused" "namespace '${r}' is reserved"
   done
+  for r in vault-secrets-operator-system tpg-vault cert-manager monitoring argocd argo vault tanzu-postgres-operator kube-system default; do
+    yq -e '.instance.namespace.reserved | contains(["'"$r"'"])' "$ROOT/workflows/params/cluster-map-keys.yaml" >/dev/null \
+      && ok "${wf}: ${r} is in the reserved list" || bad "${wf}: ${r} is not in the reserved list of cluster-map-keys.yaml"
+  done
+  vp "$wf" P_CLUSTER_MAP="aks-tpg-poc-01:
+${OPV}
+  instances:
+    orders-db: {postgresVersion: \"17.6\", highAvailability: true, namespace: kubernetes-team}" P_PUSH_MODE=direct
+  valid "${wf}: a name that only contains kube (kubernetes-team) is not reserved; the prefix is kube-"
   vp "$wf" P_CLUSTER_MAP="aks-tpg-poc-01:
 ${OPV}
   instances:

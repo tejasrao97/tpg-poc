@@ -14,6 +14,9 @@
 #   discover.sh       an instance or cluster the plan blocked is left out; the
 #                     backup scheduler and FerretDB as the chart sees them
 #                     (values patch files included, D70, D71)
+#   Round 23 review:  day0-precheck.sh blocks NAMESPACE_SECRET_CONFLICT (a regsecret or
+#                     backup-storage Secret in the requested namespace that the fleet does
+#                     not manage)
 #   Round 13 (D69 to D72): highAvailability=true with readReplicas 0 and read-only
 #                     FerretDB proxies without HA are refused; backupSchedule=operator
 #                     and ferret write their keys; FERRET_VERSION_UNSUPPORTED,
@@ -156,6 +159,25 @@ tk() {
       fi
       if [[ " \${S_API_ERR:-} " == *" \$ns "* ]]; then echo "Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout" >&2; return 1; fi
       echo "Error from server (NotFound): postgres.sql.tanzu.vmware.com \"\$ns\" not found" >&2
+      return 1 ;;
+    *" get secret "*)
+      # -n NAMESPACE get secret NAME -o json: S_SECRETS lists "namespace/name=kind" words (Round 23 review);
+      # kind foreign (nobody manages it), vss (created by a VaultStaticSecret), tracked (Argo CD tracking
+      # annotation of a fleet Application), other-app (tracking annotation of another Argo CD Application)
+      local w k sn="\$5" sns="\$2"
+      for w in \${S_SECRETS:-}; do
+        [[ "\${w%%=*}" == "\$sns/\$sn" ]] || continue
+        k="\${w#*=}"
+        case "\$k" in
+          foreign) echo '{"metadata":{"name":"'"\$sn"'"}}' ;;
+          vss) echo '{"metadata":{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"'"\$sn"'"}]}}' ;;
+          tracked) echo '{"metadata":{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"tpg-c1-app-a:secrets.hashicorp.com/VaultStaticSecret:'"\$sns"'/'"\$sn"'"}}}' ;;
+          other-app) echo '{"metadata":{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"team-app:/Secret:'"\$sns"'/'"\$sn"'"}}}' ;;
+          vss-other) echo '{"metadata":{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"somebody-elses"}]}}' ;;
+        esac
+        return 0
+      done
+      echo "Error from server (NotFound): secrets \"\$sn\" not found" >&2
       return 1 ;;
     *"get nodes -l tpg.fleet/pool=postgres -o json"*)
       printf '{"items":['; local z first=1
@@ -755,6 +777,46 @@ reset
 RC=0; P_FILTER=none bash "$TMP/discover.sh" wf c1 > "$TMP/out" 2>&1 || RC=$?
 jq -e '.[0].instances[0] | .name == "orders-db" and .namespace == "pg-orders-db"' /tmp/inventory.json >/dev/null \
   && ok "23.3 discover: an entry without namespace is recorded as pg-<instance>" || bad "ns inventory default" "$(cat /tmp/inventory.json)"
+
+# ---- Round 23 review: a Secret the fleet does not manage in the namespace of an instance (NAMESPACE_SECRET_CONFLICT)
+# regsecret and backup-storage are created and overwritten by the VaultStaticSecrets of the owner of the namespace
+inv '[{"name":"orders-db","namespace":"team-db","secretsOwner":true,"postgresVersion":"postgres-17.6","highAvailability":false,"readReplicas":0,"enableSSL":false},{"name":"billing-db","namespace":"team-db","secretsOwner":false,"postgresVersion":"postgres-17.6","highAvailability":false,"readReplicas":0,"enableSSL":false}]'
+secret_check() {  # secret_check S_SECRETS -> precheck.c1 line in $TMP/records
+  rm -rf "$TMP/work"; : > "$TMP/records"   # no checkout in the step: the namespaces come from the inventory
+  S_OPERATOR=ours S_TRACKED=yes S_APPRES=yes S_SECRETS="$1" bash "$TMP/day0-precheck.sh" wf c1 > "$TMP/out" 2>&1 || true
+}
+secret_check "team-db/regsecret=foreign"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT:namespace team-db already has the Secret regsecret, which the fleet does not manage" | grep -q "rename that Secret or choose another namespace with the namespace key" \
+  && [[ "$(rec "precheck.c1|BLOCKED" | grep -o 'NAMESPACE_SECRET_CONFLICT' | wc -l | tr -d ' ')" == 1 ]] \
+  && ok "23 review: a regsecret nobody manages in the requested namespace blocks the cluster (NAMESPACE_SECRET_CONFLICT names the namespace and the Secret and the two ways out; one reason for the two instances of the namespace)" \
+  || bad "foreign regsecret" "$(cat "$TMP/records") $(cat "$TMP/out")"
+secret_check "team-db/backup-storage=foreign"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT:namespace team-db already has the Secret backup-storage" | grep -q . \
+  && ok "23 review: the same for backup-storage" || bad "foreign backup-storage" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=foreign team-db/backup-storage=foreign"
+[[ "$(rec "precheck.c1|BLOCKED" | grep -o 'NAMESPACE_SECRET_CONFLICT' | wc -l | tr -d ' ')" == 2 ]] \
+  && ok "23 review: both foreign Secrets are reported" || bad "both foreign" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=other-app"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT" | grep -q . \
+  && ok "23 review: a Secret tracked by an Argo CD Application that is not the fleet's is foreign" || bad "other app" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=vss-other"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT" | grep -q . \
+  && ok "23 review: a Secret created by a VaultStaticSecret of another name is foreign (the owner's VaultStaticSecret has the Secret's name)" || bad "other vss" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=vss team-db/backup-storage=vss"
+! rec "precheck.c1|BLOCKED" | grep -q . && rec "precheck.c1|MANAGED" | grep -q . \
+  && ok "23 review: Secrets created by a VaultStaticSecret (ownerReferences) are the fleet's: no conflict (an instance that exists, or a second instance joining its namespace)" || bad "vss managed" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=tracked team-db/backup-storage=tracked"
+! rec "precheck.c1|BLOCKED" | grep -q . \
+  && ok "23 review: Secrets with the tracking annotation of a fleet Application (tpg-<cluster>-*) are the fleet's: no conflict" || bad "tracked managed" "$(cat "$TMP/records")"
+secret_check ""
+! rec "precheck.c1|BLOCKED" | grep -q . && ok "23 review: no such Secret (a new namespace): no conflict" || bad "no secret" "$(cat "$TMP/records")"
+secret_check "other-ns/regsecret=foreign"
+! rec "precheck.c1|BLOCKED" | grep -q . && ok "23 review: a foreign Secret in a namespace no instance of the run uses is nobody's business" || bad "other namespace" "$(cat "$TMP/records")"
+# tpg-create-instance runs the same pre-check
+: > "$TMP/records"
+rm -rf "$TMP/work"
+PRECHECK_MODE=create S_OPERATOR=ours S_TRACKED=yes S_APPRES=yes S_SECRETS="team-db/regsecret=foreign" bash "$TMP/day0-precheck.sh" wf c1 > "$TMP/out" 2>&1 || true
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT" | grep -q . && ok "23 review: the create-instance mode blocks as well" || bad "create mode" "$(cat "$TMP/records")"
 
 echo
 echo "day0-plan: ${PASS} passed, ${FAIL} failed"

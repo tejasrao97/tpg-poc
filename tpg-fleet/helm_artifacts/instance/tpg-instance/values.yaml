@@ -18,8 +18,11 @@ instance:
   # false: another instance of the namespace does. Exactly one instance per
   # namespace is the owner. The workflows write it: tpg-day0 and tpg-create-instance
   # give false to an instance that joins a namespace which has an owner, and
-  # tpg-delete-instance moves it to a remaining instance when the owner leaves. A
-  # values patch file cannot set it
+  # tpg-delete-instance moves it to a remaining instance when the owner leaves. With
+  # clusters/fleet.yaml as a value file the chart reads it from the entry there (the
+  # commit being synced), not from the inline values of the ApplicationSet, which lag
+  # behind a hand-over (templates/_helpers.tpl tpg.sharedSecretsOwnerValue). A values
+  # patch file cannot set it
   sharedSecretsOwner: true
   postgresVersion: ""
   storageClassName: tpg-data-retain

@@ -263,6 +263,11 @@ for w in keys["workflows"]:
         bad["one bare name for a list"] = {"c1": {"instances": {"i1": {"ingressFromCidrs": "10.1.0.0/16"}}}}
         bad["a bracketed string for a list (a string, not a sequence)"] = {"c1": {"instances": {"i1": {"egressToFqdns": "[api.example.com]"}}}}
         bad["an empty list"] = {"c1": {"instances": {"i1": {"egressToCidrs": []}}}}
+    if w in ("day0", "create-instance"):
+        # Round 23: reserved namespaces (cluster-map-keys.yaml reserved) and any name starting with kube-
+        extra = {"operatorVersion": "v4.5.0"} if w == "day0" else {}
+        for r in list(keys["instance"]["namespace"]["reserved"]) + ["kube-other"]:
+            bad[f"the reserved namespace {r}"] = {"c1": {**extra, "instances": {"i1": {"namespace": r}}}}
     if w == "patch":
         bad.update({
             "the renamed valuesPatchFilePath": {"c1": {"instances": {"i1": {"valuesPatchFilePath": ["v.yaml"]}}}},

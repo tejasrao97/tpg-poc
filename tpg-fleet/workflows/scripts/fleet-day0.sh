@@ -197,7 +197,8 @@ plan_namespace() {
   local c="$1" i="$2" want="$3" cur
   NS_REASON=""; NS_DETAIL=""; NS_WRITE=false
   if fleet_has_instance_file "$F" "$c" "$i"; then
-    cur="$(instance_ns "$c" "$i")"; NS_PLAN="$cur"
+    cur="$(instance_ns "$c" "$i")" || { NS_REASON=FLEET_UNREADABLE; NS_DETAIL="$FLEET_UNREADABLE_DETAIL"; return 1; }
+    NS_PLAN="$cur"
     if [[ -n "$want" && "$want" != "$cur" ]]; then
       NS_REASON=NAMESPACE_IMMUTABLE
       NS_DETAIL="${i} is declared in namespace ${cur} on ${c}, the namespace key asks for ${want}; the namespace of an instance cannot change (leave the key out, or delete the instance and create it again)"

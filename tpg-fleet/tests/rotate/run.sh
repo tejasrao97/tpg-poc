@@ -11,6 +11,9 @@
 #   5 a short remote-write password is VALUE_REJECTED
 #   6 a CA bundle from caBundleFile (patchFiles) is written; an expired one refused
 #   7 an unexpected exit is still recorded (result_guard)
+#   8 rotate-hub.sh reads the Argo CD repository list with a default
+#   9 rotate-cluster.sh (Round 23 review): the namespaces checked are those of the instances in
+#     clusters/fleet.yaml (instance.namespace, shared ones once) and the operator's; FLEET_UNREADABLE
 # Requires bash 4, jq, python3 and openssl; skipped without them.
 # ok() and bad() always return 0.
 # shellcheck disable=SC2015,SC2016
@@ -144,6 +147,53 @@ grep -q 'RBAC_MISSING' "$H" && grep -q 'repositories, get' "$H" && ok "8 an empt
 if command -v jq >/dev/null; then
   [[ "$(echo '{}' | jq -r '(.items // [])[] | .repo' | wc -l | tr -d ' ')" == 0 ]] && ok "8 an empty list ({}) iterates to nothing" || bad "8 empty list"
 fi
+
+# rotate-cluster.sh (Round 23 review): the namespaces it checks are the ones of the instances in clusters/fleet.yaml
+# (instance.namespace, default pg-<instance>; instances share one), plus the operator namespace - among the namespaces
+# labelled tpg.fleet/managed=true on the cluster
+command -v yq >/dev/null && yq --version 2>&1 | grep -q mikefarah && {
+  mkdir -p "$TMP/rc-repo/clusters"
+  cat > "$TMP/rc-repo/clusters/fleet.yaml" <<'YAML'
+clusters:
+  c1:
+    operator: {version: v4.5.0}
+    instances:
+      app-a: {instance: {namespace: shared, postgresVersion: postgres-17.6}}
+      app-b: {instance: {namespace: shared, sharedSecretsOwner: false, postgresVersion: postgres-17.6}}
+      orders-db: {instance: {postgresVersion: postgres-17.6}}
+YAML
+  cat > "$TMP/rc-prelude.sh" <<PRELUDE
+export TPG_WORK="$TMP/rc-work"
+source "$ROOT/workflows/scripts/lib.sh"
+set +e
+record() { printf '%s|%s|%s|%s\n' "\$1" "\$2" "\${3:-}" "\${4:-}" >> "$TMP/rc-records"; RESULT_RECORDED=1; }
+record_entry() { printf '%s|%s|%s|%s\n' "\$1" "\$2" "\${3:-}" "\${4:-}" >> "$TMP/rc-records"; }
+use_cluster() { CLUSTER="\$1"; }
+sleep() { :; }
+git_clone() { [[ -f "$TMP/rc-clone-fails" ]] && return 128; rm -rf "\$1"; mkdir -p "\$1"; cp -r "$TMP/rc-repo/." "\$1/"; }
+vault_secret() { printf 'the-vault-value'; }
+secret_matches() { return 0; }
+tk() {
+  case "\$*" in
+    *readyz*) return 0 ;;
+    *"get namespace -l tpg.fleet/managed=true"*) printf '%s\n' tanzu-postgres-operator shared pg-orders-db pg-legacy other-team ;;
+    *"get secret backup-storage -o jsonpath"*) printf '7' ;;
+    *) return 0 ;;
+  esac
+}
+PRELUDE
+  sed -e "s#^source /scripts/lib.sh#source $TMP/rc-prelude.sh#" "$ROOT/workflows/scripts/rotate-cluster.sh" > "$TMP/rotate-cluster.sh"
+  rm -f "$TMP/rc-clone-fails"; rm -rf "$TMP/rc-work"; : > "$TMP/rc-records"
+  RCOUT="$(bash "$TMP/rotate-cluster.sh" wf c1 backup-storage 2>&1)" || true
+  grep -q 'checking the instance namespaces of: tanzu-postgres-operator pg-orders-db shared$' <<<"$RCOUT" \
+    && grep -q '^result.c1|UPDATED||backup-storage synced from Vault in 2 namespaces' "$TMP/rc-records" \
+    && ok "9 rotate-cluster.sh checks the namespaces of fleet.yaml (shared once, pg-orders-db) and the operator's; pg-legacy and other-team, managed but in no entry, are not checked" \
+    || bad "9 rotate namespaces" "$RCOUT $(cat "$TMP/rc-records")"
+  : > "$TMP/rc-records"; rm -rf "$TMP/rc-work"; touch "$TMP/rc-clone-fails"
+  RCOUT="$(bash "$TMP/rotate-cluster.sh" wf c1 backup-storage 2>&1)" || true
+  grep -q '^result.c1|FAILED|FLEET_UNREADABLE' "$TMP/rc-records" \
+    && ok "9 rotate-cluster.sh: a fleet repository that cannot be cloned is FAILED FLEET_UNREADABLE (no namespace is guessed)" || bad "9 rotate unreadable" "$RCOUT $(cat "$TMP/rc-records")"
+}
 
 echo
 echo "tests/rotate: ${PASS} passed, ${FAIL} failed"

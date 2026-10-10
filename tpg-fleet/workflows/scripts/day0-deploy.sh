@@ -11,6 +11,9 @@
 # DEPLOY_SCOPE (environment): all (tpg-day0, default) or instances
 # (tpg-create-instance): the platform, the operator and the add-ons are left as
 # they are and must already be in place; only the run's instances are synced.
+# Instances of a shared namespace (Round 23): the owner of the shared Secrets is synced first; an
+# instance that does not own them is synced only when regsecret and backup-storage exist in its
+# namespace (lib.sh ensure_shared_secrets syncs the owner's shared objects first, or SHARED_SECRETS_MISSING).
 WF="$1"; C="$2"; TIMEOUT="$3"; INSTALL_ADDONS="${4:-true}"
 SCOPE="${DEPLOY_SCOPE:-all}"
 [[ "$SCOPE" == "all" ]] || INSTALL_ADDONS=false
@@ -21,7 +24,7 @@ fail() { record "result.${C}" FAILED "$1" "${2:-}"; exit 1; }
 result_guard "result.${C}"
 
 use_cluster "$C" || fail NOT_REGISTERED
-INSTANCES="$(inventory_instances "$C")"
+INSTANCES="$(inventory_instances "$C" owners-first)"   # the owner of the shared Secrets of a namespace before the other instances there
 # tpg-create-instance: instances the plan already settled (ALREADY_EXISTS,
 # or BLOCKED as INSTANCE_EXISTS / INSTANCE_NAME_IN_USE) are not synced
 if [[ "$SCOPE" != "all" ]]; then
@@ -37,7 +40,12 @@ fi
 # ---- Step 2: prepare
 log "preparing namespaces on ${C}"
 # the namespace of each instance (clusters/fleet.yaml instance.namespace, default pg-<instance>; instances may share one)
-nss="$(for i in $INSTANCES; do instance_ns "$C" "$i"; echo; done | grep -v '^$' | sort -u)"
+nss=""
+for i in $INSTANCES; do
+  ns="$(instance_ns "$C" "$i")" || fail FLEET_UNREADABLE "${i}: ${FLEET_UNREADABLE_DETAIL}"
+  nss="${nss}${ns}"$'\n'
+done
+nss="$(printf '%s' "$nss" | grep -v '^$' | sort -u || true)"
 [[ "$SCOPE" != "all" ]] || nss="tanzu-postgres-operator ${nss}"
 for ns in $nss; do
   tk create namespace "$ns" --dry-run=client -o yaml | tk apply -f - >/dev/null
@@ -112,6 +120,12 @@ done < <(inventory_cluster "$C" | jq -r --arg l "$INSTANCES" '($l | split(" ") |
 # inventory_instances lists the owner of the shared Secrets of a namespace first (instance.sharedSecretsOwner)
 for i in $INSTANCES; do
   rc=0
+  ns="$(instance_ns "$C" "$i")" || fail FLEET_UNREADABLE "${i}: ${FLEET_UNREADABLE_DETAIL}"
+  # an instance that does not own the shared Secrets of its namespace needs them there before its Postgres
+  # is created: they are checked, and the owner's shared objects synced (only those) when they are missing
+  if [[ "$(inventory_cluster "$C" | jq -r --arg i "$i" '[.instances[] | select(.name == $i) | .secretsOwner][0] | if . == false then "false" else "true" end')" == "false" ]]; then
+    ensure_shared_secrets "$C" "$i" "$ns" "$TIMEOUT" "$REV" || fail SHARED_SECRETS_MISSING "$SHARED_DETAIL"
+  fi
   # --prune: objects the entry no longer renders go (FerretDB after ferret=false,
   # the PostgresBackupSchedules after a switch away from backupSchedule=operator);
   # the Postgres object and its backup location are Prune=false and stay
@@ -122,7 +136,7 @@ done
 # ---- Step 5: verify
 details=()
 for i in $INSTANCES; do
-  ns="$(instance_ns "$C" "$i")"
+  ns="$(instance_ns "$C" "$i")" || fail FLEET_UNREADABLE "${i}: ${FLEET_UNREADABLE_DETAIL}"
   pg_wait_ready "$i" "$TIMEOUT" || fail "INSTANCE_${POD_WATCH_REASON:-NOT_RUNNING}" "$POD_WATCH_DETAIL"
   for sec in regsecret backup-storage; do
     wait_secret "$ns" "$sec" || fail SECRET_NOT_SYNCED "${ns}/${sec} from Vault"

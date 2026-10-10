@@ -141,5 +141,27 @@ if [[ "$(inventory_cluster "$C" | jq '[.instances[] | select(.ferret == true)] |
     || block "FERRET_CRD_MISSING:the operator on ${C} has no PostgresFerretDocumentDB CRD (operator 4.5.0 or later)"
 fi
 
+# 8. Secrets the fleet does not manage (Round 23). The owner of the shared Secrets of a namespace renders
+#    VaultStaticSecrets named regsecret and backup-storage, which create (and overwrite: Vault Secrets
+#    Operator, destination.overwrite) the Secrets of those names. A Secret of that name that is neither
+#    created by a VaultStaticSecret (ownerReferences) nor tracked by an Application of the fleet
+#    (tpg-<cluster>-*) belongs to someone else and would be overwritten: NAMESPACE_SECRET_CONFLICT.
+#    A namespace that does not exist yet has none.
+declare -A SEEN_SECRET=()
+for i in $(inventory_instances "$C"); do
+  if ! ns="$(instance_ns "$C" "$i")"; then block "FLEET_UNREADABLE:${i}: the namespace of the instance cannot be read from the fleet repository"; continue; fi
+  for sec in regsecret backup-storage; do
+    [[ -z "${SEEN_SECRET["${ns}/${sec}"]:-}" ]] || continue
+    sj="$(tk -n "$ns" get secret "$sec" -o json 2>/dev/null || true)"
+    [[ -n "$sj" ]] || continue
+    SEEN_SECRET["${ns}/${sec}"]=1
+    if ! jq -e --arg a "tpg-${C}-" --arg n "$sec" '
+        any(.metadata.ownerReferences[]?; .kind == "VaultStaticSecret" and .name == $n and ((.apiVersion // "") | startswith("secrets.hashicorp.com/")))
+        or ((.metadata.annotations["argocd.argoproj.io/tracking-id"] // "") | startswith($a))' <<<"$sj" >/dev/null 2>&1; then
+      block "NAMESPACE_SECRET_CONFLICT:namespace ${ns} already has the Secret ${sec}, which the fleet does not manage (instance ${i} would overwrite it from Vault); rename that Secret or choose another namespace with the namespace key"
+    fi
+  done
+done
+
 [[ "$STATUS" == "PASSED" && "$MANAGED" == "true" ]] && STATUS=MANAGED
 record "precheck.${C}" "$STATUS" "$(IFS=,; echo "${REASONS[*]:-}")" "$( [[ "${#NOTES[@]}" -eq 0 ]] || printf 'warnings: %s' "$(IFS=,; echo "${NOTES[*]}")")"

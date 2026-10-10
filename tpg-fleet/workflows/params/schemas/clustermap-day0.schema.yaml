@@ -170,18 +170,22 @@ additionalProperties:
             type: string
             pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
             not:
-              enum:
-              - kube-system
-              - kube-public
-              - kube-node-lease
-              - default
-              - argocd
-              - argo
-              - vault
-              - cert-manager
-              - monitoring
-              - tanzu-postgres-operator
-            description: 'Round 23: the namespace of the instance, default pg-<instance>; written to clusters/fleet.yaml as instance.namespace and immutable (a different value for an instance that exists is refused). Instances may share a namespace: the first one owns the shared Secrets (regsecret, backup-storage, ServiceAccount tpg-vso), each has its own network policy selected by the postgres-instance label, and purgeNamespace is refused while another instance of the namespace remains. Reserved namespaces are refused. Every other workflow reads the namespace from clusters/fleet.yaml [String (namespace); optional]'
+              anyOf:
+              - enum:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - default
+                - argocd
+                - argo
+                - vault
+                - vault-secrets-operator-system
+                - tpg-vault
+                - cert-manager
+                - monitoring
+                - tanzu-postgres-operator
+              - pattern: ^(kube-)
+            description: 'Round 23: the namespace of the instance, default pg-<instance>; written to clusters/fleet.yaml as instance.namespace and immutable (a different value for an instance that exists is refused). Instances may share a namespace: the first one owns the shared Secrets (regsecret, backup-storage, ServiceAccount tpg-vso), each has its own network policy selected by the postgres-instance label, and purgeNamespace is refused while another instance of the namespace remains. Reserved namespaces (every namespace the fleet installs into, and any name starting with kube-) are refused. Every other workflow reads the namespace from clusters/fleet.yaml [String (namespace); optional]'
           disableInitialBackup:
             enum:
             - true

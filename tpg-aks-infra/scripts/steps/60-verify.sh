@@ -338,16 +338,21 @@ target_storageclass() {
 #   (instance.sharedSecretsOwner is not false); a namespace or Postgres object that does not exist yet is
 #   a warning (tpg-day0 and tpg-create-instance create them). Skipped without a clone.
 target_instances() {
-  local c="$1" f="${FLEET_LOCAL_DIR:-}/clusters/fleet.yaml" keys="${FLEET_LOCAL_DIR:-}/workflows/params/cluster-map-keys.yaml" i ns own reserved why
+  local c="$1" f="${FLEET_LOCAL_DIR:-}/clusters/fleet.yaml" keysf="${FLEET_LOCAL_DIR:-}/workflows/params/cluster-map-keys.yaml" i ns own reserved prefixes pfx why is_reserved
   local -A owners=() members=()
   [[ -n "${FLEET_LOCAL_DIR:-}" && -f "$f" ]] || return 0
-  reserved="$(yq -r '.instance.namespace.reserved[]' "$keys" 2>/dev/null || true)"
+  # the one list of reserved namespaces, in the fleet clone: names and prefixes (cluster-map-keys.yaml)
+  reserved="$(yq -r '.instance.namespace.reserved[]' "$keysf" 2>/dev/null || true)"
+  prefixes="$(yq -r '.instance.namespace.reservedPrefixes[]?' "$keysf" 2>/dev/null || true)"
   for i in $(C="$c" yq -r '.clusters[strenv(C)].instances // {} | keys | .[]' "$f"); do
     ns="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.namespace // ""' "$f")"; ns="${ns:-pg-$i}"
     own="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner | select(. != null)' "$f")"   # (// would turn false into true)
     members[$ns]="${members[$ns]:+${members[$ns]}, }${i}"
     [[ "$own" == false ]] || owners[$ns]=$(( ${owners[$ns]:-0} + 1 ))
-    if grep -Fqx -- "$ns" <<<"$reserved"; then
+    is_reserved=false
+    grep -Fqx -- "$ns" <<<"$reserved" && is_reserved=true
+    for pfx in $prefixes; do [[ "$ns" == "$pfx"* ]] && is_reserved=true; done
+    if [[ "$is_reserved" == true ]]; then
       issue "instance ${c}/${i} namespace ${ns}" "${ns} is a reserved namespace: instance.namespace of clusters.${c}.instances.${i} in clusters/fleet.yaml must be another one"
     elif why="$(_obj_missing "$c" "" "namespace/${ns}")"; then
       advisory "namespace ${ns} of instance ${c}/${i}" "${why}; tpg-day0 or tpg-create-instance creates it"

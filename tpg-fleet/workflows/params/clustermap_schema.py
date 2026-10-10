@@ -110,7 +110,11 @@ def value_schema(spec):
         rx = {"name": cm.NAME, "azureName": cm.AZURE_NAME, "k8sName": cm.K8S_NAME}[t]
         return {"type": "string", "pattern": _p(rx)}
     if t == "namespace":
-        return {"type": "string", "pattern": _p(cm.NAMESPACE), "not": {"enum": list(spec.get("reserved", []))}}
+        prefixes = list(spec.get("reservedPrefixes", []))   # DNS label characters only: nothing to escape
+        out = {"type": "string", "pattern": _p(cm.NAMESPACE), "not": {"enum": list(spec.get("reserved", []))}}
+        if prefixes:
+            out["not"] = {"anyOf": [out["not"], {"pattern": "^(" + "|".join(prefixes) + ")"}]}
+        return out
     if t == "boolean":
         return {"enum": [True, False, "true", "false"]}
     if t in ("integer", "posint"):

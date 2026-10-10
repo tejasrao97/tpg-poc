@@ -44,7 +44,7 @@ upgrade_one() {
   local i="$1" ns key="result.${C}.$1" cur cur_major b phase name start j stamp TYPE dbv spec_v spec_wait
   local TARGET target_major target_num ALLOW_MAJOR PRE_BACKUP
   ifail() { record "$key" FAILED "$1" "${2:-}"; any_failed=1; }
-  ns="$(instance_ns "$C" "$i")"
+  ns="$(instance_ns "$C" "$i")" || { ifail FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"; return; }
   TARGET="$(cmap_ival "$C" "$i" postgresVersion "$DEFAULT_TARGET")"
   [[ -n "$TARGET" ]] || { record "$key" SKIPPED_NOT_SELECTED "" "no postgresVersion for ${i}"; return; }
   target_major="$(major_of "$TARGET")"

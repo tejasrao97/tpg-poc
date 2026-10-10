@@ -289,8 +289,8 @@ patch_dry_run() {  # patch_dry_run CLUSTER (use_cluster first): the after render
   local c="$1" i f docs dr ns
   for i in $(jq -r '.instances[]' <<<"$PREP_PLAN"); do
     f="$WORK/render/after-${c}-${i}.yaml"
-    ns="$(instance_ns "$c" "$i")"
     [[ -s "$f" ]] || continue
+    ns="$(instance_ns "$c" "$i")" || { C_ERRS+=("${i}: ${FLEET_UNREADABLE_DETAIL}"); continue; }
     docs="$(yq 'select(.kind == "Postgres" or .kind == "PostgresBackupLocation"
                or .kind == "PostgresBackupSchedule" or .kind == "PostgresFerretDocumentDB")' "$f")"
     exposure_warning_rendered "$c" "$i" "$(cat "$f")"
@@ -389,7 +389,8 @@ patch_diff() {
   : > "$WORK/diff-${c}.txt"
   for t in $(jq -r '.instances[]' <<<"$PREP_PLAN") $( [[ "$(jq -r '.operator' <<<"$PREP_PLAN")" == "true" ]] && echo operator); do
     before="$WORK/render/before-${c}-${t}.yaml"; after="$WORK/render/after-${c}-${t}.yaml"
-    if [[ "$t" == operator ]]; then app="tpg-${c}-operator"; ns="$OPERATOR_NS"; else app="tpg-${c}-${t}"; ns="$(instance_ns "$c" "$t")"; fi
+    if [[ "$t" == operator ]]; then app="tpg-${c}-operator"; ns="$OPERATOR_NS"
+    else app="tpg-${c}-${t}"; ns="$(instance_ns "$c" "$t")" || { C_ERRS+=("${t}: ${FLEET_UNREADABLE_DETAIL}"); continue; }; fi
     [[ -f "$before" ]] || : > "$before"
     removed="$(patch_removed "$before" "$after")"
     list="$(patch_tracked_list "$after" "$app" "$ns" | patch_ignore_live "$ns")"

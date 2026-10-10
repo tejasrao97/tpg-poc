@@ -99,8 +99,9 @@ if [[ "$MODE" == "plan" ]]; then
     if ! g="$(cmap_guard "$C" "$I")"; then record_entry "$key" SKIPPED_VERSION_MISMATCH "" "$g"; continue; fi
     [[ "$(pg_state "$I")" == "Running" ]] || { ifail NOT_RUNNING "currentState=$(pg_state "$I")"; continue; }
     busy=""
+    ins="$(instance_ns "$C" "$I")" || { ifail FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"; continue; }
     for kind in postgresversionupgrade postgresrestore; do
-      n="$(tk -n "$(instance_ns "$C" "$I")" get "$kind" -o json 2>/dev/null \
+      n="$(tk -n "$ins" get "$kind" -o json 2>/dev/null \
         | jq -r '[.items[] | select((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed)$") | not)] | length')"
       [[ "${n:-0}" -eq 0 ]] || busy="${busy}${kind} "
     done
@@ -214,7 +215,7 @@ key="result.${C}.${I}"
 fail() { record "$key" FAILED "$1" "${2:-}"; exit 1; }
 result_guard "$key"
 use_cluster "$C" || fail NOT_REGISTERED
-ns="$(instance_ns "$C" "$I")"
+ns="$(instance_ns "$C" "$I")" || fail FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"
 app="tpg-${C}-${I}"
 rev="$(run_data revision | jq -r '.detail // empty')"
 [[ -n "$rev" ]] || rev="$(fleet_head)"

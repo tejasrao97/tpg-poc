@@ -351,8 +351,10 @@ def check_value(spec, value, where):
         if not NAMESPACE.match(s):
             return s, f"{where}: '{s}' must be a namespace name: a lowercase DNS label of at most 63 characters (letters, digits and '-')"
         reserved = spec.get("reserved", [])
-        if s in reserved:
-            return s, f"{where}: namespace '{s}' is reserved ({', '.join(reserved)}); choose another, or leave the key out for pg-<instance>"
+        prefixes = spec.get("reservedPrefixes", [])
+        if s in reserved or any(s.startswith(x) for x in prefixes):
+            names = ", ".join(reserved + [x + "*" for x in prefixes])
+            return s, f"{where}: namespace '{s}' is reserved ({names}); choose another, or leave the key out for pg-<instance>"
         return s, None
     if t == "k8sName":
         return s, None if K8S_NAME.match(s) else f"{where}: '{s}' must be a Kubernetes object name (lowercase letters, digits, '-' and '.')"

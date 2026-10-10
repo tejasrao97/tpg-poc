@@ -257,13 +257,21 @@ instance:
     fleet: [.backup.enableSSL]
     format: boolean
   namespace:
-    doc: "Round 23: the namespace of the instance, default pg-<instance>; written to clusters/fleet.yaml as instance.namespace and immutable (a different value for an instance that exists is refused). Instances may share a namespace: the first one owns the shared Secrets (regsecret, backup-storage, ServiceAccount tpg-vso), each has its own network policy selected by the postgres-instance label, and purgeNamespace is refused while another instance of the namespace remains. Reserved namespaces are refused. Every other workflow reads the namespace from clusters/fleet.yaml"
+    doc: "Round 23: the namespace of the instance, default pg-<instance>; written to clusters/fleet.yaml as instance.namespace and immutable (a different value for an instance that exists is refused). Instances may share a namespace: the first one owns the shared Secrets (regsecret, backup-storage, ServiceAccount tpg-vso), each has its own network policy selected by the postgres-instance label, and purgeNamespace is refused while another instance of the namespace remains. Reserved namespaces (every namespace the fleet installs into, and any name starting with kube-) are refused. Every other workflow reads the namespace from clusters/fleet.yaml"
     # chart value instance.namespace (templates/_helpers.tpl tpg.required); the tpg-instances
-    # ApplicationSet destination.namespace. The reserved list: the Kubernetes system
-    # namespaces, the namespaces of the platform components, and the operator namespace
-    # (OPERATOR_NS in workflows/scripts/lib.sh, chart value network.operatorNamespace)
+    # ApplicationSet destination.namespace. The one list of namespaces an instance may not use
+    # (workflows/scripts/clustermap.py, the clusterMap schemas, tpg-aks-infra 60-verify.sh and
+    # docs/workflow-commands.md read it from here): every namespace the fleet installs into,
+    # that is the Kubernetes system namespaces, Argo CD (argocd) and Argo Workflows (argo),
+    # Vault (vault), the Vault Secrets Operator (vault-secrets-operator-system) and its
+    # VaultAuth/VaultConnection namespace (tpg-vault), cert-manager, the monitoring stack
+    # (monitoring; the Azure option installs into kube-system), the Tanzu Postgres operator
+    # (OPERATOR_NS in workflows/scripts/lib.sh, chart value network.operatorNamespace) and
+    # default (the tpg-platform Application); and every name starting with a reservedPrefixes
+    # entry (kube-: the Kubernetes system namespaces and any other the cluster keeps for itself)
     type: namespace
-    reserved: [kube-system, kube-public, kube-node-lease, default, argocd, argo, vault, cert-manager, monitoring, tanzu-postgres-operator]
+    reserved: [kube-system, kube-public, kube-node-lease, default, argocd, argo, vault, vault-secrets-operator-system, tpg-vault, cert-manager, monitoring, tanzu-postgres-operator]
+    reservedPrefixes: [kube-]
     flag: ""
     workflows: {day0: optional, create-instance: optional}
     fleet: [.instance.namespace]

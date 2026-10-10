@@ -559,6 +559,18 @@ rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "billing-db: Postgres spec.sto
   && ok "14 a document that drops the current class (the chart's class would render) is refused" || bad "14 dropped class" "$(cat "$TMP/records") $OUT"
 git -C "$REPO" reset -q --hard "$BASE_SAVED"
 unset S_INV
+
+# ---- Round 23: a values patch cannot move the namespace or the owner of the shared Secrets
+echo "== 23 plan: instance.namespace and instance.sharedSecretsOwner in a values patch"
+printf 'instance:\n  namespace: other-ns\n' > "$L/v-ns.yaml"
+printf 'instance:\n  sharedSecretsOwner: false\n' > "$L/v-owner.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-ns.yaml]' P_PATCH_FILES="$(pack v-ns.yaml)" S_DIFF=0
+rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "v-ns.yaml: instance.namespace cannot be set by a values patch" \
+  && ok "23 a values patch with instance.namespace is refused (the namespace is immutable)" || bad "23 namespace patch" "$(cat "$TMP/records") $OUT"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-owner.yaml]' P_PATCH_FILES="$(pack v-owner.yaml)" S_DIFF=0
+rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "v-owner.yaml: instance.sharedSecretsOwner cannot be set by a values patch" \
+  && ok "23 a values patch with instance.sharedSecretsOwner is refused (the workflows move the owner)" || bad "23 owner patch" "$(cat "$TMP/records") $OUT"
+
 echo
 echo "tests/patch: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

@@ -35,6 +35,9 @@
 #                   from the instance with sharedSecretsOwner true, the network
 #                   policies named and selected by instance, the ApplicationSet
 #                   destination.namespace from instance.namespace
+#   Round 23 review: the owner flag is read from the clusters/fleet.yaml value file
+#                   (the synced commit) before the inline values; the FerretDB pods
+#                   (app ferretdb-rw-<i>, ferretdb-ro-<i>) have their own policy pair
 # Requires: helm (v3 or v4), yq (mikefarah), python3 with PyYAML; skipped without them.
 # shellcheck disable=SC2015
 set -euo pipefail
@@ -69,6 +72,8 @@ import sys, yaml
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 def K(kind):
     return next(d for d in docs if d.get("kind") == kind)
+def N(kind, name):
+    return next(d for d in docs if d.get("kind") == kind and d.get("metadata", {}).get("name") == name)
 def egress(): return K("CiliumNetworkPolicy")["spec"]["egress"]
 def ports(rule): return [p["port"] for p in rule["toPorts"][0]["ports"]]
 sys.exit(0 if eval("(" + sys.argv[1] + ")") else 1)
@@ -208,10 +213,10 @@ ferret: {enabled: true, replicas: 2, readOnlyReplicas: 1, exposure: internalLoad
   && ok "ferret: read-only proxies with their Secret, internal load balancers with the instance's ranges" || bad "ferret ha" "$OUT"
 render 'network: {policy: baseline, ingressFromNamespaces: [app]}
 ferret: {enabled: true, exposure: loadBalancer}'
-pycheck 'K("NetworkPolicy")["spec"]["ingress"][4] == {"from": [
+pycheck 'N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["ingress"][2] == {"from": [
     {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "app"}}}, {"ipBlock": {"cidr": "168.63.129.16/32"}}],
-  "ports": [{"protocol": "TCP", "port": 27017}]}' && f9 \
-  && ok "ferret with baseline: 27017 from the same clients, with the probe address for its load balancer" || bad "ferret netpol" "$(yq 'select(.kind == "NetworkPolicy")' <<<"$OUT")"
+  "ports": [{"protocol": "TCP", "port": 27017}]}' \
+  && ok "ferret with baseline: 27017 from the same clients, with the probe address for its load balancer (Round 23: in the policy of the FerretDB pods)" || bad "ferret netpol" "$(yq 'select(.kind == "NetworkPolicy")' <<<"$OUT")"
 render 'network: {policy: baseline, ingressFromNamespaces: [app]}'
 pycheck 'not any(p["port"] == 27017 for r in K("NetworkPolicy")["spec"]["ingress"] for p in r.get("ports", []))' \
   && ok "no FerretDB: no 27017 rule" || bad "no ferret rule" "$OUT"
@@ -502,6 +507,67 @@ appset_render '{instance: {postgresVersion: postgres-17.6, namespace: pg-i1, sha
 appset_render '{instance: {postgresVersion: postgres-17.6, namespace: pg-i1}}'
 [[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
   && ok "23: ApplicationSet values without the flag: the instance owns the shared Secrets" || bad "appset owner" "$OUT"
+
+# ---- Round 23 review: the owner flag follows the fleet.yaml value file at the synced revision, not the inline values
+# The tpg-instances ApplicationSet builds the inline values from the fleet branch and refreshes them
+# asynchronously; tpg-delete-instance syncs the successor at the commit that moved the flag, so the file at that
+# commit decides (the way the patch records are read). Without the file (a render by hand) the inline value is used.
+render_fleet() {  # render_fleet INSTANCE NAMESPACE FLEET_ENTRIES_YAML INLINE_VALUES_YAML -> $OUT, $RC (fleet.yaml as a value file, like the ApplicationSet)
+  printf 'clusters:\n  c1:\n    instances:\n%s\n' "$3" > "$TMP/fl-fleet.yaml"
+  printf 'cluster: {name: c1}\ninstance: {name: %s, postgresVersion: postgres-17.6}\nbackup: {container: pg-backups-c1}\n' "$1" > "$TMP/fl-$1.yaml"
+  printf '%s\n' "$4" > "$TMP/fl-v-$1.yaml"
+  RC=0
+  OUT="$(helm template "$1" "$CHART" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" \
+    -f "$TMP/fl-fleet.yaml" -f "$TMP/fl-$1.yaml" -f "$TMP/fl-v-$1.yaml" --namespace "$2" 2>&1)" || RC=$?
+}
+FLEET_PAIR='      i1: {instance: {namespace: shared, postgresVersion: postgres-17.6}}
+      i2: {instance: {namespace: shared, sharedSecretsOwner: false, postgresVersion: postgres-17.6}}'
+# the successor of a hand-over: the file (rev1) says owner, the inline values (the old main) still say false
+render_fleet i1 shared "$FLEET_PAIR" 'instance: {namespace: shared, sharedSecretsOwner: false}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23 review: the successor renders the shared Secrets when fleet.yaml at the synced commit makes it the owner, whatever the stale inline values say" || bad "race successor" "$(names)"
+# the old owner: the file says false, the inline values (the old main) still say owner
+render_fleet i2 shared "$FLEET_PAIR" 'instance: {namespace: shared, sharedSecretsOwner: true}'
+[[ "$RC" -eq 0 ]] && ! names | grep -qE '^(ServiceAccount|VaultStaticSecret)/' \
+  && ok "23 review: the old owner stops rendering them when fleet.yaml at the synced commit says false, whatever the inline values say" || bad "race old owner" "$(names)"
+# an entry without the key owns them (the default), also against an inline false
+render_fleet i1 shared '      i1: {instance: {namespace: shared, postgresVersion: postgres-17.6}}' 'instance: {sharedSecretsOwner: false}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23 review: an entry in fleet.yaml without sharedSecretsOwner is an owner" || bad "race default" "$(names)"
+# an instance that is not in the file (a render by hand with another fleet.yaml): the inline value
+render_fleet i9 shared "$FLEET_PAIR" 'instance: {namespace: shared, sharedSecretsOwner: false}'
+[[ "$RC" -eq 0 ]] && ! names | grep -qE '^(ServiceAccount|VaultStaticSecret)/' \
+  && ok "23 review: an instance with no entry in the fleet.yaml value file falls back to the inline value" || bad "race fallback" "$(names)"
+render_fleet i1 shared '      i1: {instance: {namespace: shared, sharedSecretsOwner: maybe, postgresVersion: postgres-17.6}}' ''
+[[ "$RC" -ne 0 ]] && grep -q 'instance.sharedSecretsOwner "maybe" must be true or false' <<<"$OUT" \
+  && ok "23 review: a sharedSecretsOwner in fleet.yaml that is not true or false fails the render" || bad "race invalid" "$OUT"
+
+# ---- Round 23 review: the FerretDB pods have their own policy pair (they lack the postgres-instance label)
+render_ns i1 pg-i1 'network: {policy: baseline, ingressFromNamespaces: [app], egressToCidrs: [10.9.0.0/16]}
+ferret: {enabled: true}'
+pols="$(yq -r 'select(.kind == "NetworkPolicy" or .kind == "CiliumNetworkPolicy") | .metadata.name' <<<"$OUT" | grep '^tpg-' | sort | paste -sd,)"
+[[ "$RC" -eq 0 && "$pols" == "tpg-egress-ferretdb-i1,tpg-egress-i1,tpg-ingress-ferretdb-i1,tpg-ingress-i1" ]] \
+  && ok "23 review: with FerretDB there are two more policies: tpg-ingress-ferretdb-<instance> and tpg-egress-ferretdb-<instance>" || bad "ferret policy names" "$pols $OUT"
+pycheck 'N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["podSelector"] == {"matchExpressions": [{"key": "app", "operator": "In", "values": ["ferretdb-rw-i1", "ferretdb-ro-i1"]}]}
+  and N("CiliumNetworkPolicy", "tpg-egress-ferretdb-i1")["spec"]["endpointSelector"] == {"matchExpressions": [{"key": "app", "operator": "In", "values": ["ferretdb-rw-i1", "ferretdb-ro-i1"]}]}' \
+  && ok "23 review: they select the FerretDB pods: app in (ferretdb-rw-<instance>, ferretdb-ro-<instance>)" || bad "ferret selector" "$(yq 'select(.kind == "NetworkPolicy" or .kind == "CiliumNetworkPolicy") | .spec | pick(["podSelector", "endpointSelector"])' <<<"$OUT")"
+pycheck '[r for r in N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["ingress"]] == [
+    {"from": [{"podSelector": {}}]},
+    {"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "tanzu-postgres-operator"}}}]},
+    {"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "app"}}}], "ports": [{"protocol": "TCP", "port": 27017}]}]
+  and N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["policyTypes"] == ["Ingress"]' \
+  && ok "23 review: the FerretDB ingress policy denies by default and allows the namespace, the operator and 27017 from the clients" || bad "ferret ingress" "$(yq 'select(.metadata.name == "tpg-ingress-ferretdb-i1")' <<<"$OUT")"
+pycheck 'N("CiliumNetworkPolicy", "tpg-egress-ferretdb-i1")["spec"]["egress"] == N("CiliumNetworkPolicy", "tpg-egress-i1")["spec"]["egress"]' \
+  && ok "23 review: the FerretDB egress rules are those of the instance's egress policy (what the pods had before Round 23)" || bad "ferret egress" "$(yq 'select(.metadata.name == "tpg-egress-ferretdb-i1")' <<<"$OUT")"
+pycheck 'not any(p.get("port") == 27017 for r in N("NetworkPolicy", "tpg-ingress-i1")["spec"]["ingress"] for p in r.get("ports", []))
+  and N("NetworkPolicy", "tpg-ingress-i1")["spec"]["podSelector"] == {"matchLabels": {"postgres-instance": "i1"}}' \
+  && ok "23 review: the Postgres pods' policy keeps the postgres-instance selector and carries no 27017 rule" || bad "pg policy with ferret" "$(yq 'select(.metadata.name == "tpg-ingress-i1")' <<<"$OUT")"
+render_ns i1 pg-i1 'network: {policy: baseline}'
+! names | grep -q 'ferretdb' && ok "23 review: no FerretDB policies without FerretDB" || bad "no ferret policies" "$(names)"
+render_ns i1 pg-i1 'network: {policy: baseline}
+ferret: {enabled: true}'
+pycheck 'len(N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["ingress"]) == 2' \
+  && ok "23 review: FerretDB without client rules: the deny and the namespace and operator rules only (no empty peer list)" || bad "ferret no clients" "$(yq 'select(.metadata.name == "tpg-ingress-ferretdb-i1")' <<<"$OUT")"
 
 echo
 echo "chart: ${PASS} passed, ${FAIL} failed"

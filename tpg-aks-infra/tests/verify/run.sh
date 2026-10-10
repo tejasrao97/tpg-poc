@@ -184,12 +184,16 @@ clusters:
       app-b: {instance: {namespace: shared, postgresVersion: postgres-17.6}}
       app-c: {instance: {namespace: other, sharedSecretsOwner: false, postgresVersion: postgres-17.6}}
       app-d: {instance: {namespace: kube-system, postgresVersion: postgres-17.6}}
+      app-e: {instance: {namespace: kube-team, postgresVersion: postgres-17.6}}
+      app-f: {instance: {namespace: vault-secrets-operator-system, postgresVersion: postgres-17.6}}
 YAML
 run_verify > "$TMP/all"
 assert "two owners in one namespace are an issue" 'namespace shared shared Secrets'
 assert "and the issue names them" '2 of the instances app-a, app-b render the shared Secrets'
 assert "a namespace without an owner is an issue" 'namespace other shared Secrets'
 assert "a reserved namespace is an issue" 'instance aks-tpg-poc-01/app-d namespace kube-system'
+assert "a name starting with kube- is an issue (the reserved prefix of cluster-map-keys.yaml)" 'instance aks-tpg-poc-01/app-e namespace kube-team'
+assert "a namespace the fleet installs into (the Vault Secrets Operator) is an issue" 'instance aks-tpg-poc-01/app-f namespace vault-secrets-operator-system'
 if [[ -n "$ORIG_FLD" ]]; then export FLEET_LOCAL_DIR="$ORIG_FLD"; else unset FLEET_LOCAL_DIR; fi
 
 # ------------------------------------------------------------------ summary only

@@ -19,11 +19,17 @@
 # P_DRY_RUN=true records the plan and changes nothing. The Azure Blob backup repository is
 # never deleted.
 # Namespaces (Round 23): an instance's namespace is instance.namespace of its entry in
-# clusters/fleet.yaml (default pg-<instance>); "its own namespace" below means that one. purgeNamespace
+# clusters/fleet.yaml (default pg-<instance>; the audit copy in clusters/deleted when the entry is gone,
+# lib.sh instance_ns_known); "its own namespace" below means that one. A live Postgres outside the
+# namespace of its entry or copy is not an instance of tpg-instances: it is left alone and reported
+# (warning POSTGRES_SKIPPED; tpg-instances:<name> selects it). purgeNamespace
 # on an instance whose namespace another instance outside this run still uses is refused
-# (NAMESPACE_SHARED, nothing changes); instances of the run that share a namespace are deleted first
-# and the namespace goes after the last of them. With deleteOperator the run removes everything: the
-# namespaces purged are deleted after the last instance of them whoever else was there.
+# (NAMESPACE_SHARED, nothing changes), and so is purgeNamespace=true for one instance of a namespace
+# when another instance of the run in it has purgeNamespace=false; instances of the run that share a
+# namespace and all purge it are deleted first and the namespace goes after the last of them. With
+# deleteOperator the run removes everything: the namespaces purged are deleted after the last instance
+# of them whoever else was there. The owner of the shared Secrets of a namespace hands them over to an
+# instance that stays (never to one of the run).
 # Environment: P_APPS P_DRY_RUN P_PURGE_PVCS P_PURGE_NS P_FORCE P_FORCE_DELETE_STUCK P_FINAL_BACKUP P_TIMEOUT
 #              PUSH_MODE PR_TIMEOUT_SECONDS
 WF="$1"; C="$2"
@@ -63,10 +69,11 @@ declared="$(fleet_instances "$REPO" "$C")"
 has_crd=false; tk get crd postgres.sql.tanzu.vmware.com >/dev/null 2>&1 && has_crd=true
 live="[]"
 [[ "$has_crd" == "true" ]] && live="$(tk get postgres -A -o json | jq -c '[.items[]? | {name: .metadata.name, namespace: .metadata.namespace}]')"
-# the namespace each live instance should be in: its entry in clusters/fleet.yaml (default pg-<instance>)
+# the namespace each live instance should be in: its entry in clusters/fleet.yaml (default pg-<instance>),
+# else the audit copy of a deleted entry in clusters/deleted (exactly <instance>-<yyyymmddHHMM>.yaml)
 live="$(while read -r row; do
     [[ -n "$row" ]] || continue
-    jq -c --arg e "$(instance_ns "$C" "$(jq -r .name <<<"$row")")" '. + {expected: $e}' <<<"$row"
+    jq -c --arg e "$(instance_ns_known "$REPO" "$C" "$(jq -r .name <<<"$row")")" '. + {expected: $e}' <<<"$row"
   done < <(jq -c '.[]' <<<"$live") | jq -sc '.')"
 live_names="$(jq -r '.[].name' <<<"$live")"
 
@@ -74,6 +81,12 @@ live_names="$(jq -r '.[].name' <<<"$live")"
 targets=""
 if [[ "$ALL_INSTANCES" == "true" ]]; then
   targets="$(printf '%s\n%s\n' "$declared" "$(jq -r '.[] | select(.namespace == .expected) | .name' <<<"$live")" | grep -v '^$' | sort -u || true)"
+  # a Postgres outside the namespace of its entry or audit copy is not one of ours: left alone, and said so
+  while read -r row; do
+    [[ -n "$row" ]] || continue
+    record_entry "warning.${C}.$(jq -r '.namespace + "." + .name' <<<"$row")" WARNING POSTGRES_SKIPPED \
+      "Postgres $(jq -r '.namespace + "/" + .name' <<<"$row") is not in the namespace its fleet.yaml entry or audit copy gives ($(jq -r .expected <<<"$row")), so tpg-instances leaves it alone; select it with tpg-instances:$(jq -r .name <<<"$row") to delete it"
+  done < <(jq -c '.[] | select(.namespace != .expected)' <<<"$live")
 else
   while read -r i; do
     [[ -n "$i" ]] || continue
@@ -104,19 +117,31 @@ if [[ "$DELETE_OPERATOR" == "true" && "$has_crd" == "true" ]]; then
     fi
   fi
 fi
-# purgeNamespace on a namespace that instances outside this run still use: refused before anything changes
-# (deleteOperator removes everything, so it is allowed there)
-if [[ "$DELETE_OPERATOR" != "true" ]]; then
-  for i in $targets; do
-    [[ "$(cmap_ival "$C" "$i" purgeNamespace "${P_PURGE_NS:-}")" == "true" ]] || continue
-    ins="$(instance_ns "$C" "$i")"
-    stay="$(for o in $(fleet_ns_members "$REPO" "$C" "$ins"); do
-        grep -Fqx -- "$o" <<<"$targets" || printf '%s ' "$o"
-      done)"
-    stay="${stay% }"
-    [[ -z "$stay" ]] || cfail "$i" NAMESPACE_SHARED "purgeNamespace=true would delete namespace ${ins}, which ${stay// /, } also use(s) and which this run does not delete; delete them too, or set purgeNamespace=false for ${i}"
+# purgeNamespace, refused before anything changes (NAMESPACE_SHARED):
+#   - on a namespace that instances outside this run still use (deleteOperator removes everything, so it
+#     is allowed there)
+#   - when instances of the run share the namespace and not every one of them has purgeNamespace=true:
+#     the namespace is deleted once, after the last of them, and would take the PVCs of the one that
+#     keeps them (purgePvcs=false, purgeNamespace=false); with deleteOperator as well
+for i in $targets; do
+  [[ "$(cmap_ival "$C" "$i" purgeNamespace "${P_PURGE_NS:-}")" == "true" ]] || continue
+  ins="$(instance_ns_known "$REPO" "$C" "$i")"
+  keeps=""
+  for j in $targets; do
+    [[ "$j" != "$i" && "$(instance_ns_known "$REPO" "$C" "$j")" == "$ins" ]] || continue
+    [[ "$(cmap_ival "$C" "$j" purgeNamespace "${P_PURGE_NS:-}")" == "true" ]] || keeps="${keeps:+${keeps} }${j}"
   done
-fi
+  if [[ -n "$keeps" ]]; then
+    cfail "$i" NAMESPACE_SHARED "purgeNamespace=true would delete namespace ${ins}, which ${keeps// /, } also use(s) in this run with purgeNamespace=false (their PVCs are meant to stay); set purgeNamespace=true for ${keeps// /, } too, or false for ${i}"
+    continue
+  fi
+  [[ "$DELETE_OPERATOR" != "true" ]] || continue
+  stay="$(for o in $( { fleet_ns_members "$REPO" "$C" "$ins"; jq -r --arg ns "$ins" '.[] | select(.namespace == $ns) | .name' <<<"$live"; } | sort -u); do
+      grep -Fqx -- "$o" <<<"$targets" || printf '%s ' "$o"
+    done)"
+  stay="${stay% }"
+  [[ -z "$stay" ]] || cfail "$i" NAMESPACE_SHARED "purgeNamespace=true would delete namespace ${ins}, which ${stay// /, } also use(s) and which this run does not delete; delete them too, or set purgeNamespace=false for ${i}"
+done
 [[ "$failed" -eq 0 ]] || exit 1
 
 crds="$(tk get crd -o name 2>/dev/null | sed 's#^customresourcedefinition.apiextensions.k8s.io/##' | grep '\.sql\.tanzu\.vmware\.com$' || true)"

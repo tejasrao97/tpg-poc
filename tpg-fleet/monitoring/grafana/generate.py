@@ -44,11 +44,18 @@ ARGS = _ap.parse_args()
 # Confirm on the hub: curl -s http://<controller-metrics-svc>:8080/metrics | grep tpg_
 
 # Round 23: instances live in the namespace of their fleet.yaml entry (default pg-<instance>) and may
-# share one, so no query selects namespaces by a pg- prefix any more. The pods of an instance are the series
-# up{postgres_instance=...}: the PodMonitor postgres-instances (namespaceSelector any) copies the pod
-# label postgres-instance to postgres_instance (podTargetLabels). The StatefulSet of an instance is
-# named like the instance, so a StatefulSet series is matched to it by (cluster, namespace, statefulset).
-STS_ALL = 'label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)")'
+# share one, so no query selects namespaces by a pg- prefix any more. The StatefulSet of an instance is
+# named like the instance, so a kube-state-metrics StatefulSet series is matched to an instance by
+# (cluster, namespace, statefulset), with namespace and statefulset taken from the series of the
+# Postgres custom resource (tanzu_postgres_instance_state: instance_namespace, instance_name). The
+# custom resource exists as long as the instance does, also when it has no pod at all (a single-node
+# instance whose only pod is gone); a match on up{postgres_instance} would miss exactly that case.
+def sts_of(selector=""):
+    return ('label_replace(label_replace(max by (cluster, instance_namespace, instance_name) (tanzu_postgres_instance_state%s), '
+            '"namespace", "$1", "instance_namespace", "(.*)"), "statefulset", "$1", "instance_name", "(.*)")' % selector)
+
+
+STS_ALL = sts_of()
 
 
 ALERTS = [
@@ -393,7 +400,7 @@ V_INSTANCE = var_query("instance", "Instance",
 PG = 'cluster=~"$cluster", postgres_instance=~"$instance"'
 CR = 'cluster=~"$cluster", instance_name=~"$instance"'
 PODS = 'max by (cluster, namespace, pod) (up{%s})' % PG
-STS = 'label_replace(max by (cluster, namespace, postgres_instance) (up{%s}), "statefulset", "$1", "postgres_instance", "(.*)")' % PG
+STS = sts_of("{%s}" % CR)
 PVCS = '(kube_pod_spec_volumes_persistentvolumeclaims_info and on (cluster, namespace, pod) %s)' % PODS
 CL = 'cluster=~"$cluster"'
 

@@ -22,7 +22,15 @@
 #     the namespace is deleted after the last instance of it, by tpg-delete-apps; NS_PURGE_FILE)
 #   - the PVCs of the purge are the ones of this instance (label postgres-instance), not every PVC
 #   - an owner of the shared Secrets hands them over to a remaining instance before its entry leaves
-#     Git (lib.sh ns_handover: one Argo CD Application owns the objects at any moment)
+#     Git (lib.sh ns_handover: the successor's Application must exist; the owner flags move in one
+#     commit; only the shared objects of the successor's Application are synced; the tracking
+#     annotation and the Secrets are checked; one Argo CD Application owns the objects at any moment).
+#     A failure after the flag commit reverts it (HANDOVER_FAILED, the instance stays). With
+#     DELETE_RUN_INSTANCES the successor is one of the other instances that stay, never one that
+#     leaves in the same run
+#   - when the entry is already gone (a re-run) the namespace is read from the audit copy
+#     clusters/deleted/<cluster>/<instance>-<yyyymmddHHMM>.yaml (exactly that name, lib.sh deleted_copy) and
+#     checked against the live Postgres (NAMESPACE_MISMATCH, NAMESPACE_AMBIGUOUS: lib.sh gone_instance_ns)
 # DELETE_FROM_MAP=true (tpg-delete-instance, tpg-delete-apps): finalBackup,
 # purgePvcs and purgeNamespace come from clusterMap (P_CLUSTER_MAP) when set for
 # the instance, and the clusterMap postgresVersion guard applies.
@@ -48,7 +56,7 @@ git_clone "$WORK/repo"
 fleet_materialize "$WORK/repo"
 f="$WORK/fleet/${C}/${I}.yaml"
 if [[ ! -f "$f" ]]; then
-  if ls "$WORK/repo/clusters/deleted/${C}/${I}-"*.yaml >/dev/null 2>&1; then
+  if deleted_copy "$WORK/repo" "$C" "$I" >/dev/null; then
     notes+=("instance already removed from fleet.yaml (re-run)")
   elif [[ "${ALLOW_UNTRACKED:-false}" == "true" ]]; then
     notes+=("instance was not declared in fleet.yaml")
@@ -57,15 +65,15 @@ if [[ ! -f "$f" ]]; then
   fi
 fi
 use_cluster "$C" || fail NOT_REGISTERED
-# ---- the namespace of the instance (Round 23): its entry, else the audit copy of a deleted entry, else
-#      the live Postgres of that name (ALLOW_UNTRACKED), else pg-<instance>
+# ---- the namespace of the instance (Round 23): its entry; when the entry is gone (a re-run) the audit copy
+#      clusters/deleted/<cluster>/<instance>-<yyyymmddHHMM>.yaml, matched by exactly that name and checked
+#      against the live Postgres (lib.sh gone_instance_ns); without a copy the live Postgres of that name
+#      (ALLOW_UNTRACKED), never a guess when two have it
 if [[ -f "$f" ]]; then
-  NS="$(instance_ns "$C" "$I")"
+  NS="$(instance_ns "$C" "$I")" || fail FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"
 else
-  copy="$(compgen -G "$WORK/repo/clusters/deleted/${C}/${I}-*.yaml" | sort | tail -n1 || true)"
-  if [[ -n "$copy" ]]; then NS="$(yq -r '.instance.namespace // ""' "$copy")"
-  else NS="$(tk get postgres -A -o json 2>/dev/null | jq -r --arg i "$I" '[.items[]? | select(.metadata.name == $i) | .metadata.namespace] | if length == 1 then .[0] else empty end' || true)"; fi
-  NS="${NS:-pg-${I}}"
+  gone_instance_ns "$WORK/repo" "$C" "$I" || fail "$GONE_REASON" "$GONE_DETAIL"
+  NS="$GONE_NS"
 fi
 if [[ "${DELETE_FROM_MAP:-false}" == "true" ]] && ! g="$(cmap_guard "$C" "$I")"; then
   record "$key" SKIPPED_VERSION_MISMATCH "" "$g"
@@ -134,7 +142,7 @@ if [[ -f "$f" && -n "$SHARED" ]]; then
   for o in $SHARED; do grep -Fqx -- "$o" <<<"$RUN_LEAVES" || stay="${stay:+${stay} }${o}"; done
   if [[ -z "$stay" ]]; then
     notes+=("shared Secrets of ${NS} stay: every other instance of it leaves in this run")
-  elif ! ns_handover "$WORK/repo" "$C" "$I" "$NS" "$TIMEOUT"; then
+  elif ! ns_handover "$WORK/repo" "$C" "$I" "$NS" "$TIMEOUT" "$stay"; then
     fail "$HANDOVER_REASON" "$HANDOVER_DETAIL"
   elif [[ -n "$HANDOVER_NOTE" ]]; then
     notes+=("$HANDOVER_NOTE")

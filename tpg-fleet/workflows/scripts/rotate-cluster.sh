@@ -22,7 +22,12 @@ if ! use_cluster "$C" || ! tk get --raw=/readyz >/dev/null 2>&1; then
 fi
 # the namespaces of the instances declared for the cluster (Round 23: instance.namespace, not pg-<instance>)
 repo="$(instance_ns_repo)" || fail FLEET_UNREADABLE "the fleet repository could not be cloned to read the instance namespaces"
-FLEET_NS="$(for i in $(fleet_instances "$repo" "$C"); do instance_ns "$C" "$i"; echo; done | grep -v '^$' | sort -u)"
+FLEET_NS=""
+for i in $(fleet_instances "$repo" "$C"); do
+  ns="$(instance_ns "$C" "$i")" || fail FLEET_UNREADABLE "${i}: ${FLEET_UNREADABLE_DETAIL}"
+  FLEET_NS="${FLEET_NS}${ns}"$'\n'
+done
+FLEET_NS="$(printf '%s' "$FLEET_NS" | grep -v '^$' | sort -u || true)"
 mapfile -t NSS < <(tk get namespace -l tpg.fleet/managed=true -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
   | grep -Fx -f <(printf '%s\n' tanzu-postgres-operator "$FLEET_NS") | sort | awk '$0 == "tanzu-postgres-operator" { print "0 " $0; next } { print "1 " $0 }' | sort | cut -d' ' -f2 || true)
 [[ "${#NSS[@]}" -gt 0 ]] || { record "$key" SKIPPED NO_MANAGED_NAMESPACES; exit 0; }

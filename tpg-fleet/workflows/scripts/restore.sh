@@ -38,11 +38,11 @@ DST_C="${P_TARGET_CLUSTER:-$SRC_C}"; T="${P_TARGET_INSTANCE:-}"; CONFIRM="${P_CO
 BEST="${P_BEST_EFFORT:-false}"; TIMEOUT="${P_TIMEOUT:-7200}"
 export PUSH_MODE="${P_PUSH_MODE:-direct}" PR_TIMEOUT_SECONDS="${P_PR_TIMEOUT:-3600}"
 key="result.${DST_C}"
-SRC_NS="$(instance_ns "$SRC_C" "$I")"   # an existing instance: its namespace from clusters/fleet.yaml (Round 23)
 fail() { record "$key" FAILED "$1" "${2:-}"; exit 1; }
 result_guard "$key"
+SRC_NS="$(instance_ns "$SRC_C" "$I")" || fail FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"   # an existing instance: its namespace from clusters/fleet.yaml (Round 23)
 [[ -n "$T" ]] || T="${I}-restore-$(date -u +%Y%m%d%H%M)"
-DST_NS="$(instance_ns "$DST_C" "$T")"   # a declared target keeps its namespace; a new one gets pg-<instance> (the restore rewrite takes it as an input)
+DST_NS="$(instance_ns "$DST_C" "$T")" || fail FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"   # a declared target keeps its namespace; a new one gets pg-<instance> (the restore rewrite takes it as an input)
 IN_PLACE=false
 [[ "$DST_C" == "$SRC_C" && "$T" == "$I" ]] && IN_PLACE=true
 

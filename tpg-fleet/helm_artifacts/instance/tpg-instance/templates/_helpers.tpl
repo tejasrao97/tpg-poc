@@ -6,17 +6,43 @@
 {{- /* Round 23: the instance namespace. Argo CD deploys into instance.namespace (default pg-<instance>); a render in another namespace is a mistake in the values */ -}}
 {{- $ns := toString (default "" .Values.instance.namespace) -}}
 {{- if and $ns (ne $ns .Release.Namespace) }}{{ fail (printf "instance.namespace %q differs from the release namespace %q: render with --namespace %s (the tpg-instances ApplicationSet deploys into instance.namespace)" $ns .Release.Namespace $ns) }}{{ end -}}
-{{- if not (has (toString .Values.instance.sharedSecretsOwner) (list "true" "false")) }}{{ fail (printf "instance.sharedSecretsOwner %q must be true or false" (toString .Values.instance.sharedSecretsOwner)) }}{{ end -}}
+{{- if not (has (include "tpg.sharedSecretsOwnerValue" .) (list "true" "false")) }}{{ fail (printf "instance.sharedSecretsOwner %q must be true or false" (include "tpg.sharedSecretsOwnerValue" .)) }}{{ end -}}
+{{- end -}}
+
+{{- /*
+tpg.sharedSecretsOwnerValue: the instance.sharedSecretsOwner the chart acts on, as the string
+"true" or "false" (or whatever the entry holds, for tpg.required to refuse). When the entry of the
+instance is in the fleet.yaml value file (.Values.clusters, the way tpg.patchRef reads the patch
+records), the flag comes from that entry: the file is read from Git at the commit being synced.
+The inline Helm values of the tpg-instances ApplicationSet are built from the fleet branch by the
+generator and refreshed asynchronously, so right after tpg-delete-instance moved the shared Secrets
+to another instance they still hold the old owner; the ownership must follow the synced commit, or
+the successor would render as a non-owner and the old owner would keep tracking objects it no
+longer renders. An entry without the key owns them (the default, true). Without fleet.yaml (a
+render by hand) the inline value is used.
+*/ -}}
+{{- define "tpg.sharedSecretsOwnerValue" -}}
+{{- $v := .Values -}}
+{{- $flag := $v.instance.sharedSecretsOwner -}}
+{{- if hasKey $v "clusters" -}}
+{{- /* dig on the nested map: .Values itself is chartutil.Values, which dig cannot read */ -}}
+{{-   $ent := dig (toString $v.cluster.name) "instances" (toString $v.instance.name) "" (default dict $v.clusters) -}}
+{{-   if kindIs "map" $ent -}}
+{{-     $ins := default dict (get $ent "instance") -}}
+{{-     $flag = ternary (get $ins "sharedSecretsOwner") true (hasKey $ins "sharedSecretsOwner") -}}
+{{-   end -}}
+{{- end -}}
+{{- toString $flag -}}
 {{- end -}}
 
 {{- /*
 tpg.sharedSecretsOwner: "true" when this instance renders the objects of its namespace that two
 instances would both name the same (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and
-backup-storage), "false" otherwise (Round 23). Read from the chart values, not from the context
-the patch files are merged into: a patch file cannot move the ownership.
+backup-storage), "false" otherwise (Round 23). Read from the chart values (tpg.sharedSecretsOwnerValue),
+not from the context the patch files are merged into: a patch file cannot move the ownership.
 */ -}}
 {{- define "tpg.sharedSecretsOwner" -}}
-{{- ternary "false" "true" (eq (toString .Values.instance.sharedSecretsOwner) "false") -}}
+{{- ternary "false" "true" (eq (include "tpg.sharedSecretsOwnerValue" .) "false") -}}
 {{- end -}}
 
 {{- /*

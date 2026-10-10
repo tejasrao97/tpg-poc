@@ -135,27 +135,42 @@ if grep -rnE 'namespace(=~|=)\\?"pg-' "$ROOT/monitoring" "$GEN" >"$TMP/pgns.out"
 else
   ok "no dashboard or alert rule filters on a pg-* namespace (generator and generated files)"
 fi
-if grep -q 'postgres_instance!=""' "$RULES" && grep -q 'and on (cluster, namespace, pod)' "$ROOT/monitoring/standalone/hub/dashboards/tpg-instance.json"; then
-  ok "the replicas alert and the instance dashboard select pods and StatefulSets by the postgres_instance label"
+if grep -q 'tanzu_postgres_instance_state' "$RULES" && ! grep -q 'kube_statefulset_replicas and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{' "$RULES" \
+   && grep -q 'and on (cluster, namespace, pod)' "$ROOT/monitoring/standalone/hub/dashboards/tpg-instance.json"; then
+  ok "the replicas alert selects StatefulSets by the Postgres custom resource (tanzu_postgres_instance_state), the instance dashboard narrows pods by the postgres_instance label"
 else
-  bad "the replicas alert or the instance dashboard does not use the postgres_instance label"
+  bad "the replicas alert still matches StatefulSets through up{postgres_instance}, or the instance dashboard does not use the postgres_instance label"
 fi
 if command -v promtool >/dev/null; then
   python3 - "$RULES" >"$TMP/rules-unit.yaml" <<'PY'
 import sys, yaml
 print(yaml.safe_dump(yaml.safe_load(open(sys.argv[1]))["spec"], sort_keys=False))
 PY
-  # TanzuPostgresReplicasBelowDesired: team-db/orders is an instance in a custom namespace (one of two ready), pg-x/other
-  # is a StatefulSet that is not a Postgres instance (no postgres_instance series: never an alert)
+  # TanzuPostgresReplicasBelowDesired, matched through the Postgres custom resource (tanzu_postgres_instance_state:
+  # instance_namespace, instance_name), not through a pod:
+  #   team-db/orders   an instance in a custom namespace, one of two pods ready (it has a pod series)
+  #   pg-solo/solo     a single-node instance with no pod at all (no up series): replicas 1, ready 0
+  #   shared/a, b      two instances in one namespace: only b is below desired, the alert names b alone
+  #   pg-x/other       a StatefulSet that is no Postgres instance (no custom resource): never an alert
   cat >"$TMP/unit.yaml" <<YAML
 rule_files: [$TMP/rules-unit.yaml]
 evaluation_interval: 1m
 tests:
   - interval: 1m
     input_series:
+      - {series: 'tanzu_postgres_instance_state{cluster="c1", instance_namespace="team-db", instance_name="orders", state="Running"}', values: '1x15'}
       - {series: 'up{cluster="c1", namespace="team-db", pod="orders-0", postgres_instance="orders"}', values: '1x15'}
       - {series: 'kube_statefulset_replicas{cluster="c1", namespace="team-db", statefulset="orders"}', values: '2x15'}
       - {series: 'kube_statefulset_status_replicas_ready{cluster="c1", namespace="team-db", statefulset="orders"}', values: '1x15'}
+      - {series: 'tanzu_postgres_instance_state{cluster="c1", instance_namespace="pg-solo", instance_name="solo", state="Unavailable"}', values: '1x15'}
+      - {series: 'kube_statefulset_replicas{cluster="c1", namespace="pg-solo", statefulset="solo"}', values: '1x15'}
+      - {series: 'kube_statefulset_status_replicas_ready{cluster="c1", namespace="pg-solo", statefulset="solo"}', values: '0x15'}
+      - {series: 'tanzu_postgres_instance_state{cluster="c1", instance_namespace="shared", instance_name="a", state="Running"}', values: '1x15'}
+      - {series: 'tanzu_postgres_instance_state{cluster="c1", instance_namespace="shared", instance_name="b", state="Running"}', values: '1x15'}
+      - {series: 'kube_statefulset_replicas{cluster="c1", namespace="shared", statefulset="a"}', values: '2x15'}
+      - {series: 'kube_statefulset_status_replicas_ready{cluster="c1", namespace="shared", statefulset="a"}', values: '2x15'}
+      - {series: 'kube_statefulset_replicas{cluster="c1", namespace="shared", statefulset="b"}', values: '2x15'}
+      - {series: 'kube_statefulset_status_replicas_ready{cluster="c1", namespace="shared", statefulset="b"}', values: '1x15'}
       - {series: 'kube_statefulset_replicas{cluster="c1", namespace="pg-x", statefulset="other"}', values: '3x15'}
       - {series: 'kube_statefulset_status_replicas_ready{cluster="c1", namespace="pg-x", statefulset="other"}', values: '0x15'}
     alert_rule_test:
@@ -164,11 +179,15 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, cluster: c1, namespace: team-db, statefulset: orders}
             exp_annotations: {summary: "c1/orders has fewer ready pods than desired"}
+          - exp_labels: {severity: warning, cluster: c1, namespace: pg-solo, statefulset: solo}
+            exp_annotations: {summary: "c1/solo has fewer ready pods than desired"}
+          - exp_labels: {severity: warning, cluster: c1, namespace: shared, statefulset: b}
+            exp_annotations: {summary: "c1/b has fewer ready pods than desired"}
 YAML
   if promtool test rules "$TMP/unit.yaml" >"$TMP/unit.out" 2>&1; then
-    ok "promtool test rules: a StatefulSet below desired in a custom namespace alerts; one that is not a Postgres instance does not"
+    ok "promtool test rules: below desired alerts in a custom namespace, for an instance with no pod at all, and for one of two instances in a namespace; a StatefulSet that is no instance does not"
   else
-    bad "promtool test rules (replicas below desired in a custom namespace)" "$(cat "$TMP/unit.out")"
+    bad "promtool test rules (replicas below desired: custom namespace, no pod, two instances in one namespace)" "$(cat "$TMP/unit.out")"
   fi
 fi
 
