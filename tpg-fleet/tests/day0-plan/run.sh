@@ -443,8 +443,24 @@ S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_CLUS
 jq -e '.clusters.c1.instances["ssl-on"] as $a | .clusters.c1.instances["ssl-off"] as $b
   | $a.backup.enableSSL == true and $b.backup.enableSSL == false
   and ($a.instance | has("disableInitialBackup") | not) and ($b.instance | has("disableInitialBackup") | not)' /tmp/fleet.json >/dev/null \
-  && ok "23: clusterMap backupEnableSSL true writes backup.enableSSL true, false does not, and neither writes instance.disableInitialBackup" \
+  && ok "23: clusterMap backupEnableSSL true writes backup.enableSSL true and false writes false; neither writes instance.disableInitialBackup" \
   || bad "23 clusterMap backupEnableSSL" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# tpg-day0 (no FLEET_MODE) takes the same clusterMap path; a running instance keeps its entry, so
+# disableInitialBackup (new instances only) is not written to it
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" S_CA="$CA1" env P_CLUSTERS=c1 P_OPERATOR_VERSION=v4.5.0 P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, disableInitialBackup: true}
+    new-a: {postgresVersion: "17.6", highAvailability: false, disableInitialBackup: true}
+    ssl-on: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: true}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances as $i
+  | ($i["orders-db"].instance | has("disableInitialBackup") | not)
+  and $i["new-a"].instance.disableInitialBackup == true and (($i["new-a"].backup.enableSSL // false) | not)
+  and $i["ssl-on"].backup.enableSSL == true and ($i["ssl-on"].backup.caBundle | startswith("@ca:"))' /tmp/fleet.json >/dev/null \
+  && ! grep -q '|FAILED|' "$TMP/records" \
+  && ok "23: tpg-day0 clusterMap: disableInitialBackup on new instances only, backupEnableSSL writes enableSSL and the CA placeholder" \
+  || bad "23 day0 clusterMap" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/records")"
 # Round 15 (1c, 1e): several postgres patch files, one kind each, at creation
 reset
 S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
