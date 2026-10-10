@@ -39,6 +39,8 @@ LOCAL_CA = re.compile(r"^(/|~/)?((\.\.?|" + _SEG + r")/)*" + _SEG + r"\.(pem|crt
 # repo:<path>: a file of the fleet repository, relative to its root, no .. and no ./
 REPO_FILE = re.compile(r"^(" + _SEG + r"/)*" + _SEG + r"\.ya?ml$")
 REPO_CA = re.compile(r"^(" + _SEG + r"/)*" + _SEG + r"\.(pem|crt|cer)$")
+# the per-cluster copies the workflows write of the operator files: never a source
+OPERATOR_COPY = re.compile(r"^repo:helm_artifacts/operator/(patches|overlays)/clusters/")
 PATCH_KINDS = ["Postgres", "PostgresBackupLocation", "PostgresBackupSchedule", "PostgresFerretDocumentDB",
                "postgresValues", "operatorValues"]
 # Kubernetes annotation/label key: optional DNS prefix, then a name
@@ -127,8 +129,8 @@ def check_patch_file(spec, value, where):
                        f"relative to its root (no leading /, no ..)")
         if d and not r.startswith(d):
             return p, f"{where}: '{p}' must be a file under {d} of the fleet repository (repo:{d}<file>)"
-        if r.startswith("helm_artifacts/operator/patches/clusters/"):
-            return p, f"{where}: '{p}' is a copy the workflows write per cluster; name the stored file under helm_artifacts/operator/patches/"
+        if OPERATOR_COPY.match(p):
+            return p, f"{where}: '{p}' is a copy the workflows write per cluster; name the stored file under {d or 'helm_artifacts/operator/'}"
         return p, None
     if not (LOCAL_CA if ca else LOCAL_FILE).match(p):
         return p, (f"{where}: '{p}' must be the path of one {what} on the submitting machine "

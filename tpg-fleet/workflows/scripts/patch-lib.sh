@@ -228,14 +228,15 @@ patch_warnings() {  # patch_warnings CLUSTER: after the render, the overrides an
 
 # ---- rendering
 patch_operator_render() {  # patch_operator_render CLUSTER OUT_FILE: the operator chart with the effective values file
-  local c="$1" opv eff host
+  local c="$1" opv eff ovl host
   opv="$(C="$c" yq -r '.clusters[strenv(C)].operator.version // ""' "$REPO/$FLEET_REL")"
   eff="$REPO/$(operator_effective_rel "$c")"
+  ovl="$REPO/$(patch_group overlays; operator_effective_rel "$c")"   # the subshell leaves the current patch_group alone
   host="tanzu-sql-postgres.packages.broadcom.com"
   local -a vf=()
   # the overlay values file (initial deployment) first, the patch file on top: the order of the
   # tpg-operator ApplicationSet's valueFiles
-  [[ -f "$REPO/helm_artifacts/operator/overlays/clusters/${c}.yaml" ]] && vf=(-f "$REPO/helm_artifacts/operator/overlays/clusters/${c}.yaml")
+  [[ -f "$ovl" ]] && vf=(-f "$ovl")
   [[ -f "$eff" ]] && vf+=(-f "$eff")
   vault_secret broadcom-registry password \
     | helm registry login "$host" --username "$(vault_secret broadcom-registry username)" --password-stdin >/dev/null 2>&1 || true

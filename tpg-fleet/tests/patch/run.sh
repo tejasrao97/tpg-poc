@@ -226,6 +226,11 @@ want="$(yq -o=json -I=0 '[.spec.template.spec.ignoreDifferences[] | {(.kind): [.
 got="$(bash -c "source '$ROOT/workflows/scripts/patch-lib.sh' 2>/dev/null; printf '%s' \"\$PATCH_IGNORED_PATHS\"" | jq -c .)"
 [[ -n "$want" ]] && [[ "$(jq -cS . <<<"$want")" == "$(jq -cS . <<<"$got")" ]] \
   && ok "2 the diff ignores the fields the tpg-instances ApplicationSet ignores" || bad "2 ignored paths" "want $want got $got"
+# the tpg-operator ApplicationSet reads the per-cluster copies the scripts write: the overlays group, then the patches group
+want="$(bash -c "source '$ROOT/workflows/scripts/lib.sh' 2>/dev/null; for g in overlays patches; do patch_group \"\$g\"; operator_effective_rel c1; echo; done")"
+got="$(grep -o 'printf "\$fleet/[^"]*"' "$ROOT/bootstrap/appsets/tpg-operator.yaml" | sed -e 's#^printf "\$fleet/##' -e 's#"$##' -e 's#%s#c1#')"
+[[ -n "$got" ]] && [[ "$got" == "$want" ]] \
+  && ok "2 the tpg-operator ApplicationSet valueFiles are the per-cluster copies the scripts write (overlays, then patches)" || bad "2 operator valueFiles" "want $want got $got"
 list='{"apiVersion":"v1","kind":"List","items":[{"kind":"PostgresBackupLocation","metadata":{"name":"b"},"spec":{"storage":{"azure":{"enableSSL":false,"container":"x"}}}},{"kind":"Postgres","metadata":{"name":"p"},"spec":{"postgresVersion":{"name":"postgres-17.6"},"storageSize":"5Gi"}}]}'
 got="$(bash -c "source '$ROOT/workflows/scripts/patch-lib.sh' 2>/dev/null
   tk() { case \"\$*\" in *PostgresBackupLocation*) echo '{\"spec\":{\"storage\":{\"azure\":{\"container\":\"x\"}}}}' ;; *Postgres*) echo '{\"spec\":{\"postgresVersion\":{\"name\":\"postgres-17.7\"}}}' ;; esac; }

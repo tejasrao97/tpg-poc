@@ -283,6 +283,30 @@ vp patch P_CLUSTERS=all P_OPERATOR_VALUES_PATCH=op.yaml P_PUSH_MODE=direct P_PAT
 valid "patch: an operator values patch on every cluster (inputs) is valid"
 vp patch P_CLUSTERS=all P_PUSH_MODE=direct
 invalid "patch: no patch file at all is refused" "no patch file"
+# the repo: paths of the operator files (Round 23 phase 1: helm_artifacts/operator/{patches,overlays}/)
+vp patch P_CLUSTERS=all P_OPERATOR_VALUES_PATCH=repo:helm_artifacts/operator/patches/team.yaml P_PUSH_MODE=direct
+valid "patch: repo:helm_artifacts/operator/patches/team.yaml is a valid operator patch file"
+vp patch P_CLUSTERS=all P_OPERATOR_VALUES_PATCH=repo:helm_artifacts/operator/patches/clusters/c1.yaml P_PUSH_MODE=direct
+invalid "patch: the per-cluster patch copy is refused as an operator patch file" "is a copy the workflows write per cluster"
+vp patch P_CLUSTERS=all P_OPERATOR_VALUES_PATCH=repo:helm_artifacts/operator/overlays/clusters/c1.yaml P_PUSH_MODE=direct
+invalid "patch: the per-cluster overlay copy is refused as an operator patch file" "repo:helm_artifacts/operator/overlays/clusters/c1.yaml" "under helm_artifacts/operator/patches/"
+vp day0 P_CLUSTERS=aks-tpg-poc-01 P_INSTANCES=orders-db P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=17.6 P_PUSH_MODE=direct \
+  P_OPERATOR_VALUES_OVERLAY_FILE=repo:helm_artifacts/operator/overlays/clusters/c1.yaml
+invalid "day0: the per-cluster overlay copy is refused as an operator overlay file" "is a copy the workflows write per cluster"
+vp day0 P_CLUSTERS=aks-tpg-poc-01 P_INSTANCES=orders-db P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=17.6 P_PUSH_MODE=direct \
+  P_OPERATOR_VALUES_OVERLAY_FILE=repo:helm_artifacts/operator/patches/clusters/c1.yaml
+invalid "day0: the per-cluster patch copy is refused as an operator overlay file" "under helm_artifacts/operator/overlays/"
+vp patch P_CLUSTERS=all P_OPERATOR_VALUES_PATCH=repo:patches/operator/x.yaml P_PUSH_MODE=direct
+invalid "patch: the old path repo:patches/operator/x.yaml is refused" "repo:patches/operator/x.yaml" "under helm_artifacts/operator/patches/"
+vp patch P_CLUSTERS=all P_OPERATOR_VALUES_PATCH=repo:helm_artifacts/operator/patches/../../clusters/fleet.yaml P_PUSH_MODE=direct
+invalid "patch: a .. escape out of helm_artifacts/operator/patches is refused" "no .."
+vp patch P_CLUSTERS=aks-tpg-poc-01 P_INSTANCES=orders-db P_POSTGRES_PATCH=repo:helm_artifacts/operator/patches/team.yaml P_PUSH_MODE=direct
+invalid "patch: an operator folder file is refused as postgresPatchFilePath" "postgresPatchFilePath" "under helm_artifacts/instance/tpg-instance/patches/"
+# the clusterMap route refuses the same copies (clustermap.py and the schema)
+vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {operatorValuesPatchFilePath: repo:helm_artifacts/operator/patches/clusters/c1.yaml}' P_PUSH_MODE=direct
+invalid "patch: a clusterMap operator patch file in the per-cluster patch copy is refused" "is a copy the workflows write per cluster"
+vp day0 P_CLUSTER_MAP='aks-tpg-poc-01: {operatorVersion: v4.5.0, operatorValuesOverlayFilePath: repo:helm_artifacts/operator/overlays/clusters/c1.yaml, instances: {orders-db: {postgresVersion: "17.6", highAvailability: true}}}' P_PUSH_MODE=direct
+invalid "day0: a clusterMap operator overlay file in the per-cluster overlay copy is refused" "is a copy the workflows write per cluster"
 # 1a: the file must fit the input it is passed to
 vp patch P_CLUSTERS=aks-tpg-poc-01 P_INSTANCES=orders-db P_VALUES_PATCH=pg.yaml P_PUSH_MODE=direct P_PATCH_FILES="{\"pg.yaml\": \"${PG_OK}\"}"
 invalid "patch 1a: a Postgres manifest passed as postgresValuesPatchFilePath is refused" \

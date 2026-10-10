@@ -132,7 +132,7 @@ def value_schema(spec):
         local, repo = _file_alternatives(spec)
         s = {"type": "string", "pattern": f"^({local}|{repo})$"}
         if t == "patchFile":
-            s["not"] = {"pattern": "^repo:helm_artifacts/operator/patches/clusters/"}
+            s["not"] = {"pattern": _p(cm.OPERATOR_COPY)}
         return s
     if t == "patchFileList":
         local, repo = _file_alternatives(spec)

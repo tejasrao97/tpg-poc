@@ -16,7 +16,7 @@
         "type": "string",
         "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/operator/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$",
         "not": {
-          "pattern": "^repo:helm_artifacts/operator/patches/clusters/"
+          "pattern": "^repo:helm_artifacts/operator/(patches|overlays)/clusters/"
         },
         "description": "An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/patches/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0 [String (file path); optional (default: the input operatorValuesPatchFilePath)]"
       },
@@ -124,7 +124,7 @@
               "type": "string",
               "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$",
               "not": {
-                "pattern": "^repo:helm_artifacts/operator/patches/clusters/"
+                "pattern": "^repo:helm_artifacts/operator/(patches|overlays)/clusters/"
               },
               "description": "A tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/patches/<file>, stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay [String (file path); optional (default: the input postgresValuesPatchFilePath)]"
             },

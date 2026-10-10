@@ -1081,7 +1081,7 @@ argo submit -n argo --from workflowtemplate/tpg-patch \
 # 4. Operator resources on two clusters, from a file in your home directory
 cat > operator.yaml <<'YAML'
 clusters: aks-tpg-poc-01,aks-tpg-poc-02
-operatorValuesPatchFilePath: ~/helm_artifacts/operator/patches-resources.yaml
+operatorValuesPatchFilePath: ~/patches/operator-resources.yaml
 pushMode: pr
 YAML
 $PACK -o operator.yaml

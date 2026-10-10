@@ -288,7 +288,7 @@
               "type": "string",
               "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/instance/tpg-instance/overlays/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$",
               "not": {
-                "pattern": "^repo:helm_artifacts/operator/patches/clusters/"
+                "pattern": "^repo:helm_artifacts/operator/(patches|overlays)/clusters/"
               },
               "description": "Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/overlays/<file>, stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current [String (file path); optional (default: the input postgresValuesOverlayFilePath)]"
             },

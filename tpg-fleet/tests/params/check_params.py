@@ -256,6 +256,7 @@ for w in keys["workflows"]:
             "clearKinds all with a kind": {"c1": {"instances": {"i1": {"clearKinds": ["all", "Postgres"]}}}},
             "a repo: file outside helm_artifacts/instance/tpg-instance/patches": {"c1": {"instances": {"i1": {"postgresPatchFilePath": ["repo:clusters/fleet.yaml"]}}}},
             "an operator file under helm_artifacts/operator/patches/clusters": {"c1": {"operatorValuesPatchFilePath": "repo:helm_artifacts/operator/patches/clusters/c1.yaml"}},
+            "an operator patch file under helm_artifacts/operator/overlays/clusters": {"c1": {"operatorValuesPatchFilePath": "repo:helm_artifacts/operator/overlays/clusters/c1.yaml"}},
             "an empty postgres file list": {"c1": {"instances": {"i1": {"postgresPatchFilePath": []}}}},
         })
     if w == "day0":
@@ -263,6 +264,8 @@ for w in keys["workflows"]:
         bad["a CA bundle that is not a PEM file"] = {"c1": {"instances": {"i1": {"backupCaBundleFile": "ca.txt"}}}}
         bad["a cluster without instances"] = {"c1": {"operatorVersion": "v4.5.0"}}
         bad["the old postgresPatchFilePath (Round 22: postgresOverlayFilePath)"] = {"c1": {"operatorVersion": "v4.5.0", "instances": {"i1": {"postgresPatchFilePath": "a.yaml"}}}}
+        bad["an operator overlay file under helm_artifacts/operator/overlays/clusters"] = {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": "repo:helm_artifacts/operator/overlays/clusters/c1.yaml", "instances": {"i1": {}}}}
+        bad["an operator overlay file under helm_artifacts/operator/patches/clusters"] = {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": "repo:helm_artifacts/operator/patches/clusters/c1.yaml", "instances": {"i1": {}}}}
         bad["the old operatorValuesPatchFilePath (Round 22: operatorValuesOverlayFilePath)"] = {"c1": {"operatorVersion": "v4.5.0", "operatorValuesPatchFilePath": "o.yaml", "instances": {"i1": {}}}}
     for what, m in bad.items():
         if v.is_valid(m):
