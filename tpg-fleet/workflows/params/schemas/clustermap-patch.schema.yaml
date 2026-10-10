@@ -13,10 +13,10 @@ additionalProperties:
   properties:
     operatorValuesPatchFilePath:
       type: string
-      pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:patches/operator/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
+      pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/operator/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
       not:
-        pattern: ^repo:patches/operator/clusters/
-      description: 'An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:patches/operator/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0 [String (file path); optional (default: the input operatorValuesPatchFilePath)]'
+        pattern: ^repo:helm_artifacts/operator/patches/clusters/
+      description: 'An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/patches/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0 [String (file path); optional (default: the input operatorValuesPatchFilePath)]'
     patchMode:
       enum:
       - apply
@@ -80,16 +80,16 @@ additionalProperties:
               uniqueItems: true
               items:
                 type: string
-                pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:charts/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
+                pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
             - type: string
-              pattern: ^\s*((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:charts/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)(\s*,\s*((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:charts/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml))*\s*$
-            description: 'One or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:charts/tpg-instance/patches/<file>. Combined into one stored file charts/tpg-instance/patches/<instance>-postgres-<hash>.yaml; the objects a run does not send are carried over from the current file. Applied on top of the overlay of tpg-day0 and tpg-create-instance [List (file paths); optional (default: the input postgresPatchFilePath)]'
+              pattern: ^\s*((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)(\s*,\s*((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml))*\s*$
+            description: 'One or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined into one stored file helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml; the objects a run does not send are carried over from the current file. Applied on top of the overlay of tpg-day0 and tpg-create-instance [List (file paths); optional (default: the input postgresPatchFilePath)]'
           postgresValuesPatchFilePath:
             type: string
-            pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:charts/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
+            pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
             not:
-              pattern: ^repo:patches/operator/clusters/
-            description: 'A tpg-instance chart values file: a path of the submitting machine or repo:charts/tpg-instance/patches/<file>, stored as charts/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay [String (file path); optional (default: the input postgresValuesPatchFilePath)]'
+              pattern: ^repo:helm_artifacts/operator/patches/clusters/
+            description: 'A tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/patches/<file>, stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay [String (file path); optional (default: the input postgresValuesPatchFilePath)]'
           patchMode:
             enum:
             - apply

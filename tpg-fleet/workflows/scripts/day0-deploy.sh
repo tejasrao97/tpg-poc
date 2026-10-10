@@ -4,7 +4,7 @@
 # Operator, and the monitoring agent for the standalone option) when
 # INSTALL_ADDONS=true, sync the platform, operator and instance Applications,
 # then verify every instance. The regsecret and backup-storage Secrets come from
-# Vault through VaultStaticSecrets (platform/base and charts/tpg-instance).
+# Vault through VaultStaticSecrets (platform/base and helm_artifacts/instance/tpg-instance).
 # Exits 1 on failure so later batches do not run.
 # MONITORING_OPTION (environment) overrides tpg-settings monitoringOption.
 # EXISTING_ADDONS (environment): skip (default) or upgrade add-on releases that already exist.

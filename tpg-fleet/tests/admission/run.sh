@@ -123,7 +123,7 @@ wf tpg-patch "$(params clusters=aks-tpg-poc-01 instances=orders-db postgresPatch
 accepted "tpg-patch: a local file path and patchFiles are accepted"
 wf tpg-patch "$(params postgresPatchFilePath=/etc/passwd)"
 rejected "tpg-patch: a path that is not a .yaml or .yml file is refused" 'postgresPatchFilePath="/etc/passwd" must be a List of .yaml or .yml files'
-wf tpg-patch "$(params clusters=aks-tpg-poc-01 instances=orders-db 'postgresPatchFilePath=/home/me/pg.yaml, ~/sched.yaml, ../loc.yaml, repo:charts/tpg-instance/patches/team.yaml' pushMode=direct)"
+wf tpg-patch "$(params clusters=aks-tpg-poc-01 instances=orders-db 'postgresPatchFilePath=/home/me/pg.yaml, ~/sched.yaml, ../loc.yaml, repo:helm_artifacts/instance/tpg-instance/patches/team.yaml' pushMode=direct)"
 accepted "tpg-patch 1c/1d: a list of absolute, ~/, ../ and repo: files is accepted"
 wf tpg-patch "$(params valuesPatchFilePath=a.yaml)"
 rejected "tpg-patch 1b: valuesPatchFilePath was renamed" 'valuesPatchFilePath was renamed postgresValuesPatchFilePath (Round 15)'
@@ -143,11 +143,11 @@ wf tpg-rotate-credential "$(params secretType=ca-bundle secretName=azure-storage
 accepted "tpg-rotate-credential 3.ii: a ca-bundle from a file is accepted"
 wf tpg-rotate-credential "$(params secretType=git-push wrappingToken='hvs.bad token')"
 rejected "tpg-rotate-credential: a wrapping token with a space is refused" 'wrappingToken="hvs.bad token" must be a Vault wrapping token (tpg-aks-infra scripts/vault-secret.sh wrap prints it)'
-wf tpg-patch "$(params operatorManifestPatchFilePath=patches/operator/x.yaml)"
+wf tpg-patch "$(params operatorManifestPatchFilePath=helm_artifacts/operator/patches/x.yaml)"
 rejected "tpg-patch: operatorManifestPatchFilePath is no longer an input" 'operatorManifestPatchFilePath is not an input of tpg-patch'
-wf tpg-day0 "$(params clusters=all instances=orders-db 'postgresOverlayFilePath=./ov/pg.yaml, repo:charts/tpg-instance/overlays/team.yaml' postgresValuesOverlayFilePath=./ov/v.yaml operatorValuesOverlayFilePath=repo:overlays/operator/team.yaml)"
+wf tpg-day0 "$(params clusters=all instances=orders-db 'postgresOverlayFilePath=./ov/pg.yaml, repo:helm_artifacts/instance/tpg-instance/overlays/team.yaml' postgresValuesOverlayFilePath=./ov/v.yaml operatorValuesOverlayFilePath=repo:helm_artifacts/operator/overlays/team.yaml)"
 accepted "22: tpg-day0 takes the overlay inputs"
-wf tpg-create-instance "$(params clusters=aks-tpg-poc-01 instances=docs-db postgresOverlayFilePath=./ov/pg.yaml postgresValuesOverlayFilePath=repo:charts/tpg-instance/overlays/v.yaml)"
+wf tpg-create-instance "$(params clusters=aks-tpg-poc-01 instances=docs-db postgresOverlayFilePath=./ov/pg.yaml postgresValuesOverlayFilePath=repo:helm_artifacts/instance/tpg-instance/overlays/v.yaml)"
 accepted "22: tpg-create-instance takes the overlay inputs"
 wf tpg-day0 "$(params postgresPatchFilePath=./a.yaml)"
 rejected "22: tpg-day0 no longer takes postgresPatchFilePath (renamed postgresOverlayFilePath)" 'postgresPatchFilePath is not an input of tpg-day0'
@@ -305,7 +305,7 @@ app_doc() {  # app_doc NAME COMPONENT -> Application JSON
   jq -cn --arg n "$1" --arg c "$2" '{apiVersion: "argoproj.io/v1alpha1", kind: "Application",
     metadata: ({name: $n, namespace: "argocd"} + (if $c != "" then {labels: {"tpg.fleet/component": $c}} else {} end)),
     spec: {project: "tpg", destination: {server: "https://example.invalid", namespace: "pg-orders-db"},
-           source: {repoURL: "https://github.com/example/tpg-fleet.git", path: "charts/tpg-instance", targetRevision: "main"}}}'
+           source: {repoURL: "https://github.com/example/tpg-fleet.git", path: "helm_artifacts/instance/tpg-instance", targetRevision: "main"}}}'
 }
 op() {  # op APP USER AS [automated]: set a new sync operation initiated by USER, as AS (a kubectl --as user or "")
   local who="$2" as="$3" auto="${4:-false}" patch

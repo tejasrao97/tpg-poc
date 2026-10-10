@@ -254,8 +254,8 @@ for w in keys["workflows"]:
             "the renamed valuesPatchFilePath": {"c1": {"instances": {"i1": {"valuesPatchFilePath": "v.yaml"}}}},
             "two postgresValues files": {"c1": {"instances": {"i1": {"postgresValuesPatchFilePath": ["a.yaml", "b.yaml"]}}}},
             "clearKinds all with a kind": {"c1": {"instances": {"i1": {"clearKinds": ["all", "Postgres"]}}}},
-            "a repo: file outside charts/tpg-instance/patches": {"c1": {"instances": {"i1": {"postgresPatchFilePath": ["repo:clusters/fleet.yaml"]}}}},
-            "an operator file under patches/operator/clusters": {"c1": {"operatorValuesPatchFilePath": "repo:patches/operator/clusters/c1.yaml"}},
+            "a repo: file outside helm_artifacts/instance/tpg-instance/patches": {"c1": {"instances": {"i1": {"postgresPatchFilePath": ["repo:clusters/fleet.yaml"]}}}},
+            "an operator file under helm_artifacts/operator/patches/clusters": {"c1": {"operatorValuesPatchFilePath": "repo:helm_artifacts/operator/patches/clusters/c1.yaml"}},
             "an empty postgres file list": {"c1": {"instances": {"i1": {"postgresPatchFilePath": []}}}},
         })
     if w == "day0":
@@ -270,15 +270,15 @@ for w in keys["workflows"]:
     good = {}
     if w == "patch":
         good = {"string lists and every path form": {"c1": {"clearKinds": "operatorValues", "instances": {"i1": {
-            "postgresPatchFilePath": "/tmp/a.yaml, ~/b.yml, ../c.yaml, repo:charts/tpg-instance/patches/d.yaml",
-            "postgresValuesPatchFilePath": "repo:charts/tpg-instance/patches/v.yaml", "backupCaBundleFile": "../ca.crt"}}}}}
+            "postgresPatchFilePath": "/tmp/a.yaml, ~/b.yml, ../c.yaml, repo:helm_artifacts/instance/tpg-instance/patches/d.yaml",
+            "postgresValuesPatchFilePath": "repo:helm_artifacts/instance/tpg-instance/patches/v.yaml", "backupCaBundleFile": "../ca.crt"}}}}}
     if w == "day0":
         good = {"YAML numbers and booleans as strings": {"c1": {"operatorVersion": "4.5.0", "instances": {"i1": {
             "postgresVersion": 16.10, "highAvailability": "true", "readReplicas": "2", "cpu": 2,
             "operatorIncrementalSchedule": "none"}}}},
-            "every overlay form": {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": "repo:overlays/operator/t.yaml", "instances": {"i1": {
-                "postgresOverlayFilePath": "/tmp/a.yaml, ~/b.yml, repo:charts/tpg-instance/overlays/d.yaml",
-                "postgresValuesOverlayFilePath": "repo:charts/tpg-instance/overlays/v.yaml"}}}}}
+            "every overlay form": {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": "repo:helm_artifacts/operator/overlays/t.yaml", "instances": {"i1": {
+                "postgresOverlayFilePath": "/tmp/a.yaml, ~/b.yml, repo:helm_artifacts/instance/tpg-instance/overlays/d.yaml",
+                "postgresValuesOverlayFilePath": "repo:helm_artifacts/instance/tpg-instance/overlays/v.yaml"}}}}}
     for what, m in good.items():
         for e in v.iter_errors(m):
             problems.append(f"clustermap-{w}.schema.json refuses {what}: {e.message}")

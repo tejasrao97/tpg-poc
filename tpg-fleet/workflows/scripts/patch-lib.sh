@@ -31,7 +31,7 @@
 #                                     rendered objects against the live ones. Sets
 #                                     PATCH_CHANGED (targets with a change)
 # Every refusal is appended to C_ERRS; the caller records it (PATCH_REFUSED).
-PATCH_CHART_PREFIX="charts/tpg-instance/"
+PATCH_CHART_PREFIX="helm_artifacts/instance/tpg-instance/"
 patch_schemas_file() {
   if [[ -f "$TPG_LIB_DIR/patch-schemas.json" ]]; then printf '%s' "$TPG_LIB_DIR/patch-schemas.json"
   else printf '%s' "$TPG_LIB_DIR/../params/patch-schemas.json"; fi
@@ -235,7 +235,7 @@ patch_operator_render() {  # patch_operator_render CLUSTER OUT_FILE: the operato
   local -a vf=()
   # the overlay values file (initial deployment) first, the patch file on top: the order of the
   # tpg-operator ApplicationSet's valueFiles
-  [[ -f "$REPO/overlays/operator/clusters/${c}.yaml" ]] && vf=(-f "$REPO/overlays/operator/clusters/${c}.yaml")
+  [[ -f "$REPO/helm_artifacts/operator/overlays/clusters/${c}.yaml" ]] && vf=(-f "$REPO/helm_artifacts/operator/overlays/clusters/${c}.yaml")
   [[ -f "$eff" ]] && vf+=(-f "$eff")
   vault_secret broadcom-registry password \
     | helm registry login "$host" --username "$(vault_secret broadcom-registry username)" --password-stdin >/dev/null 2>&1 || true

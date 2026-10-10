@@ -143,8 +143,8 @@ vp day0 P_CLUSTER_MAP='aks-tpg-poc-01: {operatorVersion: v4.5.0, backupCaBundleV
 valid "3.i/3.ii: an instance file over a cluster Vault secret (one source per level) is valid"
 vp day0 P_CLUSTER_MAP='aks-tpg-poc-01: {operatorVersion: v4.5.0, instances: {orders-db: {postgresVersion: "17.6", highAvailability: true, backupCaBundleVaultSecret: azure-storage}}}' P_PUSH_MODE=direct
 invalid "3.ii: a CA bundle source needs backupEnableSSL=true" "a CA bundle source needs backupEnableSSL=true"
-vp day0 P_CLUSTER_MAP='aks-tpg-poc-01: {operatorVersion: v4.5.0, instances: {orders-db: {postgresVersion: "17.6", highAvailability: true, backupEnableSSL: true, backupCaBundleFile: repo:charts/x.pem}}}' P_PUSH_MODE=direct
-invalid "3.i: a repo: CA bundle lives under ca-bundles/" "repo:charts/x.pem"
+vp day0 P_CLUSTER_MAP='aks-tpg-poc-01: {operatorVersion: v4.5.0, instances: {orders-db: {postgresVersion: "17.6", highAvailability: true, backupEnableSSL: true, backupCaBundleFile: repo:helm_artifacts/x.pem}}}' P_PUSH_MODE=direct
+invalid "3.i: a repo: CA bundle lives under ca-bundles/" "repo:helm_artifacts/x.pem"
 vp day0 P_CLUSTERS=aks-tpg-poc-01 P_INSTANCES=orders-db P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=17.6 P_BACKUP_CA_VAULT=azure-storage P_PUSH_MODE=direct
 invalid "3.ii: the Vault secret input without backupEnableSSL is refused" "need backupEnableSSL=true"
 vp day0 P_CLUSTER_MAP='aks-tpg-poc-01: {operatorVersion: v4.5.0, instances: {orders-db: {postgresVersion: "17.6", highAvailability: true, enableSSL: true}}}' P_PUSH_MODE=direct
@@ -262,10 +262,10 @@ invalid "patch 1c: two files patching the same object are refused" "Postgres"
 vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {instances: {orders-db: {postgresPatchFilePath: [a.yaml, a.yaml]}}}' P_PUSH_MODE=direct \
   P_PATCH_FILES="{\"a.yaml\": \"${PG_OK}\"}"
 invalid "patch 1c: the same file twice is refused" "postgresPatchFilePath: duplicate entries"
-vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {instances: {orders-db: {postgresPatchFilePath: repo:charts/tpg-instance/patches/example-postgres-resources-ex4m1.yaml}}}' P_PUSH_MODE=direct
+vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {instances: {orders-db: {postgresPatchFilePath: repo:helm_artifacts/instance/tpg-instance/patches/example-postgres-resources-ex4m1.yaml}}}' P_PUSH_MODE=direct
 valid "patch 2iii: a repo: file is read from the fleet branch, not from patchFiles"
 vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {instances: {orders-db: {postgresPatchFilePath: repo:clusters/fleet.yaml}}}' P_PUSH_MODE=direct
-invalid "patch 2iii: a repo: file outside charts/tpg-instance/patches is refused" "repo:clusters/fleet.yaml"
+invalid "patch 2iii: a repo: file outside helm_artifacts/instance/tpg-instance/patches is refused" "repo:clusters/fleet.yaml"
 vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {operatorManifestPatchFilePath: m.yaml}' P_PUSH_MODE=direct
 invalid "patch: operatorManifestPatchFilePath is gone" "unknown key operatorManifestPatchFilePath"
 vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {instances: {orders-db: {postgresPatchFilePath: [../up/pg.yaml, /abs/sched.yaml, "~/home.yaml"]}}}' P_PUSH_MODE=direct \

@@ -201,12 +201,12 @@ sl_example() {  # sl_example NAME -> an example value
     ingressFromPodLabels) echo "{app: orders-api}" ;;
     egressToCidrs) echo "10.30.0.0/24" ;;
     egressToFqdns) echo "api.example.com,*.example.org" ;;
-    postgresPatchFilePath) echo "./orders-memory.yaml,/home/me/patches/orders-backup-location.yaml (files of this machine, absolute or relative, or repo:charts/tpg-instance/patches/<file>)" ;;
-    postgresValuesPatchFilePath) echo "./orders-backup.yaml (a file of this machine, or repo:charts/tpg-instance/patches/<file>)" ;;
-    operatorValuesPatchFilePath) echo "./operator-resources.yaml (a file of this machine, or repo:patches/operator/<file>)" ;;
-    postgresOverlayFilePath) echo "./orders-memory.yaml,/home/me/overlays/orders-backup-location.yaml (files of this machine, absolute or relative, or repo:charts/tpg-instance/overlays/<file>; one document per kind)" ;;
-    postgresValuesOverlayFilePath) echo "./orders-backup.yaml (a file of this machine, or repo:charts/tpg-instance/overlays/<file>)" ;;
-    operatorValuesOverlayFilePath) echo "./operator-resources.yaml (a file of this machine, or repo:overlays/operator/<file>)" ;;
+    postgresPatchFilePath) echo "./orders-memory.yaml,/home/me/patches/orders-backup-location.yaml (files of this machine, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/patches/<file>)" ;;
+    postgresValuesPatchFilePath) echo "./orders-backup.yaml (a file of this machine, or repo:helm_artifacts/instance/tpg-instance/patches/<file>)" ;;
+    operatorValuesPatchFilePath) echo "./operator-resources.yaml (a file of this machine, or repo:helm_artifacts/operator/patches/<file>)" ;;
+    postgresOverlayFilePath) echo "./orders-memory.yaml,/home/me/overlays/orders-backup-location.yaml (files of this machine, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/overlays/<file>; one document per kind)" ;;
+    postgresValuesOverlayFilePath) echo "./orders-backup.yaml (a file of this machine, or repo:helm_artifacts/instance/tpg-instance/overlays/<file>)" ;;
+    operatorValuesOverlayFilePath) echo "./operator-resources.yaml (a file of this machine, or repo:helm_artifacts/operator/overlays/<file>)" ;;
     clearKinds) echo "PostgresBackupLocation,postgresValues (or all)" ;;
     backupCaBundleFile) echo "./azure-ca-bundle.pem (a PEM file of this machine, or repo:ca-bundles/<file>)" ;;
     backupCaBundleVaultSecret) echo "azure-storage (Vault tpg/ca-bundles/<name>, key caBundle)" ;;

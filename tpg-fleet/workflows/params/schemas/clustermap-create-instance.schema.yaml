@@ -182,16 +182,16 @@ additionalProperties:
               uniqueItems: true
               items:
                 type: string
-                pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:charts/tpg-instance/overlays/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
+                pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/instance/tpg-instance/overlays/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
             - type: string
-              pattern: ^\s*((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:charts/tpg-instance/overlays/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)(\s*,\s*((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:charts/tpg-instance/overlays/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml))*\s*$
-            description: 'Round 22 (tpg-day0, tpg-create-instance; was postgresPatchFilePath): one or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:charts/tpg-instance/overlays/<file>. Combined into one stored file charts/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, recorded as overlays.postgres.current and applied at the initial deployment [List (file paths); optional (default: the input postgresOverlayFilePath)]'
+              pattern: ^\s*((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/instance/tpg-instance/overlays/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)(\s*,\s*((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/instance/tpg-instance/overlays/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml))*\s*$
+            description: 'Round 22 (tpg-day0, tpg-create-instance; was postgresPatchFilePath): one or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/overlays/<file>. Combined into one stored file helm_artifacts/instance/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, recorded as overlays.postgres.current and applied at the initial deployment [List (file paths); optional (default: the input postgresOverlayFilePath)]'
           postgresValuesOverlayFilePath:
             type: string
-            pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:charts/tpg-instance/overlays/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
+            pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/instance/tpg-instance/overlays/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
             not:
-              pattern: ^repo:patches/operator/clusters/
-            description: 'Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:charts/tpg-instance/overlays/<file>, stored as charts/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current [String (file path); optional (default: the input postgresValuesOverlayFilePath)]'
+              pattern: ^repo:helm_artifacts/operator/patches/clusters/
+            description: 'Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/overlays/<file>, stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current [String (file path); optional (default: the input postgresValuesOverlayFilePath)]'
           exposure:
             enum:
             - clusterIP

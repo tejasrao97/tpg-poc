@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# charts/crd-reference and the zero-default rule (design decisions D69, D73):
+# helm_artifacts/instance/crd-reference and the zero-default rule (design decisions D69, D73):
 #   generator    tools/crd-defaults/generate.py --check: the registry, the
 #                reference templates, the _prune.tpl copy and the JSON schemas
-#                match charts/crd-reference/source-crds and defaults-overlay.yaml
+#                match helm_artifacts/instance/crd-reference/source-crds and defaults-overlay.yaml
 #   registry     fields whose default is not zero are never skipped
 #                (enableSSL, backupSync, backupIntegrityValidation,
 #                dedicatedWalLogVolume); required fields without a default are
@@ -27,8 +27,8 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 PASS=0; FAIL=0
 ok()  { printf 'ok   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL %s\n' "$1"; [[ -z "${2:-}" ]] || printf '%s\n' "$2" | sed 's/^/       | /' | tail -15; FAIL=$((FAIL + 1)); }
-REF="$ROOT/charts/crd-reference"
-REG="$ROOT/charts/tpg-instance/files/zero-defaults.yaml"
+REF="$ROOT/helm_artifacts/instance/crd-reference"
+REG="$ROOT/helm_artifacts/instance/tpg-instance/files/zero-defaults.yaml"
 SCHEMAS="$REF/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
 
 # ---- generator
@@ -113,7 +113,7 @@ postgresVersion: {enabled: true, name: x, spec: {dbVersion: "17.6", instanceImag
   || bad "other kinds" "$OUT"
 refrender ''
 ! grep -q '[^[:space:]]' <<<"$OUT" && ok "every kind is off by default: the reference chart renders nothing" || bad "default render" "$OUT"
-# every kind with its example (charts/crd-reference/examples): kubeconform against the CRD schemas
+# every kind with its example (helm_artifacts/instance/crd-reference/examples): kubeconform against the CRD schemas
 args=(); for f in "$REF"/examples/*.yaml; do args+=(-f "$f"); done
 helm template ref "$REF" "${args[@]}" > "$TMP/all.yaml"
 [[ "$(yq '.kind' "$TMP/all.yaml" | grep -vc '^---')" == "9" ]] && ok "the 9 examples render" || bad "examples" "$(cat "$TMP/all.yaml")"
@@ -168,7 +168,7 @@ awk '/^NAME="\$\{T\}-restore-/ {on=1} on {print} on && /^\} > "\$WORK\/restore.y
   | sed 's#> "$WORK/restore.yaml"#> "$OUTFILE"#' > "$TMP/restore-block.sh"
 grep -q 'OUTFILE' "$TMP/restore-block.sh" || bad "restore.sh: the PostgresRestore block was not found"
 printf 'cluster: {name: c2}\ninstance: {name: t, postgresVersion: postgres-17.6, highAvailability: {enabled: false, readReplicas: 0}}\nbackup: {container: pg-backups-c2}\n' > "$TMP/tv.yaml"
-helm template t "$ROOT/charts/tpg-instance" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" -f "$TMP/tv.yaml" -n pg-t > "$TMP/target-render.yaml"
+helm template t "$ROOT/helm_artifacts/instance/tpg-instance" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" -f "$TMP/tv.yaml" -n pg-t > "$TMP/target-render.yaml"
 mkdir -p "$TMP/work"; cp "$TMP/target-render.yaml" "$TMP/work/target-render.yaml"
 for row in "time 2026-09-20T08:00:00Z false c1" "latest - true c2" "lsn 0/3000060 false c2" "xid 791 true c1" "backup orders-db-full-1 false c1"; do
   read -r MODE TARGET BEST DST_C <<<"$row"; [[ "$TARGET" != "-" ]] || TARGET=""

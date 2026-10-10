@@ -10,7 +10,7 @@
 # carries the tag of the running version: the version commit stores a copy of that
 # file with the new tag under a new UID name and makes it current (the old file,
 # never changed, becomes previous with its commit), and rewrites the effective copy
-# patches/operator/clusters/<cluster>.yaml. A tag that is not the running version
+# helm_artifacts/operator/patches/clusters/<cluster>.yaml. A tag that is not the running version
 # stops the upgrade before anything changes (OPERATOR_IMAGE_PINNED).
 # P_DRY_RUN=true records the plan and changes nothing.
 WF="$1"; C="$2"; TIMEOUT="$4"

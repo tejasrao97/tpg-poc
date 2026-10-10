@@ -131,7 +131,7 @@ patch_path() {  # patch_path NAME VALUE REPO_DIR [list]: one .yaml/.yml file (a 
         err "$n: '${p}' must be repo:<path of a .yaml or .yml file in the fleet repository> (relative to its root, no ..)"
       elif [[ "${p#repo:}" != "$d"* ]]; then
         err "$n: '${p}' must be a file under ${d} of the fleet repository (repo:${d}<file>)"
-      elif [[ "${p#repo:}" == patches/operator/clusters/* || "${p#repo:}" == overlays/operator/clusters/* ]]; then
+      elif [[ "${p#repo:}" == helm_artifacts/operator/patches/clusters/* || "${p#repo:}" == helm_artifacts/operator/overlays/clusters/* ]]; then
         err "$n: '${p}' is a copy the workflows write per cluster; name the stored file under ${d}"
       fi
     elif [[ ! "$p" =~ $PATCH_LOCAL_RE ]]; then
@@ -218,9 +218,9 @@ patch_files_check() {
 patch_inputs_check() {
   # patch_inputs_check WORKFLOW: the path inputs of tpg-patch (Patch files), tpg-create-instance and
   # tpg-day0 (Overlay files) (the clusterMap keys are checked by clustermap.py)
-  patch_path "postgres${PW}FilePath" "${P_POSTGRES_PATCH:-}" "charts/tpg-instance/${PG}/" list
-  patch_path "postgresValues${PW}FilePath" "${P_VALUES_PATCH:-}" "charts/tpg-instance/${PG}/"
-  [[ "$1" == create-instance ]] || patch_path "operatorValues${PW}FilePath" "${P_OPERATOR_VALUES_PATCH:-}" "${PG}/operator/"
+  patch_path "postgres${PW}FilePath" "${P_POSTGRES_PATCH:-}" "helm_artifacts/instance/tpg-instance/${PG}/" list
+  patch_path "postgresValues${PW}FilePath" "${P_VALUES_PATCH:-}" "helm_artifacts/instance/tpg-instance/${PG}/"
+  [[ "$1" == create-instance ]] || patch_path "operatorValues${PW}FilePath" "${P_OPERATOR_VALUES_PATCH:-}" "helm_artifacts/operator/${PG}/"
   [[ -z "${P_POSTGRES_PATCH:-}" ]] || [[ "$(split_list "$P_POSTGRES_PATCH" | sort | uniq -d)" == "" ]] \
     || err "postgres${PW}FilePath lists a file twice"
 }

@@ -90,18 +90,18 @@ cluster:
     fleet: [.cluster.maxReadReplicas]
     format: number
   operatorValuesPatchFilePath:
-    doc: "An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:patches/operator/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0"
+    doc: "An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/patches/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0"
     # a file of the submitting machine (its contents come in patchFiles) or
-    # repo:patches/operator/<file>; stored as patches/operator/<name>-<uid>.yaml.
+    # repo:helm_artifacts/operator/patches/<file>; stored as helm_artifacts/operator/patches/<name>-<uid>.yaml.
     type: patchFile
-    repoDir: patches/operator/
+    repoDir: helm_artifacts/operator/patches/
     workflows: {patch: optional}
   operatorValuesOverlayFilePath:
-    doc: "An operator values overlay file (Round 22; tpg-day0 only; was operatorValuesPatchFilePath): a path of the submitting machine (its contents in patchFiles) or repo:overlays/operator/<file>. Applied when the run installs the operator, recorded as clusters.<c>.operator.overlays.values; an operator that runs with another overlay is BLOCKED OVERLAY_USE_TPG_PATCH (use tpg-patch operatorValuesPatchFilePath, which stacks on top)"
-    # stored as overlays/operator/<name>-<uid>.yaml; the tpg-operator ApplicationSet reads
-    # overlays/operator/clusters/<cluster>.yaml before the patch copy
+    doc: "An operator values overlay file (Round 22; tpg-day0 only; was operatorValuesPatchFilePath): a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/overlays/<file>. Applied when the run installs the operator, recorded as clusters.<c>.operator.overlays.values; an operator that runs with another overlay is BLOCKED OVERLAY_USE_TPG_PATCH (use tpg-patch operatorValuesPatchFilePath, which stacks on top)"
+    # stored as helm_artifacts/operator/overlays/<name>-<uid>.yaml; the tpg-operator ApplicationSet reads
+    # helm_artifacts/operator/overlays/clusters/<cluster>.yaml before the patch copy
     type: patchFile
-    repoDir: overlays/operator/
+    repoDir: helm_artifacts/operator/overlays/
     workflows: {day0: optional}
   patchMode:
     doc: "apply or clear, for the operator file of this cluster and the default of its instances"
@@ -290,32 +290,32 @@ instance:
     workflows: {day0: optional, create-instance: optional}
     fleet: [.backup.fullRetentionType]
   postgresPatchFilePath:
-    doc: "One or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:charts/tpg-instance/patches/<file>. Combined into one stored file charts/tpg-instance/patches/<instance>-postgres-<hash>.yaml; the objects a run does not send are carried over from the current file. Applied on top of the overlay of tpg-day0 and tpg-create-instance"
+    doc: "One or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined into one stored file helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml; the objects a run does not send are carried over from the current file. Applied on top of the overlay of tpg-day0 and tpg-create-instance"
     # a list of partial manifests, one Tanzu Postgres kind per document (Postgres,
     # PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB; at
     # most one per kind, and per schedule object): files of the submitting machine
-    # (contents in patchFiles) or repo:charts/tpg-instance/patches/<file>. Combined
+    # (contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined
     # into one stored multi-document file, recorded as patches.postgres.current
     # (Round 15, design decision D81); the kinds a run does not send are carried over
     type: patchFileList
-    repoDir: charts/tpg-instance/patches/
+    repoDir: helm_artifacts/instance/tpg-instance/patches/
     workflows: {patch: optional}
   postgresOverlayFilePath:
-    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresPatchFilePath): one or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:charts/tpg-instance/overlays/<file>. Combined into one stored file charts/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, recorded as overlays.postgres.current and applied at the initial deployment"
+    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresPatchFilePath): one or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/overlays/<file>. Combined into one stored file helm_artifacts/instance/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, recorded as overlays.postgres.current and applied at the initial deployment"
     type: patchFileList
-    repoDir: charts/tpg-instance/overlays/
+    repoDir: helm_artifacts/instance/tpg-instance/overlays/
     workflows: {create-instance: optional, day0: optional}
   postgresValuesPatchFilePath:
-    doc: "A tpg-instance chart values file: a path of the submitting machine or repo:charts/tpg-instance/patches/<file>, stored as charts/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay"
+    doc: "A tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/patches/<file>, stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay"
     # tpg-instance chart values (renamed from valuesPatchFilePath in Round 15),
     # recorded as patches.postgresValues.current
     type: patchFile
-    repoDir: charts/tpg-instance/patches/
+    repoDir: helm_artifacts/instance/tpg-instance/patches/
     workflows: {patch: optional}
   postgresValuesOverlayFilePath:
-    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:charts/tpg-instance/overlays/<file>, stored as charts/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current"
+    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/overlays/<file>, stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current"
     type: patchFile
-    repoDir: charts/tpg-instance/overlays/
+    repoDir: helm_artifacts/instance/tpg-instance/overlays/
     workflows: {create-instance: optional, day0: optional}
   patchMode:
     doc: "apply or clear, for the patch files of this instance"

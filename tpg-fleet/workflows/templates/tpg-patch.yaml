@@ -54,13 +54,13 @@ spec:
       value: ""
     # ---- patch files (defaults of every target; clusterMap keys override them)
     - name: postgresPatchFilePath
-      description: "List (comma-separated) of .yaml or .yml files: partial manifests, one document per kind (Postgres, PostgresBackupLocation, PostgresBackupSchedule with metadata.name <instance>-backup-full or -incremental, PostgresFerretDocumentDB; apiVersion, kind, spec), each a local file (absolute or relative; contents in patchFiles) or repo:charts/tpg-instance/patches/<file>. Combined with the kinds the instance's current postgres file carries into charts/tpg-instance/patches/<instance>-postgres-<hash>.yaml, its new current file"
+      description: "List (comma-separated) of .yaml or .yml files: partial manifests, one document per kind (Postgres, PostgresBackupLocation, PostgresBackupSchedule with metadata.name <instance>-backup-full or -incremental, PostgresFerretDocumentDB; apiVersion, kind, spec), each a local file (absolute or relative; contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined with the kinds the instance's current postgres file carries into helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml, its new current file"
       value: ""
     - name: postgresValuesPatchFilePath
-      description: "One .yaml or .yml file (local, absolute or relative, or repo:charts/tpg-instance/patches/<file>): tpg-instance chart values; stored as charts/tpg-instance/patches/<name>-<uid>.yaml and made the current postgresValues patch of each instance"
+      description: "One .yaml or .yml file (local, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/patches/<file>): tpg-instance chart values; stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml and made the current postgresValues patch of each instance"
       value: ""
     - name: operatorValuesPatchFilePath
-      description: "One .yaml or .yml file (local, absolute or relative, or repo:patches/operator/<file>): operator chart values, only operatorImage (same tag as the cluster's operator version), instanceRegistryRepo, ferretDBImageRepo, dockerRegistrySecretName, certManagerClusterIssuerName, certManagerNamespace, resources (limits, requests: cpu, memory), enableSecurityContext; stored as patches/operator/<name>-<uid>.yaml"
+      description: "One .yaml or .yml file (local, absolute or relative, or repo:helm_artifacts/operator/patches/<file>): operator chart values, only operatorImage (same tag as the cluster's operator version), instanceRegistryRepo, ferretDBImageRepo, dockerRegistrySecretName, certManagerClusterIssuerName, certManagerNamespace, resources (limits, requests: cpu, memory), enableSecurityContext; stored as helm_artifacts/operator/patches/<name>-<uid>.yaml"
       value: ""
     - name: patchFiles
       description: "JSON map: the contents of the local patch files, {\"<path as given above>\": \"<base64>\"}; filled by scripts/submit/tpg-patch.sh, or written into a parameter file by scripts/submit/pack-patch-files.sh -o FILE. Empty with patchMode=clear and for repo: files"

@@ -24,7 +24,8 @@ bad() { printf 'FAIL %s\n' "$1"; [[ -z "${2:-}" ]] || printf '%s\n' "$2" | sed '
 
 REPO="$TMP/repo"
 mkdir -p "$REPO/clusters"
-cp -r "$ROOT/charts" "$REPO/"
+mkdir -p "$REPO/helm_artifacts"
+cp -r "$ROOT/helm_artifacts/instance" "$REPO/helm_artifacts/"
 cp -r "$ROOT/clusters/_template" "$REPO/clusters/"
 cat > "$TMP/fleet.base.yaml" <<'YAML'
 clusters:

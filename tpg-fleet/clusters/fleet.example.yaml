@@ -10,7 +10,7 @@ clusters:
       version: v4.5.0
       patches:
         values:
-          current: patches/operator/example-operator-values-ex4m3.yaml
+          current: helm_artifacts/operator/patches/example-operator-values-ex4m3.yaml
     instances:
       orders-db:
         instance:
@@ -37,7 +37,7 @@ clusters:
       version: v4.5.0
       overlays:
         values:
-          current: overlays/operator/example-operator-overlay-ov1o1.yaml
+          current: helm_artifacts/operator/overlays/example-operator-overlay-ov1o1.yaml
     instances:
       orders-db:
         instance:

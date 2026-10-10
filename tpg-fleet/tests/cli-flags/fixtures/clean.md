@@ -13,7 +13,7 @@ helm upgrade --install cert-manager cert-manager --repo https://charts.jetstack.
   --version v1.21.2 -n cert-manager --create-namespace -f values.yaml --wait --timeout 15m
 helm registry login tanzu-sql-postgres.packages.broadcom.com --username "$U" --password-stdin
 helm get values kps -n monitoring -o yaml
-helm template orders-db charts/tpg-instance -f values.yaml --namespace pg-orders-db
+helm template orders-db helm_artifacts/instance/tpg-instance -f values.yaml --namespace pg-orders-db
 ```
 
 An all-namespaces listing is `helm list -A`, and a cascading delete is

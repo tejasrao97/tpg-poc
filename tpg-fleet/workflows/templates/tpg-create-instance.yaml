@@ -168,10 +168,10 @@ spec:
       value: canary
       enum: ["canary", "batches", "all"]
     - name: postgresOverlayFilePath
-      description: "List (comma-separated) of .yaml or .yml files: partial manifests merged into the instances this run creates, one document per kind (Postgres, PostgresBackupLocation, PostgresBackupSchedule with metadata.name <instance>-backup-full or -incremental, PostgresFerretDocumentDB; apiVersion, kind, spec), each a local file (absolute or relative; contents in patchFiles) or repo:charts/tpg-instance/overlays/<file>; combined into charts/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, the instance's current postgres overlay (applied at the initial deployment; tpg-patch patches stack on top). A running instance whose current overlay differs: use tpg-patch"
+      description: "List (comma-separated) of .yaml or .yml files: partial manifests merged into the instances this run creates, one document per kind (Postgres, PostgresBackupLocation, PostgresBackupSchedule with metadata.name <instance>-backup-full or -incremental, PostgresFerretDocumentDB; apiVersion, kind, spec), each a local file (absolute or relative; contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/overlays/<file>; combined into helm_artifacts/instance/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, the instance's current postgres overlay (applied at the initial deployment; tpg-patch patches stack on top). A running instance whose current overlay differs: use tpg-patch"
       value: ""
     - name: postgresValuesOverlayFilePath
-      description: "One .yaml or .yml file (local, absolute or relative, or repo:charts/tpg-instance/overlays/<file>): tpg-instance chart values for the instances this run creates; stored as charts/tpg-instance/overlays/<name>-<uid>.yaml and recorded as their current postgresValues overlay"
+      description: "One .yaml or .yml file (local, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/overlays/<file>): tpg-instance chart values for the instances this run creates; stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml and recorded as their current postgresValues overlay"
       value: ""
     - name: patchFiles
       description: "JSON map: the contents of the local overlay (and patch) files, {\"<path as given above>\": \"<base64>\"}; filled by scripts/submit/tpg-create-instance.sh, or written into a parameter file by scripts/submit/pack-patch-files.sh -o FILE"

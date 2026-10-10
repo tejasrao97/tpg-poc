@@ -121,7 +121,7 @@ if [[ "$DST_C" != "$SRC_C" && "$TARGET_EXISTS" == "false" ]]; then
     * {"cluster": {"name": strenv(C)}, "instance": {"name": strenv(I2)},
        "backup": {"container": ("pg-backups-" + strenv(C))}}' "$WORK/repo/$FLEET_REL")"
   printf '%s' "$values" > "$WORK/target-values.yaml"
-  helm template "$T" "$WORK/repo/charts/tpg-instance" \
+  helm template "$T" "$WORK/repo/helm_artifacts/instance/tpg-instance" \
     -f "$WORK/repo/$TEMPLATE_CLUSTER_REL" -f "$WORK/repo/$TEMPLATE_INSTANCE_REL" -f "$WORK/target-values.yaml" \
     --namespace "$DST_NS" > "$WORK/target-render.yaml" || fail CHART_RENDER_FAILED "$T"
   # The Secrets and the backup location only: the backup schedules (D70) wait
@@ -177,7 +177,7 @@ spec:
         name: backup-storage
   # forcePathStyle: false and additionalParameters: {} are deliberately absent:
   # fields that hold their zero default are left out, as the chart does (D69,
-  # charts/crd-reference). enableSSL is always written, because its CRD default
+  # helm_artifacts/instance/crd-reference). enableSSL is always written, because its CRD default
   # is true. tests/crd-reference compares this object with the reference template.
   backupSync:
     enabled: true

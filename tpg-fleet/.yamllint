@@ -12,5 +12,5 @@ rules:
   braces:
     max-spaces-inside: 1
 ignore: |
-  charts/tpg-instance/templates/
-  charts/crd-reference/templates/
+  helm_artifacts/instance/tpg-instance/templates/
+  helm_artifacts/instance/crd-reference/templates/

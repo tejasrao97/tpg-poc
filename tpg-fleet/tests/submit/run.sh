@@ -192,7 +192,7 @@ clusterMap: |
   aks-tpg-poc-01:
     instances:
       orders-db:
-        postgresPatchFilePath: [pg.yaml, ../up/sched.yaml, repo:charts/tpg-instance/patches/team.yaml]
+        postgresPatchFilePath: [pg.yaml, ../up/sched.yaml, repo:helm_artifacts/instance/tpg-instance/patches/team.yaml]
         postgresValuesPatchFilePath: ~/p/vals.yaml
         backupCaBundleFile: ./ca.pem
 YAML
@@ -215,7 +215,7 @@ yq -i '.clusterMap |= sub("pg-as-values.yaml"; "missing.yaml")' "$W/run/patch-ma
 pack_o
 [[ "$RC" -ne 0 ]] && grep -q "missing.yaml: no such file (relative paths start at $W/run)" <<<"$OUT" \
   && ok "2ii: a missing file names the directory relative paths start from" || bad "pack missing" "$OUT"
-printf 'pushMode: direct\npostgresPatchFilePath: repo:charts/tpg-instance/patches/team.yaml\n' > "$W/run/repo-only.yaml"
+printf 'pushMode: direct\npostgresPatchFilePath: repo:helm_artifacts/instance/tpg-instance/patches/team.yaml\n' > "$W/run/repo-only.yaml"
 RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o repo-only.yaml 2>&1)" || RC=$?
 [[ "$RC" -eq 0 ]] && ! grep -q '^patchFiles:' "$W/run/repo-only.yaml" && grep -q "no local file named" <<<"$OUT" \
   && ok "2iii: only repo: files: nothing to pack, patchFiles not written" || bad "pack repo only" "$OUT"
@@ -232,7 +232,7 @@ clusterMap: |
     operatorValuesOverlayFilePath: ./ov-op.yaml
     instances:
       orders-db:
-        postgresOverlayFilePath: [pg.yaml, repo:charts/tpg-instance/overlays/team.yaml]
+        postgresOverlayFilePath: [pg.yaml, repo:helm_artifacts/instance/tpg-instance/overlays/team.yaml]
         postgresValuesOverlayFilePath: ~/p/vals.yaml
 YAML
 RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o overlay-map.yaml 2>&1)" || RC=$?

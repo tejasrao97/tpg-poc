@@ -8,7 +8,7 @@
 #     so a change on the fleet branch since the plan is seen. No difference any
 #     more: NO_CHANGE, nothing is committed.
 #   2 One commit: the stored patch files, clusters/fleet.yaml (current and previous)
-#     and, for the operator, patches/operator/clusters/<cluster>.yaml.
+#     and, for the operator, helm_artifacts/operator/patches/clusters/<cluster>.yaml.
 #       pushMode=pr      on the branch tpg/patch/<workflow>/<cluster>, with a pull
 #                        request into the fleet branch (its body carries the diff)
 #       pushMode=direct  on the fleet branch

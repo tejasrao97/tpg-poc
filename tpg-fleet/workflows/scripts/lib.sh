@@ -1545,7 +1545,7 @@ cmap_guard() {
 # contents in the input patchFiles, {"<path>": "<base64>"} (scripts/submit fill it;
 # scripts/submit/pack-patch-files.sh -o PARAMETER_FILE packs every local path of a
 # parameter file for a plain argo submit). repo:<path> names a file of the fleet
-# branch (charts/tpg-instance/patches/ or overlays/, patches/operator/ or overlays/operator/),
+# branch (helm_artifacts/instance/tpg-instance/patches/ or overlays/, helm_artifacts/operator/patches/ or helm_artifacts/operator/overlays/),
 # which is copied.
 # The workflow stores the files in the fleet repository and records them per
 # target in clusters/fleet.yaml, one current file per kind and the one before it (the
@@ -1554,11 +1554,11 @@ cmap_guard() {
 #     current: patches/<instance>-postgres-<hash>.yaml   one document per Tanzu Postgres
 #     previous: {path, commit}                           kind the chart renders (D81)
 #   clusters.<c>.instances.<i>.patches.postgresValues:  chart values
-#     current: patches/<name>-<uid>.yaml               (relative to charts/tpg-instance)
+#     current: patches/<name>-<uid>.yaml               (relative to helm_artifacts/instance/tpg-instance)
 #   clusters.<c>.operator.patches.values:               operator chart values
-#     current: patches/operator/<name>-<uid>.yaml       (repository path)
+#     current: helm_artifacts/operator/patches/<name>-<uid>.yaml       (repository path)
 # Only current is applied. The operator Application reads a fixed file per
-# cluster, patches/operator/clusters/<c>.yaml, a copy of its current file, so a
+# cluster, helm_artifacts/operator/patches/clusters/<c>.yaml, a copy of its current file, so a
 # sync at the commit of a pull request branch sees the new file (the ApplicationSet
 # itself reads clusters/fleet.yaml on the fleet branch). The instance chart reads
 # clusters/fleet.yaml at the synced commit for the same reason.
@@ -1568,9 +1568,9 @@ OPERATOR_NS="tanzu-postgres-operator"
 # Sets the fleet.yaml key, the stored-file folders, the wording and the prefix of the codes.
 patch_group() {
   PATCH_GROUP="$1"
-  PATCH_INSTANCE_DIR="charts/tpg-instance/${1}"
-  PATCH_OPERATOR_DIR="${1}/operator"
-  PATCH_EFFECTIVE_DIR="${1}/operator/clusters"
+  PATCH_INSTANCE_DIR="helm_artifacts/instance/tpg-instance/${1}"
+  PATCH_OPERATOR_DIR="helm_artifacts/operator/${1}"
+  PATCH_EFFECTIVE_DIR="helm_artifacts/operator/${1}/clusters"
   if [[ "$1" == overlays ]]; then PATCH_NOUN="overlay"; PATCH_CODE="OVERLAY"; else PATCH_NOUN="patch"; PATCH_CODE="PATCH"; fi
 }
 patch_group patches
@@ -1655,7 +1655,7 @@ patch_names() {
 patch_names_plan() {
   # patch_names_plan REPO KIND=PATH...: a stored name for every PATH that has none
   # yet in this run (one UID per file, unused in REPO), recorded as patch.names.
-  # KIND postgresValues: charts/tpg-instance/patches/; operator: patches/operator/
+  # KIND postgresValues: helm_artifacts/instance/tpg-instance/patches/; operator: helm_artifacts/operator/patches/
   local repo="$1" names a kind p n uid dir
   shift
   names="$(patch_names)"
@@ -1679,7 +1679,7 @@ patch_names_plan() {
 
 patch_store() {
   # patch_store REPO PATH KIND -> the path clusters/fleet.yaml records (chart-relative
-  # patches/<n> for postgresValues, patches/operator/<n> for operator); writes the
+  # patches/<n> for postgresValues, helm_artifacts/operator/patches/<n> for operator); writes the
   # file (patchFiles, or the repository for repo:) under its stored name, once per checkout
   local repo="$1" p dest
   p="$(patch_norm "$2")"
@@ -1687,7 +1687,7 @@ patch_store() {
   [[ -n "$dest" ]] || { log "patch_store: no stored name for ${p} (patch.names)"; return 1; }
   mkdir -p "$repo/${dest%/*}"
   [[ -f "$repo/$dest" ]] || patch_file_write "$p" "$repo/$dest" "$repo" || { log "patch_store: no contents for ${p}"; return 1; }
-  if [[ "$3" == operator ]]; then printf '%s' "$dest"; else printf '%s' "${dest#charts/tpg-instance/}"; fi
+  if [[ "$3" == operator ]]; then printf '%s' "$dest"; else printf '%s' "${dest#helm_artifacts/instance/tpg-instance/}"; fi
 }
 
 patch_docs_json() {  # patch_docs_json FILE -> the YAML documents of FILE as a JSON list (empty ones left out)
@@ -1713,8 +1713,8 @@ patch_combine() {
   tmp="$(mktemp -d)"
   cur="$(patch_ref "$repo/$FLEET_REL" "$c" "$i" postgres)" || cur=""
   docs='[]'
-  if [[ -n "$cur" && -f "$repo/charts/tpg-instance/$cur" ]]; then
-    docs="$(patch_docs_json "$repo/charts/tpg-instance/$cur" | patch_doc_keys)"
+  if [[ -n "$cur" && -f "$repo/helm_artifacts/instance/tpg-instance/$cur" ]]; then
+    docs="$(patch_docs_json "$repo/helm_artifacts/instance/tpg-instance/$cur" | patch_doc_keys)"
   fi
   if [[ -n "$clear" ]]; then
     docs="$(jq -c --arg k "$clear" '($k | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $ks
@@ -1731,20 +1731,20 @@ patch_combine() {
   docs="$(jq -c --argjson o "$PATCH_DOC_ORDER" 'sort_by(._key as $k | ($o | index($k)) as $x | if $x == null then 99 else $x end) | map(del(._key))' <<<"$docs")"
   if [[ "$(jq 'length' <<<"$docs")" -eq 0 ]]; then rm -rf "${tmp:?}"; printf ''; return 0; fi
   printf '%s' "$docs" | yq -p=json -o=yaml '.[] | split_doc' > "$tmp/out.yaml"
-  if [[ -n "$cur" && -f "$repo/charts/tpg-instance/$cur" ]] && cmp -s "$tmp/out.yaml" "$repo/charts/tpg-instance/$cur"; then
+  if [[ -n "$cur" && -f "$repo/helm_artifacts/instance/tpg-instance/$cur" ]] && cmp -s "$tmp/out.yaml" "$repo/helm_artifacts/instance/tpg-instance/$cur"; then
     rm -rf "${tmp:?}"; printf '%s' "$cur"; return 0
   fi
   h="$(sha256sum "$tmp/out.yaml" | cut -c1-12)"
   out=""
   for n in 5 6 7 8 12; do
     out="${PATCH_GROUP}/${i}-postgres-${h:0:$n}.yaml"
-    [[ -f "$repo/charts/tpg-instance/$out" ]] || break
-    cmp -s "$tmp/out.yaml" "$repo/charts/tpg-instance/$out" && break
+    [[ -f "$repo/helm_artifacts/instance/tpg-instance/$out" ]] || break
+    cmp -s "$tmp/out.yaml" "$repo/helm_artifacts/instance/tpg-instance/$out" && break
     out=""
   done
   [[ -n "$out" ]] || { log "patch_combine: no free name for ${i}"; rm -rf "${tmp:?}"; return 1; }
-  mkdir -p "$repo/charts/tpg-instance/${PATCH_GROUP}"
-  [[ -f "$repo/charts/tpg-instance/$out" ]] || cp "$tmp/out.yaml" "$repo/charts/tpg-instance/$out"
+  mkdir -p "$repo/helm_artifacts/instance/tpg-instance/${PATCH_GROUP}"
+  [[ -f "$repo/helm_artifacts/instance/tpg-instance/$out" ]] || cp "$tmp/out.yaml" "$repo/helm_artifacts/instance/tpg-instance/$out"
   rm -rf "${tmp:?}"
   printf '%s' "$out"
 }
@@ -1770,7 +1770,7 @@ patch_materialize() {
   [[ -n "$files" ]] || return 0
   while IFS=$'\t' read -r p b; do
     [[ -n "$p" ]] || continue
-    rel="${p#charts/tpg-instance/}"
+    rel="${p#helm_artifacts/instance/tpg-instance/}"
     grep -qF -- "$rel" "$repo/$FLEET_REL" 2>/dev/null || continue
     [[ -f "$repo/$p" ]] && continue
     mkdir -p "$repo/${p%/*}"
@@ -1785,7 +1785,7 @@ patch_current_paths() {  # patch_current_paths REPO -> every current patch file 
     | (
       ((($c.operator.patches.values.current // ""), ($c.operator.overlays.values.current // "")) | select(. != "")),
       (($c.instances // {}) | to_entries[] | .value as $e | (($e.patches // {}), ($e.overlays // {})) | to_entries[]
-        | (.value.current // "") | select(. != "") | "charts/tpg-instance/" + .)
+        | (.value.current // "") | select(. != "") | "helm_artifacts/instance/tpg-instance/" + .)
     )' "$1/$FLEET_REL" 2>/dev/null | sort -u
 }
 
@@ -1840,7 +1840,7 @@ patch_set_current() {
   old="$(patch_ref "$repo/$FLEET_REL" "$2" "$3" "$4")" || old=""
   [[ "$old" != "$5" ]] || return 0
   if [[ -n "$old" ]]; then
-    full="$old"; [[ "$4" == operator ]] || full="charts/tpg-instance/$old"
+    full="$old"; [[ "$4" == operator ]] || full="helm_artifacts/instance/tpg-instance/$old"
     commit="$(patch_commit_of "$repo" "$full")"
   fi
   OLD="$old" NEW="$5" SHA="$commit" yq -i "
@@ -1853,7 +1853,7 @@ patch_set_current() {
 operator_effective_rel() { printf '%s/%s.yaml' "$PATCH_EFFECTIVE_DIR" "$1"; }   # CLUSTER (the current patch_group)
 
 operator_effective_write() {
-  # operator_effective_write REPO CLUSTER: <group>/operator/clusters/<c>.yaml follows
+  # operator_effective_write REPO CLUSTER: helm_artifacts/operator/<group>/clusters/<c>.yaml follows
   # the cluster's current operator values file (removed when there is none)
   local repo="$1" cur eff
   cur="$(patch_ref "$repo/$FLEET_REL" "$2" "" operator)" || cur=""
@@ -2076,8 +2076,8 @@ instance_effective() {
   # the overlay file (initial deployment), then the patch file on top of it
   for g in overlays patches; do
     f="$(patch_ref "$1/$FLEET_REL" "$2" "$3" postgresValues "$g")" || f=""
-    if [[ -n "$f" && -f "$1/charts/tpg-instance/$f" ]]; then
-      n=$((n + 1)); cp "$1/charts/tpg-instance/$f" "$d/${n}.yaml"
+    if [[ -n "$f" && -f "$1/helm_artifacts/instance/tpg-instance/$f" ]]; then
+      n=$((n + 1)); cp "$1/helm_artifacts/instance/tpg-instance/$f" "$d/${n}.yaml"
     fi
   done
   # valuesOverride (written by tpg-restore) wins over the patch files, as in tpg.ctx
@@ -2097,7 +2097,7 @@ instance_render() {
   local vals
   vals="$(mktemp)"
   instance_values "$1" "$2" "$3" | yq 'del(.patches) | del(.overlays)' > "$vals"
-  helm template "$3" "$1/charts/tpg-instance" --namespace "pg-$3" \
+  helm template "$3" "$1/helm_artifacts/instance/tpg-instance" --namespace "pg-$3" \
     -f "$1/$TEMPLATE_CLUSTER_REL" -f "$1/$TEMPLATE_INSTANCE_REL" -f "$1/$FLEET_REL" -f "$vals"
   local rc=$?
   rm -f "$vals"

@@ -127,8 +127,8 @@ def check_patch_file(spec, value, where):
                        f"relative to its root (no leading /, no ..)")
         if d and not r.startswith(d):
             return p, f"{where}: '{p}' must be a file under {d} of the fleet repository (repo:{d}<file>)"
-        if r.startswith("patches/operator/clusters/"):
-            return p, f"{where}: '{p}' is a copy the workflows write per cluster; name the stored file under patches/operator/"
+        if r.startswith("helm_artifacts/operator/patches/clusters/"):
+            return p, f"{where}: '{p}' is a copy the workflows write per cluster; name the stored file under helm_artifacts/operator/patches/"
         return p, None
     if not (LOCAL_CA if ca else LOCAL_FILE).match(p):
         return p, (f"{where}: '{p}' must be the path of one {what} on the submitting machine "

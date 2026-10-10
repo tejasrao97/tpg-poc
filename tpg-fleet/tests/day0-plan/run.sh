@@ -45,9 +45,10 @@ BIG="$(cat "$TMP"/ca[1-8].pem)"
 
 REPO="$TMP/repo"
 mkdir -p "$REPO/clusters"
-cp -r "$ROOT/charts" "$REPO/"
+mkdir -p "$REPO/helm_artifacts"
+cp -r "$ROOT/helm_artifacts/instance" "$REPO/helm_artifacts/"
 cp -r "$ROOT/clusters/_template" "$REPO/clusters/"
-P="$REPO/charts/tpg-instance/patches"
+P="$REPO/helm_artifacts/instance/tpg-instance/patches"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageClassName: premium-fast\n' > "$P/sc.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability: {enabled: false}\n' > "$P/ha.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: PostgresBackupLocation\nspec:\n  retentionPolicy:\n    fullRetention: {number: 5}\n' > "$P/loc.yaml"
@@ -364,7 +365,7 @@ S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INST
 rec "result.c1.orders-db|BLOCKED|INSTANCE_EXISTS" | grep -q . && ! rec "EXPOSURE_UNRESTRICTED" | grep -q . \
   && ok "9 no exposure warning for an entry that is put back (INSTANCE_EXISTS)" || bad "9 warning on revert" "$(cat "$TMP/records")"
 # Round 14: the patch files come from the submitting machine (patchFiles); values
-# files are stored as charts/tpg-instance/overlays/<name>-<uid>.yaml, postgres
+# files are stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml, postgres
 # patches combined per instance as <instance>-postgres-<hash>.yaml (Round 15, D81)
 pf() { jq -cn --arg a "$1" --arg b "$(base64 < "$P/$2" | tr -d '\n')" '{($a): $b}'; }
 PF_SC="$(pf ./sc.yaml sc.yaml)"; PF_VALS="$(pf vals.yaml vals.yaml)"; PF_HA="$(pf ha.yaml ha.yaml)"; PF_LOC="$(pf loc.yaml loc.yaml)"
@@ -378,24 +379,24 @@ jq -e '.clusters.c1.instances["new-db"].overlays | (.postgres.current | test("^o
   && ok "9 creation overlays are stored and recorded as current (postgres combined per instance; storage class allowed at creation)" \
   || bad "9 patches" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
 stored_sc="$(jq -r '.clusters.c1.instances["new-db"].overlays.postgres.current' /tmp/fleet.json)"
-[[ "$(yq ea -o=json -I=0 '[.]' "$TMP/work/repo/charts/tpg-instance/$stored_sc")" == "$(yq ea -o=json -I=0 '[.]' "$P/sc.yaml")" ]] \
-  && rec "patch.names|SET" | grep -q '"vals.yaml":"charts/tpg-instance/overlays/vals-' \
-  && rec "patch.files|SET" | grep -q "charts/tpg-instance/${stored_sc}" \
+[[ "$(yq ea -o=json -I=0 '[.]' "$TMP/work/repo/helm_artifacts/instance/tpg-instance/$stored_sc")" == "$(yq ea -o=json -I=0 '[.]' "$P/sc.yaml")" ]] \
+  && rec "patch.names|SET" | grep -q '"vals.yaml":"helm_artifacts/instance/tpg-instance/overlays/vals-' \
+  && rec "patch.files|SET" | grep -q "helm_artifacts/instance/tpg-instance/${stored_sc}" \
   && ok "9 the stored files hold the received documents; the run record patch.files carries them to the later steps" || bad "9 stored" "$(cat "$TMP/records")"
 # fleet-commit writes the stored files the written entries reference, and commits them
 cp /tmp/fleet.json "$TMP/planned.json"; cp /tmp/fleet-base.json "$TMP/base.json"
 echo 'precheck.c1|PASSED||' >> "$TMP/records"
 P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_VALS" '$a + $b')" \
   bash "$TMP/fleet-commit.sh" wf "$(cat "$TMP/planned.json")" "$(cat "$TMP/base.json")" > "$TMP/out" 2>&1 || true
-grep -qx "charts/tpg-instance/${stored_sc}" "$TMP/pushed-files" && grep -qx "clusters/fleet.yaml" "$TMP/pushed-files" \
-  && cmp -s "$TMP/work/repo/charts/tpg-instance/${stored_sc}" "$P/sc.yaml" \
+grep -qx "helm_artifacts/instance/tpg-instance/${stored_sc}" "$TMP/pushed-files" && grep -qx "clusters/fleet.yaml" "$TMP/pushed-files" \
+  && cmp -s "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_sc}" "$P/sc.yaml" \
   && ok "9 fleet-commit commits clusters/fleet.yaml with the stored overlay files" || bad "9 commit files" "$(cat "$TMP/pushed-files" 2>/dev/null) $(cat "$TMP/out")"
 # a repeated create with the same file keeps the current file: ALREADY_EXISTS
 yq -P '.' "$TMP/planned.json" > "$TMP/fleet.yaml"
-cp "$TMP/work/repo/charts/tpg-instance/${stored_sc}" "$P/"; stored_vals="$(yq -r '.clusters.c1.instances["new-db"].overlays.postgresValues.current' "$TMP/fleet.yaml")"
-cp "$TMP/work/repo/charts/tpg-instance/${stored_vals}" "$P/"
+cp "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_sc}" "$P/"; stored_vals="$(yq -r '.clusters.c1.instances["new-db"].overlays.postgresValues.current' "$TMP/fleet.yaml")"
+cp "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_vals}" "$P/"
 # the remote holds what fleet-commit pushed: both stored files
-cp "$TMP/work/repo/charts/tpg-instance/${stored_sc}" "$TMP/work/repo/charts/tpg-instance/${stored_vals}" "$REPO/charts/tpg-instance/overlays/"
+cp "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_sc}" "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_vals}" "$REPO/helm_artifacts/instance/tpg-instance/overlays/"
 rm -rf "$TMP/work"; : > "$TMP/records"
 S_OPERATOR=ours S_RUNNING="orders-db new-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
   P_POSTGRES_OVERLAY_FILES=./sc.yaml P_VALUES_OVERLAY_FILES=vals.yaml P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_VALS" '$a + $b')" \
@@ -404,7 +405,7 @@ rec "result.c1.new-db|SUCCEEDED|ALREADY_EXISTS" | grep -q . \
   && jq -e --arg s "$stored_sc" '.clusters.c1.instances["new-db"].overlays.postgres.current == $s' /tmp/fleet.json >/dev/null \
   && ok "9 the same file again: the current stored file is kept, ALREADY_EXISTS" || bad "9 idempotent" "$(cat "$TMP/records") $(jq -c '.clusters.c1.instances["new-db"].overlays' /tmp/fleet.json)"
 rm -f "$P/${stored_sc#overlays/}" "$P/${stored_vals#overlays/}"
-rm -f "$REPO/charts/tpg-instance/${stored_sc}" "$REPO/charts/tpg-instance/${stored_vals}"
+rm -f "$REPO/helm_artifacts/instance/tpg-instance/${stored_sc}" "$REPO/helm_artifacts/instance/tpg-instance/${stored_vals}"
 yq -e 'select(.metadata.name == "tpg-create-probe") | .spec.storageClassName == "premium-fast" and .metadata.namespace == "default"' "$TMP/dryrun.yaml" >/dev/null \
   && ok "9 the rendered instance is dry-run through the webhooks under a probe name" || bad "9 dry run" "$(cat "$TMP/dryrun.yaml")"
 reset
@@ -467,7 +468,7 @@ S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INST
   P_POSTGRES_OVERLAY_FILES='./sc.yaml, loc.yaml' P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_LOC" '$a + $b')" \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 f="$(jq -r '.clusters.c1.instances["new-db"].overlays.postgres.current // ""' /tmp/fleet.json)"
-[[ -n "$f" ]] && [[ "$(yq ea -o=json -I=0 '[.kind]' "$TMP/work/repo/charts/tpg-instance/$f" | jq -sc 'add')" == '["Postgres","PostgresBackupLocation"]' ]] \
+[[ -n "$f" ]] && [[ "$(yq ea -o=json -I=0 '[.kind]' "$TMP/work/repo/helm_artifacts/instance/tpg-instance/$f" | jq -sc 'add')" == '["Postgres","PostgresBackupLocation"]' ]] \
   && yq -e 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number == 5' "$TMP/work/render-c1-new-db.yaml" >/dev/null \
   && ok "9 two postgres patch files (Postgres, PostgresBackupLocation) become one stored file; the backup location renders the patch" \
   || bad "9 two kinds" "$f $(cat "$TMP/out") $(yq 'select(.kind == "PostgresBackupLocation")' "$TMP/work/render-c1-new-db.yaml" 2>&1)"
@@ -486,29 +487,29 @@ rec "result.c1|FAILED|CLUSTER_API_ERROR" | grep -q "i/o timeout" && ! rec "INSTA
   && ok "10 an API error is not taken for an absent instance (CLUSTER_API_ERROR)" || bad "10 api error" "$(cat "$TMP/records") $(cat "$TMP/out")"
 
 # ---- 10b operator upgrade: the operatorImage tag of the current values patch
-mkdir -p "$REPO/patches/operator"
-printf 'operatorImage: myacr.azurecr.io/postgres-operator:v4.5.0\nresources:\n  limits: {cpu: 500m}\n' > "$REPO/patches/operator/op-ab12c.yaml"
+mkdir -p "$REPO/helm_artifacts/operator/patches"
+printf 'operatorImage: myacr.azurecr.io/postgres-operator:v4.5.0\nresources:\n  limits: {cpu: 500m}\n' > "$REPO/helm_artifacts/operator/patches/op-ab12c.yaml"
 { cat "$TMP/prelude.sh"; echo 'appset_refresh() { exit 0; }   # stop after the version commit'; } > "$TMP/prelude-upgrade.sh"
 sed "s#source $TMP/prelude.sh#source $TMP/prelude-upgrade.sh#" "$TMP/operator-upgrade.sh" > "$TMP/operator-upgrade-git.sh"
 reset
-yq -i '.clusters.c1.operator.patches.values.current = "patches/operator/op-ab12c.yaml"' "$TMP/fleet.yaml"
+yq -i '.clusters.c1.operator.patches.values.current = "helm_artifacts/operator/patches/op-ab12c.yaml"' "$TMP/fleet.yaml"
 inv '[{"name":"orders-db"}]'
 S_RUNNING="orders-db" P_PRE_BACKUP=false bash "$TMP/operator-upgrade-git.sh" wf c1 v4.5.1 600 > "$TMP/out" 2>&1 || true
 new="$(yq -r '.clusters.c1.operator.patches.values.current' "$TMP/pushed.yaml")"
-[[ "$new" =~ ^patches/operator/op-[a-z0-9]{5}\.yaml$ && "$new" != patches/operator/op-ab12c.yaml ]] \
+[[ "$new" =~ ^helm_artifacts/operator/patches/op-[a-z0-9]{5}\.yaml$ && "$new" != helm_artifacts/operator/patches/op-ab12c.yaml ]] \
   && [[ "$(yq -r '.operatorImage' "$TMP/work/repo/$new")" == "myacr.azurecr.io/postgres-operator:v4.5.1" ]] \
-  && [[ "$(yq -r '.operatorImage' "$TMP/work/repo/patches/operator/op-ab12c.yaml")" == "myacr.azurecr.io/postgres-operator:v4.5.0" ]] \
-  && [[ "$(yq -r '.clusters.c1.operator.patches.values.previous.path' "$TMP/pushed.yaml")" == patches/operator/op-ab12c.yaml ]] \
-  && grep -qx "$new" "$TMP/pushed-files" && grep -qx "patches/operator/clusters/c1.yaml" "$TMP/pushed-files" \
-  && grep -q "postgres-operator:v4.5.1" "$TMP/work/repo/patches/operator/clusters/c1.yaml" \
+  && [[ "$(yq -r '.operatorImage' "$TMP/work/repo/helm_artifacts/operator/patches/op-ab12c.yaml")" == "myacr.azurecr.io/postgres-operator:v4.5.0" ]] \
+  && [[ "$(yq -r '.clusters.c1.operator.patches.values.previous.path' "$TMP/pushed.yaml")" == helm_artifacts/operator/patches/op-ab12c.yaml ]] \
+  && grep -qx "$new" "$TMP/pushed-files" && grep -qx "helm_artifacts/operator/patches/clusters/c1.yaml" "$TMP/pushed-files" \
+  && grep -q "postgres-operator:v4.5.1" "$TMP/work/repo/helm_artifacts/operator/patches/clusters/c1.yaml" \
   && ok "10b the new tag goes to a new stored file, which becomes current; the old file is unchanged and previous" \
   || bad "10b operatorImage tag" "$(cat "$TMP/out") $(cat "$TMP/pushed-files" 2>/dev/null)"
 reset
-yq -i '.clusters.c1.operator.patches.values = ["patches/operator/op-ab12c.yaml"]' "$TMP/fleet.yaml"
+yq -i '.clusters.c1.operator.patches.values = ["helm_artifacts/operator/patches/op-ab12c.yaml"]' "$TMP/fleet.yaml"
 S_RUNNING="orders-db" P_DRY_RUN=true bash "$TMP/operator-upgrade.sh" wf c1 v4.5.1 600 > "$TMP/out" 2>&1 || true
 rec "result.c1|FAILED|FLEET_ENTRY_INVALID" | grep -q "is not {current, previous}: a fleet repository written before Round 15" \
   && ok "10b an operator patches entry that is not {current, previous} stops the upgrade (no migration)" || bad "10b old shape" "$(cat "$TMP/records") $(cat "$TMP/out")"
-rm -rf "$REPO/patches"
+rm -rf "$REPO/helm_artifacts/operator/patches"
 
 # ---- 11 discover after the plan: a blocked instance is left out, not UNKNOWN_INSTANCE
 cat > "$TMP/prelude-discover.sh" <<PRELUDE
@@ -559,7 +560,7 @@ yq -P '.' "$TMP/planned.json" > "$REPO/clusters/fleet.yaml"
 out="$(instance_render_test() { C=c1 I=new-db yq '.clusters[strenv(C)] as $c | ($c.instances[strenv(I)] // {}) as $i
     | ($c | with_entries(select(.key != "instances" and .key != "operator")))
     * {"cluster": {"name": strenv(C)}, "backup": {"container": "pg-backups-c1"}} * $i * {"instance": {"name": strenv(I)}}' "$REPO/clusters/fleet.yaml" > "$TMP/vals.yaml"
-  helm template new-db "$REPO/charts/tpg-instance" -f "$REPO/clusters/_template/cluster.yaml" -f "$REPO/clusters/_template/instance.yaml" -f "$TMP/vals.yaml" -n pg-new-db; }; instance_render_test 2>&1)"
+  helm template new-db "$REPO/helm_artifacts/instance/tpg-instance" -f "$REPO/clusters/_template/cluster.yaml" -f "$REPO/clusters/_template/instance.yaml" -f "$TMP/vals.yaml" -n pg-new-db; }; instance_render_test 2>&1)"
 [[ "$(yq 'select(.kind == "PostgresBackupSchedule") | .metadata.name' <<<"$out")" == "new-db-backup-full" ]] \
   && [[ "$(yq 'select(.kind == "PostgresFerretDocumentDB") | .spec.readOnly.replicas' <<<"$out")" == "1" ]] \
   && ok "12 the planned entry renders one PostgresBackupSchedule and the FerretDB object" || bad "12 render" "$out"
@@ -598,7 +599,7 @@ S_OPERATOR=ours S_TRACKED=yes S_APPRES=yes bash "$TMP/day0-precheck.sh" wf c1 > 
 rec "precheck.c1|MANAGED" | grep -q . && ok "12 FerretDB on postgres-17.6 with the CRD passes" || bad "12 ferret pass" "$(cat "$TMP/records")"
 # discover: a values patch file switches the scheduler; the inventory follows it
 reset
-printf 'backup:\n  scheduled: false\n  operatorSchedules: {full: "0 0 * * 0"}\nferret: {enabled: true}\n' > "$REPO/charts/tpg-instance/patches/sched.yaml"
+printf 'backup:\n  scheduled: false\n  operatorSchedules: {full: "0 0 * * 0"}\nferret: {enabled: true}\n' > "$REPO/helm_artifacts/instance/tpg-instance/patches/sched.yaml"
 cp "$TMP/fleet.base.yaml" "$REPO/clusters/fleet.yaml"
 yq -i '.clusters.c1.instances["orders-db"].patches.postgresValues.current = "patches/sched.yaml"' "$TMP/fleet.yaml"
 RC=0; P_FILTER=none bash "$TMP/discover.sh" wf c1 > "$TMP/out" 2>&1 || RC=$?
@@ -606,7 +607,7 @@ jq -e '.[0].instances[0] | .scheduledBackups == false and .backupMode == "operat
   && jq -e '.[0] | .cluster == "c1" and .scheduled == "false"' /tmp/instance-items.json >/dev/null \
   && ok "12 discover: a values patch that switches to operator schedules takes the instance out of the CronWorkflows" \
   || bad "12 discover patch" "$(cat /tmp/inventory.json) $(cat "$TMP/out")"
-rm -f "$REPO/charts/tpg-instance/patches/sched.yaml"
+rm -f "$REPO/helm_artifacts/instance/tpg-instance/patches/sched.yaml"
 # discover after a tpg-create-instance plan: the stored file exists only in the plan
 # step's clone; discover writes it from patchFiles (Round 14), so the scheduler follows it
 reset

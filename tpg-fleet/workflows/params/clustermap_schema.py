@@ -68,9 +68,9 @@ EXAMPLE = {
         "backupEnableSSL": True, "backupCaBundleFile": "repo:ca-bundles/azure-storage.pem",
         "disableInitialBackup": False,
         "backupFullRetention": 4, "backupFullRetentionType": "count",
-        "postgresPatchFilePath": ["./orders-resources.yaml", "repo:charts/tpg-instance/patches/team-backup-schedule.yaml"],
+        "postgresPatchFilePath": ["./orders-resources.yaml", "repo:helm_artifacts/instance/tpg-instance/patches/team-backup-schedule.yaml"],
         "postgresValuesPatchFilePath": "~/patches/orders-values.yaml",
-        "postgresOverlayFilePath": ["./orders-resources.yaml", "repo:charts/tpg-instance/overlays/team-backup-schedule.yaml"],
+        "postgresOverlayFilePath": ["./orders-resources.yaml", "repo:helm_artifacts/instance/tpg-instance/overlays/team-backup-schedule.yaml"],
         "postgresValuesOverlayFilePath": "~/overlays/orders-values.yaml", "patchMode": "apply",
         "backupType": "full", "backupTimeoutSeconds": 3600, "replicas": 2, "enableHAIfNeeded": True,
         "preUpgradeBackup": True, "allowMajor": False, "purgePvcs": True, "purgeNamespace": True, "finalBackup": "required",
@@ -132,7 +132,7 @@ def value_schema(spec):
         local, repo = _file_alternatives(spec)
         s = {"type": "string", "pattern": f"^({local}|{repo})$"}
         if t == "patchFile":
-            s["not"] = {"pattern": "^repo:patches/operator/clusters/"}
+            s["not"] = {"pattern": "^repo:helm_artifacts/operator/patches/clusters/"}
         return s
     if t == "patchFileList":
         local, repo = _file_alternatives(spec)

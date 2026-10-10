@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# charts/tpg-instance rendering of the Round 12 values (design decisions D63 to D65):
+# helm_artifacts/instance/tpg-instance rendering of the Round 12 values (design decisions D63 to D65):
 #   exposure        serviceType and the Azure load balancer annotations; an empty
 #                   map is never rendered (F7); instance.serviceType is refused
 #   caBundle        written with enableSSL: true, and only then; enableSSL: true
@@ -15,7 +15,7 @@
 #   schedules       PostgresBackupSchedule objects only with backup.scheduled false
 #   FerretDB        PostgresFerretDocumentDB (version, read-only proxies, exposure)
 #                   and its client rule on 27017
-#   reference       every rendered object is what charts/crd-reference renders
+#   reference       every rendered object is what helm_artifacts/instance/crd-reference renders
 #                   for the same spec (already pruned), and passes kubeconform
 #                   -strict against the CRD schemas when kubeconform is installed
 #   Round 14 (D78), Round 15 (D81, D84)
@@ -40,7 +40,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 PASS=0; FAIL=0
 ok()  { printf 'ok   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL %s\n' "$1"; [[ -z "${2:-}" ]] || printf '%s\n' "$2" | sed 's/^/       | /' | tail -12; FAIL=$((FAIL + 1)); }
-CHART="$ROOT/charts/tpg-instance"
+CHART="$ROOT/helm_artifacts/instance/tpg-instance"
 render() {  # render VALUES_YAML -> $OUT (rendered manifests) and $RC
   printf 'cluster: {name: c1}\ninstance: {name: i1, postgresVersion: postgres-17.6}\nbackup: {container: pg-backups-c1}\n' > "$TMP/base.yaml"
   printf '%s\n' "$1" > "$TMP/v.yaml"
@@ -148,7 +148,7 @@ render 'instance: {highAvailability: {enabled: true, readReplicas: 0}}'
 render 'instance: {highAvailability: {enabled: false, readReplicas: 2}}'
 [[ "$RC" -ne 0 ]] && grep -q "read replicas need highAvailability.enabled true" <<<"$OUT" && ok "readReplicas without enabled fails the render" || bad "rr only" "$OUT"
 # patch file content is pruned too; a required field inside a kept object stays
-CHART="$TMP/tpg-instance"; cp -r "$ROOT/charts/tpg-instance" "$CHART"
+CHART="$TMP/tpg-instance"; cp -r "$ROOT/helm_artifacts/instance/tpg-instance" "$CHART"
 printf 'kind: Postgres\nspec:\n  dataPodConfig: {tolerations: []}\n  deploymentOptions: {continuousRestoreTarget: false}\n  customConfig: {initDb: {checksum: false}}\n' > "$CHART/patches/zero.yaml"
 printf 'kind: Postgres\nspec:\n  deploymentOptions: {continuousRestoreTarget: false, sourceStanzaName: pg-src-0}\n' > "$CHART/patches/keep.yaml"
 render 'patches: {postgres: {current: patches/zero.yaml}}'
@@ -157,7 +157,7 @@ render 'patches: {postgres: {current: patches/zero.yaml}}'
 render 'patches: {postgres: {current: patches/keep.yaml}}'
 [[ "$(pg '.spec.deploymentOptions' | yq '.continuousRestoreTarget == false and .sourceStanzaName == "pg-src-0"')" == "true" ]] \
   && ok "continuousRestoreTarget false is kept when deploymentOptions holds more (required by the schema)" || bad "required kept" "$(pg '.spec')"
-CHART="$ROOT/charts/tpg-instance"
+CHART="$ROOT/helm_artifacts/instance/tpg-instance"
 render 'backup: {additionalParameters: {}, forcePathStyle: false}'
 pycheck 'K("PostgresBackupLocation")["spec"]["storage"]["azure"]["enableSSL"] is False
   and "forcePathStyle" not in K("PostgresBackupLocation")["spec"]["storage"]["azure"]
@@ -221,13 +221,13 @@ for k in Postgres PostgresBackupLocation PostgresBackupSchedule PostgresFerretDo
     | {"postgresBackupSchedule": {"enabled": true, "name": .metadata.name, "spec": .spec}}' <<<"$OUT" > "$TMP/ref-$k.yaml"
   want="$(K="$k" yq 'select(.kind == strenv(K)) | .spec' <<<"$OUT" | head -n 400)"
   [[ "$k" != PostgresBackupSchedule ]] || want="$(yq 'select(.metadata.name == "i1-backup-full") | .spec' <<<"$OUT")"
-  got="$(helm template ref "$ROOT/charts/crd-reference" -f "$TMP/ref-$k.yaml" | K="$k" yq 'select(.kind == strenv(K)) | .spec')"
+  got="$(helm template ref "$ROOT/helm_artifacts/instance/crd-reference" -f "$TMP/ref-$k.yaml" | K="$k" yq 'select(.kind == strenv(K)) | .spec')"
   [[ "$got" == "$want" ]] || { same=0; bad "reference $k" "$(diff <(echo "$want") <(echo "$got"))"; }
 done
-[[ "$same" -eq 1 ]] && ok "Postgres, backup location, schedule and FerretDB are what charts/crd-reference renders (nothing left to prune)"
+[[ "$same" -eq 1 ]] && ok "Postgres, backup location, schedule and FerretDB are what helm_artifacts/instance/crd-reference renders (nothing left to prune)"
 if command -v kubeconform >/dev/null; then
   yq 'select(.apiVersion == "sql.tanzu.vmware.com/v1")' <<<"$OUT" > "$TMP/sql.yaml"
-  kc="$(kubeconform -strict -summary -schema-location "$ROOT/charts/crd-reference/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" "$TMP/sql.yaml" 2>&1)" \
+  kc="$(kubeconform -strict -summary -schema-location "$ROOT/helm_artifacts/instance/crd-reference/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" "$TMP/sql.yaml" 2>&1)" \
     && grep -q "Valid: 5, Invalid: 0, Errors: 0, Skipped: 0" <<<"$kc" \
     && ok "the 5 rendered sql.tanzu.vmware.com objects pass kubeconform -strict against the live CRD schemas" || bad "kubeconform" "$kc"
 else
@@ -236,7 +236,7 @@ fi
 
 
 # ---- valuesOverride (tpg-restore) wins over a values patch file that turns FerretDB on
-cp -r "$ROOT/charts/tpg-instance" "$TMP/chart-copy"
+cp -r "$ROOT/helm_artifacts/instance/tpg-instance" "$TMP/chart-copy"
 printf 'ferret: {enabled: true}\n' > "$TMP/chart-copy/patches/t-ferret-on.yaml"
 CHART="$TMP/chart-copy"
 render 'patches: {postgresValues: {current: patches/t-ferret-on.yaml}}'
@@ -245,10 +245,10 @@ render 'patches: {postgresValues: {current: patches/t-ferret-on.yaml}}
 valuesOverride: {ferret: {enabled: false}}'
 [[ "$RC" -eq 0 ]] && ! grep -q 'kind: PostgresFerretDocumentDB' <<<"$OUT" \
   && ok "valuesOverride (a restored copy) wins over the values patch: no FerretDB" || bad "valuesOverride" "$OUT"
-CHART="$ROOT/charts/tpg-instance"
+CHART="$ROOT/helm_artifacts/instance/tpg-instance"
 
 # ---- Round 14 and 15: the current patch file, read from clusters/fleet.yaml when it is a value file
-cp -r "$ROOT/charts/tpg-instance" "$TMP/chart-r14"
+cp -r "$ROOT/helm_artifacts/instance/tpg-instance" "$TMP/chart-r14"
 CHART="$TMP/chart-r14"
 printf 'backup: {fullRetention: 11}\n' > "$CHART/patches/cur-aaaaa.yaml"
 printf 'backup: {fullRetention: 22}\n' > "$CHART/patches/prev-bbbbb.yaml"
@@ -387,15 +387,15 @@ render 'backup: {fullRetention: 30, fullRetentionType: time}'
   && ok "1g: fullRetentionType time is rendered (retentionDays is gone)" || bad "retention type" "$OUT"
 render 'backup: {fullRetentionType: days}'
 [[ "$RC" -ne 0 ]] && ok "fullRetentionType other than count or time fails the render" || bad "retention type bad" "$OUT"
-CHART="$ROOT/charts/tpg-instance"
+CHART="$ROOT/helm_artifacts/instance/tpg-instance"
 
 # ---- Round 23: the values the tpg-instances ApplicationSet builds. The valueFiles list and the
 # `values` template are read from bootstrap/appsets/tpg-instances.yaml; the template is evaluated
 # with helm's tpl (sprig, as the ApplicationSet controller has it) against a context made like the
 # generator's: name, instance.{name,values} and the clusters of fleet.yaml
 APPSET="$ROOT/bootstrap/appsets/tpg-instances.yaml"
-AS="$TMP/appset"; mkdir -p "$AS/charts" "$AS/clusters" "$AS/tplchart/templates"
-cp -r "$ROOT/charts/tpg-instance" "$AS/charts/"; cp -r "$ROOT/clusters/_template" "$AS/clusters/"
+AS="$TMP/appset"; mkdir -p "$AS/helm_artifacts/instance" "$AS/clusters" "$AS/tplchart/templates"
+cp -r "$ROOT/helm_artifacts/instance/tpg-instance" "$AS/helm_artifacts/instance/"; cp -r "$ROOT/clusters/_template" "$AS/clusters/"
 printf 'apiVersion: v2\nname: tplvalues\nversion: 0.0.0\n' > "$AS/tplchart/Chart.yaml"
 printf '%s\n' '{{ tpl .Values.tmpl .Values.ctx }}' > "$AS/tplchart/templates/values.yaml"
 appset_render() {  # appset_render ENTRY_YAML: the chart rendered for clusters.c1.instances.i1 = ENTRY -> $OUT, $RC
@@ -408,8 +408,8 @@ appset_render() {  # appset_render ENTRY_YAML: the chart rendered for clusters.c
   helm template tplvalues "$AS/tplchart" -f "$AS/tpl-values.json" 2>&1 | yq '.' > "$AS/values.yaml" || RC=$?
   [[ "$RC" -eq 0 && -s "$AS/values.yaml" ]] || { OUT="the appset values template did not evaluate: $(cat "$AS/values.yaml" 2>/dev/null)"; RC=1; return; }
   local args=()
-  while IFS= read -r f; do args+=(-f "$AS/charts/tpg-instance/$f"); done < <(yq -r '.spec.template.spec.source.helm.valueFiles[]' "$APPSET")
-  OUT="$(helm template i1 "$AS/charts/tpg-instance" "${args[@]}" -f "$AS/values.yaml" --namespace pg-i1 2>&1)" || RC=$?
+  while IFS= read -r f; do args+=(-f "$AS/helm_artifacts/instance/tpg-instance/$f"); done < <(yq -r '.spec.template.spec.source.helm.valueFiles[]' "$APPSET")
+  OUT="$(helm template i1 "$AS/helm_artifacts/instance/tpg-instance" "${args[@]}" -f "$AS/values.yaml" --namespace pg-i1 2>&1)" || RC=$?
 }
 skip_ann='sql.tanzu.vmware.com/skip-initial-backup'
 appset_render '{instance: {postgresVersion: postgres-17.6, disableInitialBackup: true}}'

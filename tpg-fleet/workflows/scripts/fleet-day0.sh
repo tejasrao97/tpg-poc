@@ -192,7 +192,7 @@ entry_value() {  # entry_value JSON KEY -> string value, or compact JSON for a l
   jq -r --arg k "$2" '.[$k] // "" | if type == "string" then . else tojson end' <<<"$1"
 }
 ACNS="$(setting acnsEnabled 2>/dev/null || true)"
-CHART_PREFIX="charts/tpg-instance/"
+CHART_PREFIX="helm_artifacts/instance/tpg-instance/"
 
 # ---- patch files at creation (design decision D60, creation rules; Round 15, D83)
 # The same files as tpg-patch, with the rules of a new target: sizes, the storage

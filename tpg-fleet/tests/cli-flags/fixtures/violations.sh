@@ -21,7 +21,7 @@ helm upgrade --install cert-manager cert-manager -n cert-manager --force
 helm install vault hashicorp/vault -n vault --create-pods
 
 # helm4-post-renderer-path
-helm template orders-db charts/tpg-instance --post-renderer=./kustomize-wrapper.sh
+helm template orders-db helm_artifacts/instance/tpg-instance --post-renderer=./kustomize-wrapper.sh
 
 # helm4-registry-login-path: Helm 4 takes the domain only
 helm registry login tanzu-sql-postgres.packages.broadcom.com/tanzu-postgres --username u
