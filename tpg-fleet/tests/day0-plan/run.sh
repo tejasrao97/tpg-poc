@@ -394,6 +394,8 @@ grep -qx "charts/tpg-instance/${stored_sc}" "$TMP/pushed-files" && grep -qx "clu
 yq -P '.' "$TMP/planned.json" > "$TMP/fleet.yaml"
 cp "$TMP/work/repo/charts/tpg-instance/${stored_sc}" "$P/"; stored_vals="$(yq -r '.clusters.c1.instances["new-db"].overlays.postgresValues.current' "$TMP/fleet.yaml")"
 cp "$TMP/work/repo/charts/tpg-instance/${stored_vals}" "$P/"
+# the remote holds what fleet-commit pushed: both stored files
+cp "$TMP/work/repo/charts/tpg-instance/${stored_sc}" "$TMP/work/repo/charts/tpg-instance/${stored_vals}" "$REPO/charts/tpg-instance/overlays/"
 rm -rf "$TMP/work"; : > "$TMP/records"
 S_OPERATOR=ours S_RUNNING="orders-db new-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
   P_POSTGRES_OVERLAY_FILES=./sc.yaml P_VALUES_OVERLAY_FILES=vals.yaml P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_VALS" '$a + $b')" \
@@ -402,6 +404,7 @@ rec "result.c1.new-db|SUCCEEDED|ALREADY_EXISTS" | grep -q . \
   && jq -e --arg s "$stored_sc" '.clusters.c1.instances["new-db"].overlays.postgres.current == $s' /tmp/fleet.json >/dev/null \
   && ok "9 the same file again: the current stored file is kept, ALREADY_EXISTS" || bad "9 idempotent" "$(cat "$TMP/records") $(jq -c '.clusters.c1.instances["new-db"].overlays' /tmp/fleet.json)"
 rm -f "$P/${stored_sc#overlays/}" "$P/${stored_vals#overlays/}"
+rm -f "$REPO/charts/tpg-instance/${stored_sc}" "$REPO/charts/tpg-instance/${stored_vals}"
 yq -e 'select(.metadata.name == "tpg-create-probe") | .spec.storageClassName == "premium-fast" and .metadata.namespace == "default"' "$TMP/dryrun.yaml" >/dev/null \
   && ok "9 the rendered instance is dry-run through the webhooks under a probe name" || bad "9 dry run" "$(cat "$TMP/dryrun.yaml")"
 reset

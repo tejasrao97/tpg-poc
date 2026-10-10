@@ -27,7 +27,7 @@ aks-tpg-poc-01:
       ferretReadOnlySecretName: orders-db-read-only-user-db-secret
       backupEnableSSL: true
       disableInitialBackup: false
-      backupCaBundleFile: 'repo:ca-bundles/azure-storage.pem'
+      backupCaBundleFile: repo:ca-bundles/azure-storage.pem
       # backupCaBundleVaultSecret: azure-storage   # or this instead of backupCaBundleFile (one source per level)
       backupFullRetention: 4
       backupFullRetentionType: count

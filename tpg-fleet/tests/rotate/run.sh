@@ -137,7 +137,8 @@ run S_TOKEN=hvs.good-token-0000 S_UNWRAP='{"_secretName": "app", "K": "v"}' S_WR
 # rotate-hub.sh (Round 21): the Argo CD repository list has no "items" when workflow-bot may read
 # none of them; jq must not iterate null, and the step names the missing RBAC line
 H="$ROOT/workflows/scripts/rotate-hub.sh"
-if grep -n '\.items\[\]' "$H" | grep -v '(\.items // \[\])\[\]' >/dev/null; then bad "8 rotate-hub.sh iterates .items without a default"
+# log_cmd lines print the equivalent command for the reader; they run nothing
+if grep -n '\.items\[\]' "$H" | grep -v '(\.items // \[\])\[\]' | grep -vE '^[0-9]+:[[:space:]]*log_cmd ' >/dev/null; then bad "8 rotate-hub.sh iterates .items without a default"
 else ok "8 rotate-hub.sh reads .items only with a default"; fi
 grep -q 'RBAC_MISSING' "$H" && grep -q 'repositories, get' "$H" && ok "8 an empty repository list fails as RBAC_MISSING, naming the policy line" || bad "8 RBAC_MISSING"
 if command -v jq >/dev/null; then

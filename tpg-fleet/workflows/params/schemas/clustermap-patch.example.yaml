@@ -11,7 +11,7 @@ aks-tpg-poc-01:
   instances:
     orders-db:
       postgresVersion: postgres-17.6
-      backupCaBundleFile: 'repo:ca-bundles/azure-storage.pem'
+      backupCaBundleFile: repo:ca-bundles/azure-storage.pem
       # backupCaBundleVaultSecret: azure-storage   # or this instead of backupCaBundleFile (one source per level)
       postgresPatchFilePath: [./orders-resources.yaml, 'repo:charts/tpg-instance/patches/team-backup-schedule.yaml']
       postgresValuesPatchFilePath: ~/patches/orders-values.yaml

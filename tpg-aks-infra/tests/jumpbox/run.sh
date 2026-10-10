@@ -194,6 +194,7 @@ assert "setup-jumpbox.sh: records its sha256 for deploy.sh copy" 'setup-jumpbox.
 # every resource whose inline script carries a token writes it to /dev/shm and deletes it first
 for r in fleet_repo jumpbox_run; do
   body="$(awk -v r="$r" '$0 ~ "^resource \"terraform_data\" \"" r "\"" {p=1} p {print} p && /^}/ {exit}' "$PROV")"
+  # shellcheck disable=SC2016  # literal $0 searched for in the Terraform file
   if grep -q 'script_path = "/dev/shm/' <<<"$body" && grep -A1 'inline = \[' <<<"$body" | grep -q 'rm -f -- \\"\$0\\"'; then
     ok "terraform_data.${r}: token script in /dev/shm, deleted as its first command"
   else
@@ -303,6 +304,7 @@ STUB
     cp "${FLEET_SRC}/scripts/set-repo-url.sh" "$1/tpg-fleet/scripts/"
     printf 'clusters: {}\n' > "$1/tpg-fleet/clusters/fleet.yaml"
     printf 'repoURL: https://github.com/<org>/tpg-fleet.git\n%s\n' "${2:-}" > "$1/tpg-fleet/bootstrap/app.yaml"
+    # shellcheck disable=SC2016  # written to the stub script, expanded there
     printf '#!/usr/bin/env bash\nexit "${VALIDATE_RC:-0}"\n' > "$1/tpg-fleet/scripts/validate.sh"
     touch "$1/tpg-fleet/.DS_Store" "$1/__MACOSX/._tpg-fleet"
     (cd "$1" && zip -qr fleet.zip tpg-fleet __MACOSX)
@@ -408,6 +410,7 @@ echo "== 9: 35-vault.sh --save-vault-recovery-keys (keys file)"
 VAULT_STEP="${ROOT}/scripts/steps/35-vault.sh"
 # The key-file functions of the step, without Kubernetes or Vault
 fn() { awk -v f="$1" '$0 ~ "^" f "\\(\\) \\{" {p=1} p {print} p && /^}/ {exit}' "$VAULT_STEP"; }
+# shellcheck disable=SC2028  # function definitions written as text; printf runs in the generated file
 {
   echo 'ok()   { printf "OK %s\n" "$*"; }'
   echo 'warn() { printf "WARN %s\n" "$*" >&2; }'
@@ -439,11 +442,12 @@ else
   else bad "no root token in the file; the output names the file and shows no key" "$(cat "$TMP/vk")"; fi
   cp "$KF" "$TMP/vk-before"
   savekeys "$KF"
+  # shellcheck disable=SC2012  # one generated name, no special characters
   copy="$(ls "${KF}".* 2>/dev/null | head -1)"
   if [[ $VK_RC -eq 0 && -n "$copy" ]] && cmp -s "$KF" "$TMP/vk-before" && [[ "$copy" =~ \.[0-9]{8}T[0-9]{6}Z$ ]]; then
     ok "an existing keys file is kept; the new keys go to <file>.<UTC time>"
   else bad "an existing keys file is kept; the new keys go to <file>.<UTC time>" "exit ${VK_RC}, copy '${copy}': $(cat "$TMP/vk")"; fi
-  if ! ls -a "$(dirname "$KF")" | grep -q '^\.vault-keys\.'; then ok "no temporary file is left behind"
+  if ! compgen -G "$(dirname "$KF")/.vault-keys.*" >/dev/null; then ok "no temporary file is left behind"
   else bad "no temporary file is left behind" "$(ls -a "$(dirname "$KF")")"; fi
   if [[ $EUID -ne 0 ]]; then
     mkdir -p "$TMP/ro"; chmod 500 "$TMP/ro"
@@ -471,6 +475,7 @@ if ! command -v setsid >/dev/null || ! command -v yq >/dev/null || [[ "${BASH_VE
 else
   R="$TMP/rfs"; mkdir -p "$R/bin" "$R/fleet/.git" "$R/.work"
   cp -R "${ROOT}/scripts" "$R/scripts"
+  # shellcheck disable=SC2016  # written to the stub script, expanded there
   printf '#!/usr/bin/env bash\necho "run.sh $*"\necho "token ${GIT_PUSH_PAT:-unset}"\nexit 3\n' > "$R/scripts/run.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$R/bin/az"
   chmod 755 "$R/scripts/run.sh" "$R/bin/az"

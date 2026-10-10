@@ -4,6 +4,7 @@
 # 20: the live checksum was taken with `jq -r` (trailing newline) against a Vault checksum without
 # one, so a Secret that already held the new value was reported SECRET_NOT_SYNCED after 5 minutes.
 # Needs bash and jq (sha256sum is shimmed with shasum on macOS).
+# shellcheck disable=SC2015  # ok/bad: A && ok || bad, as in the other suites
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 command -v jq >/dev/null || { echo "SKIP tests/waits: jq not installed" >&2; exit 0; }
@@ -22,6 +23,7 @@ LOGF="$T/step.log"
 log() { printf '%s\n' "$*" >> "$LOGF"; }
 SECRET_VALUE="hvs.example-token-value"
 # tk get secret -> a dockerconfigjson with the current password; get vaultstaticsecret -> conditions
+# shellcheck disable=SC2034  # what: the argument layout of tk, kept for reading
 tk() {
   local what="$3"
   case " $* " in

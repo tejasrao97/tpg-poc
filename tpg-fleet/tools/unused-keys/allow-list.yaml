@@ -28,18 +28,9 @@ fleet:
   instance.patches.postgresValues.previous.commit:
     reason: the commit that added the previous file; read by the workflows only
     readBy: workflows/scripts/lib.sh
-  instance.overlays.postgres.current:
-    reason: the current postgres overlay file (Round 22); read by the chart through the clusters value (tpg.kindPatch) and by the workflows
-    readBy: charts/tpg-instance/templates/_helpers.tpl
   instance.overlays.postgresValues.current:
     reason: the current values overlay file (Round 22); read by the chart (tpg.ctx) and by the workflows
     readBy: charts/tpg-instance/templates/_helpers.tpl
-  instance.overlays.postgresValues.previous.path:
-    reason: a record of the overlay file before the current one; read by the workflows only
-    readBy: workflows/scripts/lib.sh
-  instance.overlays.postgresValues.previous.commit:
-    reason: the commit that added the previous overlay file; read by the workflows only
-    readBy: workflows/scripts/lib.sh
   cluster.operator.version:
     reason: the operator chart version; read by the tpg-operator ApplicationSet and the workflows
     readBy: bootstrap/appsets/tpg-operator.yaml

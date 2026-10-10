@@ -107,7 +107,7 @@ jq -cn --arg operatorVersion "$opv_flag" --arg postgresVersion "$pgv_flag" --arg
   --arg walStorageSize "${P_WAL_STORAGE_SIZE:-}" --arg storageClass "${P_STORAGE_CLASS:-}" \
   --arg cpu "${P_CPU:-}" --arg memory "${P_MEMORY:-}" --arg backupSchedule "${P_BACKUP_SCHEDULE:-fleet}" \
   --arg backupEnableSSL "${P_BACKUP_ENABLE_SSL:-false}" \
-  --arg disableInitialBackup "$( [[ "${P_DISABLE_INITIAL_BACKUP:-false}" == true ]] && echo true || true )" \
+  --arg disableInitialBackup "$(if [[ "${P_DISABLE_INITIAL_BACKUP:-false}" == true ]]; then echo true; fi)" \
   --arg backupFullRetention "${P_BACKUP_FULL_RETENTION:-}" --arg backupFullRetentionType "${P_BACKUP_FULL_RETENTION_TYPE:-}" \
   --arg exposure "${P_EXPOSURE:-}" --arg serviceAnnotations "$(map_flag "${P_SERVICE_ANNOTATIONS:-}")" \
   --arg readOnlyExposure "${P_READ_ONLY_EXPOSURE:-}" \

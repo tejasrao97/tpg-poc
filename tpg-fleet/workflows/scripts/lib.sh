@@ -1571,7 +1571,7 @@ patch_group() {
   PATCH_INSTANCE_DIR="charts/tpg-instance/${1}"
   PATCH_OPERATOR_DIR="${1}/operator"
   PATCH_EFFECTIVE_DIR="${1}/operator/clusters"
-  if [[ "$1" == overlays ]]; then PATCH_NOUN=overlay; PATCH_CODE=OVERLAY; else PATCH_NOUN=patch; PATCH_CODE=PATCH; fi
+  if [[ "$1" == overlays ]]; then PATCH_NOUN="overlay"; PATCH_CODE="OVERLAY"; else PATCH_NOUN="patch"; PATCH_CODE="PATCH"; fi
 }
 patch_group patches
 # the Tanzu Postgres kinds a postgres patch document may target, in the order the
