@@ -10,6 +10,12 @@ instance:
   storageClassName: tpg-data-retain
   storageSize: 20Gi
   walStorageSize: 10Gi
+  # true: the Postgres object gets the annotation
+  # sql.tanzu.vmware.com/skip-initial-backup: "true", so the operator takes no
+  # initial backup at creation (templates/postgres.yaml). false writes nothing.
+  # Set by the tpg-day0 and tpg-create-instance input and clusterMap key
+  # disableInitialBackup, for new instances only (Round 22)
+  disableInitialBackup: false
   # Service exposure (design decision D64): clusterIP | internalLoadBalancer | loadBalancer.
   # Replaces instance.serviceType. Empty maps and lists are not rendered.
   exposure: clusterIP

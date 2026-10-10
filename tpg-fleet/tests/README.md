@@ -164,7 +164,11 @@ suite fails when:
   the example per workflow in `workflows/params/schemas/`, and the generated key
   tables in section 3 of `docs/workflow-commands.md`), an example fails
   `clustermap.py validate` or its schema, or a map that `clustermap.py` refuses for
-  its shape passes the schema (checked with jsonschema when installed).
+  its shape passes the schema (checked with jsonschema when installed);
+- a YAML file under `workflows/params/` repeats a mapping key (Round 23,
+  `dupkeys.py`: a PyYAML loader that raises, naming the file, line and key). The
+  parsers keep the last duplicate silently, which once moved the `fleet:` path of
+  `backupEnableSSL` under `disableInitialBackup`.
 
 ## cluster-map
 

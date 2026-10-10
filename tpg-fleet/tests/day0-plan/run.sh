@@ -420,6 +420,31 @@ S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INST
 jq -e '.clusters.c1.instances["new-a"].instance.disableInitialBackup == true' /tmp/fleet.json >/dev/null \
   && ok "22: disableInitialBackup=true is written to instance.disableInitialBackup of the new instance" \
   || bad "22 disableInitialBackup" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# Round 23: the same keys through clusterMap. disableInitialBackup writes instance.disableInitialBackup
+# (and never backup.enableSSL); backupEnableSSL writes backup.enableSSL (it was written nowhere when
+# the registry entry of disableInitialBackup carried the fleet path and format of backupEnableSSL)
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_CLUSTER_MAP='c1:
+  instances:
+    new-a: {postgresVersion: "17.6", highAvailability: false, disableInitialBackup: true}
+    new-b: {postgresVersion: "17.6", highAvailability: false}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-a"] as $a | .clusters.c1.instances["new-b"] as $b
+  | $a.instance.disableInitialBackup == true and (($a.backup.enableSSL // false) | not)
+  and ($b.instance | has("disableInitialBackup") | not) and (($b.backup.enableSSL // false) | not)' /tmp/fleet.json >/dev/null \
+  && ok "23: clusterMap disableInitialBackup=true writes instance.disableInitialBackup of that instance only and leaves backup.enableSSL untouched" \
+  || bad "23 clusterMap disableInitialBackup" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_CLUSTER_MAP='c1:
+  instances:
+    ssl-on: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: true}
+    ssl-off: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: false}' \
+  S_CA="$CA1" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["ssl-on"] as $a | .clusters.c1.instances["ssl-off"] as $b
+  | $a.backup.enableSSL == true and $b.backup.enableSSL == false
+  and ($a.instance | has("disableInitialBackup") | not) and ($b.instance | has("disableInitialBackup") | not)' /tmp/fleet.json >/dev/null \
+  && ok "23: clusterMap backupEnableSSL true writes backup.enableSSL true, false does not, and neither writes instance.disableInitialBackup" \
+  || bad "23 clusterMap backupEnableSSL" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
 # Round 15 (1c, 1e): several postgres patch files, one kind each, at creation
 reset
 S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \

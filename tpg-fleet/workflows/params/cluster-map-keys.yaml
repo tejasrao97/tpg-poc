@@ -248,14 +248,14 @@ instance:
     # PostgresBackupLocation enableSSL (renamed from enableSSL in Round 15)
     type: boolean
     workflows: {day0: optional, create-instance: optional}
+    fleet: [.backup.enableSSL]
+    format: boolean
   disableInitialBackup:
     doc: "Round 22: true writes the annotation sql.tanzu.vmware.com/skip-initial-backup: \"true\" on the new Postgres instance, so the operator takes no initial backup at creation; false (the default) leaves the operator's behaviour. Only new instances"
     # chart value instance.disableInitialBackup; templates/postgres.yaml writes the annotation only when true
     type: boolean
     workflows: {day0: optional, create-instance: optional}
     fleet: [.instance.disableInitialBackup]
-    format: boolean
-    fleet: [.backup.enableSSL]
     format: boolean
   backupCaBundleFile:
     doc: "The backup CA bundle of this instance (backupEnableSSL true): a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Wins over the cluster level and the inputs; not together with backupCaBundleVaultSecret"

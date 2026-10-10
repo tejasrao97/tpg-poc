@@ -389,6 +389,39 @@ render 'backup: {fullRetentionType: days}'
 [[ "$RC" -ne 0 ]] && ok "fullRetentionType other than count or time fails the render" || bad "retention type bad" "$OUT"
 CHART="$ROOT/charts/tpg-instance"
 
+# ---- Round 23: the values the tpg-instances ApplicationSet builds. The valueFiles list and the
+# `values` template are read from bootstrap/appsets/tpg-instances.yaml; the template is evaluated
+# with helm's tpl (sprig, as the ApplicationSet controller has it) against a context made like the
+# generator's: name, instance.{name,values} and the clusters of fleet.yaml
+APPSET="$ROOT/bootstrap/appsets/tpg-instances.yaml"
+AS="$TMP/appset"; mkdir -p "$AS/charts" "$AS/clusters" "$AS/tplchart/templates"
+cp -r "$ROOT/charts/tpg-instance" "$AS/charts/"; cp -r "$ROOT/clusters/_template" "$AS/clusters/"
+printf 'apiVersion: v2\nname: tplvalues\nversion: 0.0.0\n' > "$AS/tplchart/Chart.yaml"
+printf '%s\n' '{{ tpl .Values.tmpl .Values.ctx }}' > "$AS/tplchart/templates/values.yaml"
+appset_render() {  # appset_render ENTRY_YAML: the chart rendered for clusters.c1.instances.i1 = ENTRY -> $OUT, $RC
+  local fleet f
+  printf 'clusters:\n  c1:\n    operator: {version: v4.5.0}\n    instances:\n      i1: %s\n' "$1" > "$AS/clusters/fleet.yaml"
+  fleet="$(yq -o=json -I=0 '.' "$AS/clusters/fleet.yaml")"
+  jq -n --arg t "$(yq -r '.spec.template.spec.source.helm.values' "$APPSET")" --argjson f "$fleet" \
+    '{tmpl: $t, ctx: {name: "c1", instance: {name: "i1", values: $f.clusters.c1.instances.i1}, clusters: $f.clusters}}' > "$AS/tpl-values.json"
+  RC=0
+  helm template tplvalues "$AS/tplchart" -f "$AS/tpl-values.json" 2>&1 | yq '.' > "$AS/values.yaml" || RC=$?
+  [[ "$RC" -eq 0 && -s "$AS/values.yaml" ]] || { OUT="the appset values template did not evaluate: $(cat "$AS/values.yaml" 2>/dev/null)"; RC=1; return; }
+  local args=()
+  while IFS= read -r f; do args+=(-f "$AS/charts/tpg-instance/$f"); done < <(yq -r '.spec.template.spec.source.helm.valueFiles[]' "$APPSET")
+  OUT="$(helm template i1 "$AS/charts/tpg-instance" "${args[@]}" -f "$AS/values.yaml" --namespace pg-i1 2>&1)" || RC=$?
+}
+skip_ann='sql.tanzu.vmware.com/skip-initial-backup'
+appset_render '{instance: {postgresVersion: postgres-17.6, disableInitialBackup: true}}'
+[[ "$RC" -eq 0 && "$(yq '.instance.name' "$AS/values.yaml")" == i1 && "$(pg ".metadata.annotations[\"$skip_ann\"]")" == "true" ]] \
+  && ok "23: ApplicationSet values with instance.disableInitialBackup true: the Postgres object carries $skip_ann: \"true\"" || bad "appset annotation true" "$OUT"
+appset_render '{instance: {postgresVersion: postgres-17.6, disableInitialBackup: false}}'
+[[ "$RC" -eq 0 && "$(pg ".metadata.annotations | has(\"$skip_ann\")")" == false ]] \
+  && ok "23: ApplicationSet values with instance.disableInitialBackup false: no skip-initial-backup annotation" || bad "appset annotation false" "$OUT"
+appset_render '{instance: {postgresVersion: postgres-17.6}}'
+[[ "$RC" -eq 0 && "$(pg ".metadata.annotations | has(\"$skip_ann\")")" == false ]] \
+  && ok "23: ApplicationSet values without the key (and the chart default false): no skip-initial-backup annotation" || bad "appset annotation absent" "$OUT"
+
 echo
 echo "chart: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

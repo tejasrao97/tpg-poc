@@ -20,6 +20,9 @@
   6 the write step of tpg-rotate-credential (ServiceAccount tpg-credential-writer)
     runs a fixed image equal to the default of toolsImage, and no other template
     names that ServiceAccount
+  7 no YAML file under workflows/params repeats a mapping key (dupkeys.py): the
+    parsers keep the last duplicate silently, which hid the fleet path of
+    backupEnableSSL under disableInitialBackup
 Prints one line per problem; exit 1 when there is any.
 """
 import glob
@@ -29,6 +32,9 @@ import subprocess
 import sys
 
 import yaml
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dupkeys  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 problems = []
@@ -291,6 +297,17 @@ for f in sorted(glob.glob(os.path.join(ROOT, "workflows", "templates", "*.yaml")
         img = (t.get("container") or {}).get("image", "")
         if "{{" in img or img != tools:
             problems.append(f"{where}: image {img!r} must be fixed and equal to the toolsImage default {tools!r}")
+
+# 7
+try:
+    yaml.load("a: 1\nb: 2\na: 3\n", Loader=dupkeys.UniqueKeyLoader)
+    problems.append("dupkeys.UniqueKeyLoader accepts a repeated mapping key")
+except dupkeys.DuplicateKey:
+    pass
+for f in sorted(glob.glob(os.path.join(ROOT, "workflows", "params", "**", "*.y*ml"), recursive=True)):
+    msg = dupkeys.check_file(f)
+    if msg:
+        problems.append(os.path.relpath(msg, ROOT) if msg.startswith(ROOT) else msg)
 
 for p in problems:
     print(p)
