@@ -18,6 +18,12 @@
 # those instances too.
 # P_DRY_RUN=true records the plan and changes nothing. The Azure Blob backup repository is
 # never deleted.
+# Namespaces (Round 23): an instance's namespace is instance.namespace of its entry in
+# clusters/fleet.yaml (default pg-<instance>); "its own namespace" below means that one. purgeNamespace
+# on an instance whose namespace another instance outside this run still uses is refused
+# (NAMESPACE_SHARED, nothing changes); instances of the run that share a namespace are deleted first
+# and the namespace goes after the last of them. With deleteOperator the run removes everything: the
+# namespaces purged are deleted after the last instance of them whoever else was there.
 # Environment: P_APPS P_DRY_RUN P_PURGE_PVCS P_PURGE_NS P_FORCE P_FORCE_DELETE_STUCK P_FINAL_BACKUP P_TIMEOUT
 #              PUSH_MODE PR_TIMEOUT_SECONDS
 WF="$1"; C="$2"
@@ -57,12 +63,17 @@ declared="$(fleet_instances "$REPO" "$C")"
 has_crd=false; tk get crd postgres.sql.tanzu.vmware.com >/dev/null 2>&1 && has_crd=true
 live="[]"
 [[ "$has_crd" == "true" ]] && live="$(tk get postgres -A -o json | jq -c '[.items[]? | {name: .metadata.name, namespace: .metadata.namespace}]')"
+# the namespace each live instance should be in: its entry in clusters/fleet.yaml (default pg-<instance>)
+live="$(while read -r row; do
+    [[ -n "$row" ]] || continue
+    jq -c --arg e "$(instance_ns "$C" "$(jq -r .name <<<"$row")")" '. + {expected: $e}' <<<"$row"
+  done < <(jq -c '.[]' <<<"$live") | jq -sc '.')"
 live_names="$(jq -r '.[].name' <<<"$live")"
 
 # ---- targets
 targets=""
 if [[ "$ALL_INSTANCES" == "true" ]]; then
-  targets="$(printf '%s\n%s\n' "$declared" "$(jq -r '.[] | select(.namespace == "pg-" + .name) | .name' <<<"$live")" | grep -v '^$' | sort -u || true)"
+  targets="$(printf '%s\n%s\n' "$declared" "$(jq -r '.[] | select(.namespace == .expected) | .name' <<<"$live")" | grep -v '^$' | sort -u || true)"
 else
   while read -r i; do
     [[ -n "$i" ]] || continue
@@ -77,7 +88,7 @@ fi
 
 foreign="[]"   # Postgres CRs that block the operator removal
 if [[ "$DELETE_OPERATOR" == "true" && "$has_crd" == "true" ]]; then
-  foreign="$(jq -c --arg t "$targets" '($t | split("\n")) as $tl | [.[] | select(.namespace != ("pg-" + .name) or ((.name as $n | $tl | index($n)) | not))]' <<<"$live")"
+  foreign="$(jq -c --arg t "$targets" '($t | split("\n")) as $tl | [.[] | select(.namespace != .expected or ((.name as $n | $tl | index($n)) | not))]' <<<"$live")"
   busy="$(for k in postgresbackups postgresrestores postgresversionupgrades; do
       tk get "$k" -A -o json 2>/dev/null | jq -r --arg k "$k" '.items[]? | select((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed)$") | not) | $k + ":" + .metadata.namespace + "/" + .metadata.name'
     done)"
@@ -86,12 +97,25 @@ if [[ "$DELETE_OPERATOR" == "true" && "$has_crd" == "true" ]]; then
   fi
   if [[ "$(jq 'length' <<<"$foreign")" -gt 0 ]]; then
     if [[ "$FORCE" == "true" ]]; then
-      targets="$(printf '%s\n%s\n' "$targets" "$(jq -r '.[] | select(.namespace == "pg-" + .name) | .name' <<<"$foreign")" | grep -v '^$' | sort -u || true)"
-      foreign="$(jq -c '[.[] | select(.namespace != "pg-" + .name)]' <<<"$foreign")"
+      targets="$(printf '%s\n%s\n' "$targets" "$(jq -r '.[] | select(.namespace == .expected) | .name' <<<"$foreign")" | grep -v '^$' | sort -u || true)"
+      foreign="$(jq -c '[.[] | select(.namespace != .expected)]' <<<"$foreign")"
     else
       cfail operator CRS_EXIST "Postgres instances not in this run: $(jq -r 'map(.namespace + "/" + .name) | join(" ")' <<<"$foreign"); add them to apps or set force=true"
     fi
   fi
+fi
+# purgeNamespace on a namespace that instances outside this run still use: refused before anything changes
+# (deleteOperator removes everything, so it is allowed there)
+if [[ "$DELETE_OPERATOR" != "true" ]]; then
+  for i in $targets; do
+    [[ "$(cmap_ival "$C" "$i" purgeNamespace "${P_PURGE_NS:-}")" == "true" ]] || continue
+    ins="$(instance_ns "$C" "$i")"
+    stay="$(for o in $(fleet_ns_members "$REPO" "$C" "$ins"); do
+        grep -Fqx -- "$o" <<<"$targets" || printf '%s ' "$o"
+      done)"
+    stay="${stay% }"
+    [[ -z "$stay" ]] || cfail "$i" NAMESPACE_SHARED "purgeNamespace=true would delete namespace ${ins}, which ${stay// /, } also use(s) and which this run does not delete; delete them too, or set purgeNamespace=false for ${i}"
+  done
 fi
 [[ "$failed" -eq 0 ]] || exit 1
 
@@ -104,18 +128,35 @@ if [[ "$DRY" == "true" ]]; then
     record "result.${C}.${i}" SUCCEEDED DRY_RUN "would delete Postgres ${i} (fleet.yaml entry: ${in_git}; finalBackup=$(cmap_ival "$C" "$i" finalBackup "${P_FINAL_BACKUP:-true}"), purgePvcs=$(cmap_ival "$C" "$i" purgePvcs "${P_PURGE_PVCS:-}"), purgeNamespace=$(cmap_ival "$C" "$i" purgeNamespace "${P_PURGE_NS:-}"))"
   done
   if [[ "$DELETE_OPERATOR" == "true" ]]; then
-    record "result.${C}.operator" SUCCEEDED DRY_RUN "would delete tpg-${C}-operator, namespace tanzu-postgres-operator$( [[ "$(jq 'length' <<<"$foreign")" -gt 0 ]] && printf ', Postgres CRs outside pg-<name>: %s' "$(jq -r 'map(.namespace + "/" + .name) | join(" ")' <<<"$foreign")" ) and CRDs: $(paste -sd' ' <<<"${crds:-none}")"
+    record "result.${C}.operator" SUCCEEDED DRY_RUN "would delete tpg-${C}-operator, namespace tanzu-postgres-operator$( [[ "$(jq 'length' <<<"$foreign")" -gt 0 ]] && printf ', Postgres CRs outside their own namespace: %s' "$(jq -r 'map(.namespace + "/" + .name) | join(" ")' <<<"$foreign")" ) and CRDs: $(paste -sd' ' <<<"${crds:-none}")"
   fi
   exit 0
 fi
 
 # ---- instances
+# DELETE_RUN_INSTANCES: the instances of this run leave together, so a namespace they share is deleted
+# after the last of them (delete-instance.sh defers it into NS_PURGE_FILE; DELETE_OPERATOR_RUN: everything goes)
+DELETE_RUN_INSTANCES="$(paste -sd' ' <<<"$targets")"
+export DELETE_RUN_INSTANCES DELETE_OPERATOR_RUN="$DELETE_OPERATOR" NS_PURGE_FILE="$WORK/ns-purge"
+: > "$NS_PURGE_FILE"
 instance_failed=0
 for i in $targets; do
   ALLOW_UNTRACKED=true bash /scripts/delete-instance.sh "$WF" "$C" "$i" "$i" "${P_FINAL_BACKUP:-true}" "$P_PURGE_PVCS" "$P_PURGE_NS" "$TIMEOUT" \
     || instance_failed=1
 done
 [[ "$instance_failed" -eq 0 ]] || failed=1
+# namespaces purged by instances of a shared namespace, now that the last of them is gone
+if [[ "$instance_failed" -eq 0 ]]; then
+  while read -r ns; do
+    [[ -n "$ns" ]] || continue
+    tk get namespace "$ns" >/dev/null 2>&1 || continue   # the last instance of it deleted it already
+    if tk delete namespace "$ns" --ignore-not-found --wait=true --timeout=600s >/dev/null; then
+      record_entry "result.${C}.namespace-${ns}" SUCCEEDED "" "namespace ${ns} deleted after the last instance of it"
+    else
+      cfail "namespace-${ns}" NAMESPACE_DELETE_FAILED "$ns"
+    fi
+  done < <(sort -u "$NS_PURGE_FILE")
+fi
 [[ "$DELETE_OPERATOR" == "true" ]] || exit "$failed"
 if [[ "$instance_failed" -ne 0 ]]; then
   cfail operator BLOCKED_BY_INSTANCE_FAILURES "the operator stays until every instance is deleted"

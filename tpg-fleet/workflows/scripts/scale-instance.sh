@@ -100,7 +100,7 @@ if [[ "$MODE" == "plan" ]]; then
     [[ "$(pg_state "$I")" == "Running" ]] || { ifail NOT_RUNNING "currentState=$(pg_state "$I")"; continue; }
     busy=""
     for kind in postgresversionupgrade postgresrestore; do
-      n="$(tk -n "pg-${I}" get "$kind" -o json 2>/dev/null \
+      n="$(tk -n "$(instance_ns "$C" "$I")" get "$kind" -o json 2>/dev/null \
         | jq -r '[.items[] | select((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed)$") | not)] | length')"
       [[ "${n:-0}" -eq 0 ]] || busy="${busy}${kind} "
     done
@@ -214,7 +214,7 @@ key="result.${C}.${I}"
 fail() { record "$key" FAILED "$1" "${2:-}"; exit 1; }
 result_guard "$key"
 use_cluster "$C" || fail NOT_REGISTERED
-ns="pg-${I}"
+ns="$(instance_ns "$C" "$I")"
 app="tpg-${C}-${I}"
 rev="$(run_data revision | jq -r '.detail // empty')"
 [[ -n "$rev" ]] || rev="$(fleet_head)"

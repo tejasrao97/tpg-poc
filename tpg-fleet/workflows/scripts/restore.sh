@@ -3,7 +3,7 @@
 # Restore one Postgres instance with a PostgresRestore. Inputs come from P_*
 # environment variables (validated by validate-params.sh restore):
 #   P_SOURCE_CLUSTER   cluster that holds the source instance
-#   P_INSTANCE         source instance name (namespace pg-<instance>)
+#   P_INSTANCE         source instance name (its namespace: clusters/fleet.yaml instance.namespace, default pg-<instance>)
 #   P_MODE             time | latest | backup | lsn | xid
 #   P_TARGET           mode time: UTC timestamp; backup: PostgresBackup name;
 #                      lsn/xid: the LSN or transaction ID; latest: empty
@@ -38,11 +38,11 @@ DST_C="${P_TARGET_CLUSTER:-$SRC_C}"; T="${P_TARGET_INSTANCE:-}"; CONFIRM="${P_CO
 BEST="${P_BEST_EFFORT:-false}"; TIMEOUT="${P_TIMEOUT:-7200}"
 export PUSH_MODE="${P_PUSH_MODE:-direct}" PR_TIMEOUT_SECONDS="${P_PR_TIMEOUT:-3600}"
 key="result.${DST_C}"
-SRC_NS="pg-${I}"
+SRC_NS="$(instance_ns "$SRC_C" "$I")"   # an existing instance: its namespace from clusters/fleet.yaml (Round 23)
 fail() { record "$key" FAILED "$1" "${2:-}"; exit 1; }
 result_guard "$key"
 [[ -n "$T" ]] || T="${I}-restore-$(date -u +%Y%m%d%H%M)"
-DST_NS="pg-${T}"
+DST_NS="$(instance_ns "$DST_C" "$T")"   # a declared target keeps its namespace; a new one gets pg-<instance> (the restore rewrite takes it as an input)
 IN_PLACE=false
 [[ "$DST_C" == "$SRC_C" && "$T" == "$I" ]] && IN_PLACE=true
 
@@ -102,10 +102,12 @@ if [[ "$DST_C" != "$SRC_C" && "$TARGET_EXISTS" == "false" ]]; then
   # (D71): a restored copy does not start serving MongoDB clients on its own
   # (turn it on with a tpg-patch values file). A copied values patch that turns
   # FerretDB on is overridden with valuesOverride, which wins over patch files.
-  SRC="$SRC_C" DST="$DST_C" OLD="$I" NEW="$T" yq -i '
+  SRC="$SRC_C" DST="$DST_C" OLD="$I" NEW="$T" NS="$DST_NS" yq -i '
     .clusters[strenv(DST)].instances[strenv(NEW)] = .clusters[strenv(SRC)].instances[strenv(OLD)]
     | del(.clusters[strenv(DST)].instances[strenv(NEW)].ferret)
-    | del(.clusters[strenv(DST)].instances[strenv(NEW)].backup.repoPath)' \
+    | del(.clusters[strenv(DST)].instances[strenv(NEW)].backup.repoPath)
+    | .clusters[strenv(DST)].instances[strenv(NEW)].instance.namespace = strenv(NS)
+    | del(.clusters[strenv(DST)].instances[strenv(NEW)].instance.sharedSecretsOwner)' \
     "$WORK/repo/$FLEET_REL" || fail FLEET_EDIT_FAILED "${FLEET_REL}"
   if [[ "$(instance_effective "$WORK/repo" "$DST_C" "$T" '.ferret.enabled' false)" == "true" ]]; then
     DST="$DST_C" NEW="$T" yq -i '.clusters[strenv(DST)].instances[strenv(NEW)].valuesOverride.ferret.enabled = false' \

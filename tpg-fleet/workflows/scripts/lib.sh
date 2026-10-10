@@ -412,7 +412,9 @@ inventory_cluster() {
 }
 
 inventory_instances() {
-  run_data inventory | jq -r --arg c "$1" '.[] | select(.name == $c) | .instances[].name'
+  # the instances that own the Secrets of their namespace come first (Round 23, instance.sharedSecretsOwner),
+  # so a namespace shared by several instances has them before another instance there is synced
+  run_data inventory | jq -r --arg c "$1" '.[] | select(.name == $c) | .instances | sort_by(if .secretsOwner == false then 1 else 0 end) | .[].name'
 }
 
 # ----------------------------------------------------------------- Argo CD API
@@ -541,25 +543,26 @@ exposure_warning_rendered() {
 
 exposure_follow() {
   # exposure_follow INSTANCE TIMEOUT_SECONDS: after a sync, wait until the
-  # Services of pg-<instance> match the exposure of the live Postgres spec
+  # Services of the instance namespace match the exposure of the live Postgres spec
   # (design decision D64): as many LoadBalancer Services with an address as the
   # spec asks for (serviceType, and readOnlyServiceType when high availability
   # is on, plus the FerretDB Services of a PostgresFerretDocumentDB), and none
   # when all are ClusterIP. Sets EXPOSURE_DETAIL; returns 1
   # on timeout. (use_cluster first)
-  local i="$1" timeout="$2" start want have spec fspec
-  spec="$(tk -n "pg-$i" get postgres "$i" -o json 2>/dev/null || echo '{}')"
+  local i="$1" timeout="$2" start want have spec fspec ns
+  ns="$(instance_ns "$CLUSTER" "$i")"
+  spec="$(tk -n "$ns" get postgres "$i" -o json 2>/dev/null || echo '{}')"
   want="$(jq '[(.spec.serviceType == "LoadBalancer"),
                 ((.spec.readOnlyServiceType == "LoadBalancer") and (.spec.highAvailability.enabled == true))]
               | map(select(.)) | length' <<<"$spec")"
   # FerretDB Services (D71): ferretdb-rw-<instance>, and ferretdb-ro-<instance> with read-only proxies
-  fspec="$(tk -n "pg-$i" get postgresferretdocumentdb "$i" -o json 2>/dev/null || echo '{}')"
+  fspec="$(tk -n "$ns" get postgresferretdocumentdb "$i" -o json 2>/dev/null || echo '{}')"
   want=$(( want + $(jq '[(.spec.service.serviceType == "LoadBalancer"),
                 ((.spec.service.readOnlyServiceType == "LoadBalancer") and ((.spec.readOnly.replicas // 0) > 0))]
               | map(select(.)) | length' <<<"$fspec") ))
   start="$(date +%s)"
   while true; do
-    have="$(tk -n "pg-$i" get svc -o json 2>/dev/null | jq -r '[.items[] | select(.spec.type == "LoadBalancer")
+    have="$(tk -n "$ns" get svc -o json 2>/dev/null | jq -r '[.items[] | select(.spec.type == "LoadBalancer")
       | {n: .metadata.name, a: ((.status.loadBalancer.ingress // [])[0] | (.ip // .hostname // ""))}]')"
     if [[ "$(jq 'length' <<<"$have")" -eq "$want" ]] && jq -e 'all(.[]; .a != "")' <<<"$have" >/dev/null; then
       if [[ "$want" -eq 0 ]]; then EXPOSURE_DETAIL="ClusterIP only"
@@ -567,7 +570,7 @@ exposure_follow() {
       return 0
     fi
     if (( $(date +%s) - start >= timeout )); then
-      EXPOSURE_DETAIL="expected ${want} LoadBalancer Service(s) with an address in pg-${i}, found: $(jq -c '.' <<<"$have")"
+      EXPOSURE_DETAIL="expected ${want} LoadBalancer Service(s) with an address in ${ns}, found: $(jq -c '.' <<<"$have")"
       return 1
     fi
     log "${i}: waiting for the Services to follow the exposure (${want} load balancer(s) expected)"
@@ -576,26 +579,27 @@ exposure_follow() {
 }
 
 ferret_follow() {
-  # ferret_follow INSTANCE TIMEOUT_SECONDS: after a sync, when pg-<instance> has a
+  # ferret_follow INSTANCE TIMEOUT_SECONDS: after a sync, when the instance namespace has a
   # PostgresFerretDocumentDB (D71): the connection Secrets it names exist (the
   # operator creates them with the instance), then its Deployments
   # (app=ferretdb-rw-<instance>, and ferretdb-ro-<instance> with read-only
   # proxies) are available. Sets FERRET_REASON and FERRET_DETAIL ("" without
   # FerretDB); returns 1 on failure. (use_cluster first)
-  local i="$1" timeout="$2" f sec missing found start want ready sel
+  local i="$1" timeout="$2" f sec missing found start want ready sel ns
+  ns="$(instance_ns "$CLUSTER" "$i")"
   FERRET_REASON=""; FERRET_DETAIL=""
-  f="$(tk -n "pg-$i" get postgresferretdocumentdb "$i" -o json 2>/dev/null)" || return 0
+  f="$(tk -n "$ns" get postgresferretdocumentdb "$i" -o json 2>/dev/null)" || return 0
   start="$(date +%s)"
   while true; do
     missing=""
     for sec in $(jq -r '.spec.postgres.connectionDetails | .readWrite.secretName, (.readOnly.secretName // empty)' <<<"$f"); do
-      tk -n "pg-$i" get secret "$sec" >/dev/null 2>&1 || missing="${missing:+${missing},}${sec}"
+      tk -n "$ns" get secret "$sec" >/dev/null 2>&1 || missing="${missing:+${missing},}${sec}"
     done
     [[ -n "$missing" ]] || break
     if (( $(date +%s) - start >= 120 )); then
-      found="$(tk -n "pg-$i" get secret -o name 2>/dev/null | sed 's#^secret/##' | grep -- '-db-secret$' | paste -sd, -)"
+      found="$(tk -n "$ns" get secret -o name 2>/dev/null | sed 's#^secret/##' | grep -- '-db-secret$' | paste -sd, -)"
       FERRET_REASON=FERRET_SECRET_MISSING
-      FERRET_DETAIL="${i}: connection Secret(s) ${missing} not found in pg-${i}; the db Secrets there: ${found:-none} (set ferretSecretName / ferretReadOnlySecretName)"
+      FERRET_DETAIL="${i}: connection Secret(s) ${missing} not found in ${ns}; the db Secrets there: ${found:-none} (set ferretSecretName / ferretReadOnlySecretName)"
       return 1
     fi
     sleep 10
@@ -603,7 +607,7 @@ ferret_follow() {
   want=1; [[ "$(jq -r '.spec.readOnly.replicas // 0' <<<"$f")" -gt 0 ]] && want=2
   sel="app in (ferretdb-rw-${i},ferretdb-ro-${i})"
   while true; do
-    ready="$(tk -n "pg-$i" get deployment -l "$sel" -o json 2>/dev/null \
+    ready="$(tk -n "$ns" get deployment -l "$sel" -o json 2>/dev/null \
       | jq '[.items[] | select((.status.availableReplicas // 0) >= (if .spec.replicas == null then 1 else .spec.replicas end))] | length')"
     if [[ "${ready:-0}" -ge "$want" ]]; then
       FERRET_DETAIL="FerretDB ready (${want} Deployment(s))"
@@ -611,7 +615,7 @@ ferret_follow() {
     fi
     if (( $(date +%s) - start >= timeout )); then
       FERRET_REASON=FERRET_NOT_READY
-      FERRET_DETAIL="${i}: ${ready:-0} of ${want} FerretDB Deployment(s) available; pods: $(tk -n "pg-$i" get pods -l "$sel" --no-headers 2>/dev/null \
+      FERRET_DETAIL="${i}: ${ready:-0} of ${want} FerretDB Deployment(s) available; pods: $(tk -n "$ns" get pods -l "$sel" --no-headers 2>/dev/null \
         | awk '{printf "%s%s=%s", (n++ ? ", " : ""), $1, $3}'); is the documentdb extension prepared (FERRET_EXTENSION_REQUIRED)?"
       return 1
     fi
@@ -1353,12 +1357,12 @@ fleet_flush() {
 }
 
 # ----------------------------------------------------------------- Postgres helpers
-pg_state() { tk -n "pg-$1" get postgres "$1" -o jsonpath='{.status.currentState}' 2>/dev/null || true; }
+pg_state() { tk -n "$(instance_ns "$CLUSTER" "$1")" get postgres "$1" -o jsonpath='{.status.currentState}' 2>/dev/null || true; }
 
 sts_ready() {
   # sts_ready INSTANCE -> 0 when readyReplicas equals spec.replicas
   local j
-  j="$(tk -n "pg-$1" get statefulset "$1" -o json 2>/dev/null || echo '{}')"
+  j="$(tk -n "$(instance_ns "$CLUSTER" "$1")" get statefulset "$1" -o json 2>/dev/null || echo '{}')"
   jq -e '(.spec.replicas // -1) == (.status.readyReplicas // -2)' <<<"$j" >/dev/null
 }
 
@@ -1376,7 +1380,7 @@ pg_wait_ready() {
   # until the Postgres object is Running and every pod is ready. Fails fast when a
   # pod cannot start (pods_watch). Sets POD_WATCH_REASON / POD_WATCH_DETAIL.
   _PG_WATCHED="$1"
-  pods_watch "pg-$1" "$2" --selector "postgres-instance=$1" --kubectl tk --label "Postgres $1" --done-fn _pg_ready
+  pods_watch "$(instance_ns "$CLUSTER" "$1")" "$2" --selector "postgres-instance=$1" --kubectl tk --label "Postgres $1" --done-fn _pg_ready
 }
 
 operator_wait_ready() {
@@ -1405,7 +1409,8 @@ major_of() { sed -E 's/^[^0-9]*([0-9]+).*/\1/' <<<"$1"; }
 # ----------------------------------------------------------------- instance operations
 busy_operations() {
   # busy_operations INSTANCE -> kinds with an unfinished operation (empty when idle)
-  local ns="pg-$1" kind n
+  local ns kind n
+  ns="$(instance_ns "$CLUSTER" "$1")"
   for kind in postgresbackup postgresrestore postgresversionupgrade; do
     n="$(tk -n "$ns" get "$kind" -o json 2>/dev/null \
       | jq -r '[.items[] | select((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed)$") | not)] | length')"
@@ -1418,7 +1423,7 @@ sync_instance_app() {
   # generate the Application when the instance is new, sync it (at REVISION,
   # default the fleet branch head) and watch the instance pods until it is
   # Healthy. Returns app_sync_wait's code, or 4 when the Application was not generated.
-  local app="tpg-$1-$2" inst="$2" timeout="$3" rev="${4:-}" i
+  local app="tpg-$1-$2" c="$1" inst="$2" timeout="$3" rev="${4:-}" i
   shift 3; [[ $# -gt 0 ]] && shift
   if ! app_exists "$app"; then
     appset_refresh tpg-instances
@@ -1431,7 +1436,7 @@ sync_instance_app() {
   fi
   [[ -n "$rev" ]] || rev="$(fleet_head)"
   _PG_WATCHED="$inst"
-  app_sync_wait "$app" "$timeout" ${rev:+--revision "$rev"} --pods "pg-$inst" "postgres-instance=$inst" --ready-fn _pg_ready "$@"
+  app_sync_wait "$app" "$timeout" ${rev:+--revision "$rev"} --pods "$(instance_ns "$c" "$inst")" "postgres-instance=$inst" --ready-fn _pg_ready "$@"
 }
 
 # ----------------------------------------------------------------- input parameters
@@ -1553,7 +1558,7 @@ cmap_guard() {
   cmap_set || return 0
   want="$(cmap_ival "$1" "$2" postgresVersion)"
   [[ -n "$want" ]] || return 0
-  live="$(tk -n "pg-$2" get postgres "$2" -o jsonpath='{.spec.postgresVersion.name}' 2>/dev/null || true)"
+  live="$(tk -n "$(instance_ns "$1" "$2")" get postgres "$2" -o jsonpath='{.spec.postgresVersion.name}' 2>/dev/null || true)"
   [[ "$live" == "$want" ]] && return 0
   printf 'clusterMap postgresVersion is %s, the live instance runs %s' "$want" "${live:-nothing}"
   return 1
@@ -2019,6 +2024,10 @@ patch_values_errors() {
   for k in .backup.enableSSL .backup.caBundle; do
     yq -e "${k} == null" "$f" >/dev/null 2>&1 || echo "${n}: ${k#.} comes from the inputs backupEnableSSL, backupCaBundleFile and backupCaBundleVaultSecret"
   done
+  # Round 23: the namespace is immutable and the owner of the shared Secrets one per namespace; the workflows own both
+  for k in .instance.namespace .instance.sharedSecretsOwner; do
+    yq -e "${k} == null" "$f" >/dev/null 2>&1 || echo "${n}: ${k#.} cannot be set by a values ${PATCH_NOUN}: the namespace is the clusterMap key namespace of tpg-day0 and tpg-create-instance (immutable), and the workflows move the owner of the shared Secrets"
+  done
   [[ "$5" == running ]] || return 0
   yq -e '.instance.storageClassName == null' "$f" >/dev/null 2>&1 || echo "${n}: instance.storageClassName cannot change on a running instance"
   # tpg-instances ignores these PostgresBackupLocation fields (ignoreDifferences with
@@ -2090,6 +2099,151 @@ instance_values() {
     * $i * {"instance": {"name": strenv(I)}}' "$1/$FLEET_REL"
 }
 
+# ----------------------------------------------------------------- instance namespace (Round 23)
+# The namespace of an instance is instance.namespace of its entry in clusters/fleet.yaml
+# (tpg-day0 and tpg-create-instance, clusterMap key namespace; immutable), pg-<instance>
+# when the entry has none. Every workflow reads it here; none derives pg-<instance> itself.
+# Instances may share a namespace: one of them owns the Secrets the chart names the same in
+# every instance (instance.sharedSecretsOwner, see fleet_ns_owners).
+instance_ns_repo_local() {
+  # instance_ns_repo_local -> a checkout of the fleet repository the step already has
+  # (INSTANCE_NS_REPO, FLEET_CLONE, REPO, $WORK/repo, or the one instance_ns_repo made)
+  local r
+  for r in "${INSTANCE_NS_REPO:-}" "${FLEET_CLONE:-}" "${REPO:-}" "$WORK/repo" "$WORK/ns-repo"; do
+    [[ -n "$r" && -f "$r/$FLEET_REL" ]] && { printf '%s' "$r"; return 0; }
+  done
+  return 1
+}
+
+instance_ns_repo() {
+  # instance_ns_repo -> instance_ns_repo_local, else a clone made for reading the namespaces
+  # ($WORK/ns-repo). Prints nothing (returns 1) when the repository cannot be had
+  instance_ns_repo_local && return 0
+  git_clone "$WORK/ns-repo" >/dev/null 2>&1 && [[ -f "$WORK/ns-repo/$FLEET_REL" ]] && { printf '%s' "$WORK/ns-repo"; return 0; }
+  return 1
+}
+
+instance_ns_in() {
+  # instance_ns_in REPO CLUSTER INSTANCE -> the namespace of the instance in that checkout of the
+  # fleet repository: instance.namespace of its entry (through instance_effective), else
+  # pg-<instance>. The one place that knows the default
+  instance_effective "$1" "$2" "$3" '.instance.namespace' "pg-$3"
+}
+
+instance_ns() {
+  # instance_ns CLUSTER INSTANCE -> the namespace of the instance: instance.namespace of its
+  # entry in clusters/fleet.yaml (instance_ns_in); in a step that has no clone of the fleet
+  # repository the namespace the run inventory recorded (discover.sh), else a clone is made;
+  # pg-<instance> when none of them has the instance
+  local c="$1" i="$2" repo ns=""
+  if repo="$(instance_ns_repo_local)"; then
+    ns="$(instance_ns_in "$repo" "$c" "$i")"
+  else
+    ns="$(run_data inventory 2>/dev/null | jq -r --arg c "$c" --arg i "$i" \
+      '.[]? | select(.name == $c) | .instances[]? | select(.name == $i) | .namespace // empty' 2>/dev/null | head -n1 || true)"
+    if [[ -z "$ns" ]] && repo="$(instance_ns_repo)"; then
+      ns="$(instance_ns_in "$repo" "$c" "$i")"
+    fi
+  fi
+  printf '%s' "${ns:-pg-$i}"
+}
+
+fleet_ns_members() {
+  # fleet_ns_members REPO CLUSTER NAMESPACE -> the instances of clusters/fleet.yaml whose
+  # namespace is NAMESPACE, one per line
+  local i
+  for i in $(fleet_instances "$1" "$2"); do
+    [[ "$(instance_ns_in "$1" "$2" "$i")" == "$3" ]] && printf '%s\n' "$i"
+  done
+  return 0
+}
+
+fleet_ns_owners() {
+  # fleet_ns_owners REPO CLUSTER NAMESPACE -> the instances of the namespace that render the
+  # shared Secrets (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage):
+  # instance.sharedSecretsOwner is not false (the default is true, so an entry written before
+  # Round 23 owns its Secrets). Exactly one per namespace; the plan steps keep it so
+  local i
+  for i in $(fleet_ns_members "$1" "$2" "$3"); do
+    [[ "$(instance_effective "$1" "$2" "$i" '.instance.sharedSecretsOwner' true)" == "false" ]] || printf '%s\n' "$i"
+  done
+  return 0
+}
+
+ns_secrets_app() {
+  # ns_secrets_app NAMESPACE -> the Argo CD Application (tpg-<cluster>-<instance>) whose tracking
+  # annotation is on the VaultStaticSecret regsecret of the namespace, empty when there is none
+  # (use_cluster first). Argo CD owns an object through that one annotation, so the Application it
+  # names is the only owner of the shared Secrets at any moment
+  tk -n "$1" get vaultstaticsecret regsecret -o json 2>/dev/null \
+    | jq -r '(.metadata.annotations["argocd.argoproj.io/tracking-id"] // "") | split(":")[0]' 2>/dev/null || true
+}
+
+_secrets_app_is() { [[ "$(ns_secrets_app "$1")" == "$2" ]]; }   # NAMESPACE APP
+
+ns_handover() {
+  # ns_handover REPO CLUSTER INSTANCE NAMESPACE TIMEOUT_SECONDS (use_cluster first): INSTANCE is about
+  # to leave a namespace that other fleet instances use. The shared Secrets (ServiceAccount tpg-vso,
+  # VaultStaticSecrets regsecret and backup-storage, and the Secrets that Vault Secrets Operator keeps
+  # for them) must stay, and exactly one Argo CD Application owns them at any moment (two
+  # Applications that render the same object fight over it). The order:
+  #   1 commit  instance.sharedSecretsOwner false on INSTANCE and removed (true) on the successor, one
+  #             commit; no Application syncs by itself (tpg-instances has no automated sync), so the
+  #             objects stay tracked by INSTANCE's Application
+  #   2 sync    the successor's Application is synced at that commit, without prune: it renders the
+  #             objects, and the apply moves the tracking annotation from INSTANCE's Application to
+  #             the successor's in one update (the owner changes atomically; the objects are never
+  #             deleted, so the Secrets the Postgres pods use stay)
+  #   3 check   the annotation names the successor's Application (wait_logged)
+  # only then the caller removes INSTANCE from clusters/fleet.yaml, which removes its Application
+  # (the Applications of tpg-instances have no resources finalizer, so deleting one leaves the
+  # objects; these are tracked by the successor by then).
+  # A namespace that has an owner already (INSTANCE is not the owner): when INSTANCE's Application
+  # still tracks the objects, steps 2 and 3 run for that owner (a hand-over that stopped half way).
+  # Sets HANDOVER_NOTE; returns 1 with HANDOVER_REASON and HANDOVER_DETAIL on failure.
+  local repo="$1" c="$2" i="$3" ns="$4" timeout="$5" others owners other_owners succ rev="" app
+  HANDOVER_NOTE=""; HANDOVER_REASON=""; HANDOVER_DETAIL=""
+  others="$(fleet_ns_members "$repo" "$c" "$ns" | grep -vFx -- "$i" || true)"
+  [[ -n "$others" ]] || return 0
+  owners="$(fleet_ns_owners "$repo" "$c" "$ns")"
+  other_owners="$(grep -vFx -- "$i" <<<"$owners" || true)"
+  if grep -Fqx -- "$i" <<<"$owners" || [[ -z "$other_owners" ]]; then
+    succ="$(head -n1 <<<"${other_owners:-$others}")"
+    if fleet_has_instance "$repo" "$c" "$i"; then
+      C="$c" I="$i" yq -i '.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner = false' "$repo/$FLEET_REL"
+    fi
+    C="$c" I="$succ" yq -i 'del(.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner)' "$repo/$FLEET_REL"
+    if ! git_commit_push "$repo" "move the shared Secrets of ${c}/${ns} from ${i} to ${succ}" "$FLEET_REL"; then
+      HANDOVER_REASON=GIT_PUSH_FAILED; HANDOVER_DETAIL="the hand-over of the shared Secrets of ${ns} from ${i} to ${succ} was not pushed (pushMode=${PUSH_MODE:-direct})"
+      return 1
+    fi
+    rev="$PUSHED_REVISION"
+  else
+    succ="$(head -n1 <<<"$other_owners")"
+  fi
+  app="tpg-${c}-${succ}"
+  if _secrets_app_is "$ns" "tpg-${c}-${i}"; then
+    [[ -n "$rev" ]] || rev="$(fleet_head)"
+    appset_refresh tpg-instances
+    if ! app_exists "$app"; then
+      HANDOVER_REASON=HANDOVER_FAILED; HANDOVER_DETAIL="${app} does not exist, so it cannot take over the shared Secrets of ${ns}"
+      return 1
+    fi
+    if ! app_sync_wait "$app" "$timeout" ${rev:+--revision "$rev"}; then
+      HANDOVER_REASON=HANDOVER_FAILED; HANDOVER_DETAIL="${SYNC_FAIL_REASON}: ${SYNC_FAIL_DETAIL}; ${i} still owns the shared Secrets of ${ns} in Argo CD, run tpg-delete-instance again after ${app} syncs"
+      return 1
+    fi
+    if ! wait_logged "shared Secrets of ${ns} tracked by ${app}" 12 10 _secrets_app_is "$ns" "$app"; then
+      HANDOVER_REASON=HANDOVER_FAILED; HANDOVER_DETAIL="the VaultStaticSecret regsecret in ${ns} is tracked by '$(ns_secrets_app "$ns")', not by ${app}, after the sync"
+      return 1
+    fi
+    HANDOVER_NOTE="shared Secrets of ${ns} moved to ${succ}"
+  else
+    HANDOVER_NOTE="shared Secrets of ${ns} stay with ${succ}"
+  fi
+  return 0
+}
+
 instance_effective() {
   # instance_effective REPO CLUSTER INSTANCE YQ_PATH DEFAULT -> the value the chart
   # sees for YQ_PATH: the instance's Helm values (instance_values), then its
@@ -2123,7 +2277,7 @@ instance_render() {
   local vals
   vals="$(mktemp)"
   instance_values "$1" "$2" "$3" | yq 'del(.patches) | del(.overlays)' > "$vals"
-  helm template "$3" "$1/helm_artifacts/instance/tpg-instance" --namespace "pg-$3" \
+  helm template "$3" "$1/helm_artifacts/instance/tpg-instance" --namespace "$(instance_ns_in "$1" "$2" "$3")" \
     -f "$1/$TEMPLATE_CLUSTER_REL" -f "$1/$TEMPLATE_INSTANCE_REL" -f "$1/$FLEET_REL" -f "$vals"
   local rc=$?
   rm -f "$vals"

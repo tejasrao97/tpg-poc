@@ -468,7 +468,7 @@ promq aks-tpg-hub 'count by (cluster) (up)'               # one line per target;
 promq aks-tpg-hub 'count by (cluster, job) (up == 0)'     # targets that cannot be scraped
 promq aks-tpg-hub 'count by (cluster) (up{postgres_instance!=""})'                     # postgres-exporter pods
 promq aks-tpg-hub 'count by (cluster) (tanzu_postgres_instance_state{state="Running"})' # Postgres instances
-promq aks-tpg-hub 'count by (cluster) (kube_statefulset_replicas{namespace=~"pg-.*"})'  # Postgres StatefulSets
+promq aks-tpg-hub 'count by (cluster) (kube_statefulset_replicas and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)"))'  # Postgres StatefulSets
 promq aks-tpg-hub 'count by (job) (up{cluster=""})'       # series without a cluster label (section 4.3)
 ```
 
@@ -698,8 +698,11 @@ Arguments: title, panel type, a list of `(PromQL, legend)` (refIds A, B, ...; `s
 `state-timeline` range queries), x, width and height on the 24-column grid, then the
 field config. A panel whose `x + width` reaches 24 (or `newline=True`) ends the grid
 row. Use the selectors `PG` (exporter metrics), `CR` (custom resource metrics) and
-`NSX` (pod and volume metrics in `pg-<instance>`) so the `cluster` and `instance`
-variables apply. A metric family that `METRIC_SOURCES` in `generate.py` does not know
+`PODS`, `STS` and `PVCS` (the pods, StatefulSets and volumes of the selected instances: the
+series `up{postgres_instance=...}` name the pods whatever namespace an instance is in, and
+`kube_pod_spec_volumes_persistentvolumeclaims_info` maps them to their volumes; no query
+selects a `pg-` namespace, because an instance may be in any namespace and share one) so the
+`cluster` and `instance` variables apply. A metric family that `METRIC_SOURCES` in `generate.py` does not know
 is listed as "not classified" in section 7, which `tests/monitoring` refuses: add its
 source there.
 
@@ -715,7 +718,7 @@ Append a `dict` to `ALERTS`:
 
 ```python
 dict(uid="tpg-volume-almost-full", title="Postgres volume above 90%",
-     expr='max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace=~"pg-.*"}) / max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace=~"pg-.*"})',
+     expr='(max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes) / max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes)) and on (cluster, namespace, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{postgres_instance!=""}))',
      op="gt", threshold=0.9, for_="15m", severity="warning",
      summary="{{ $labels.cluster }}/{{ $labels.persistentvolumeclaim }} is more than 90% full"),
 ```
@@ -863,13 +866,13 @@ count by (cluster) (tanzu_postgres_instance_state{state="Running"} offset 1h) - 
 
 Summary: `{{ $labels.cluster }}/{{ $labels.statefulset }} has fewer ready pods than desired`
 
-Metrics: `kube_statefulset_replicas`, `kube_statefulset_status_replicas_ready`
+Metrics: `kube_statefulset_replicas`, `kube_statefulset_status_replicas_ready`, `up`
 
 ```promql
 # Grafana rule tpg-replicas-below-desired, query A (instant)
-max by (cluster, namespace, statefulset) (kube_statefulset_replicas{namespace=~"pg-.*"}) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{namespace=~"pg-.*"})
+max by (cluster, namespace, statefulset) (kube_statefulset_replicas and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)")) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)"))
 # PrometheusRule alert TanzuPostgresReplicasBelowDesired
-(max by (cluster, namespace, statefulset) (kube_statefulset_replicas{namespace=~"pg-.*"}) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{namespace=~"pg-.*"})) > 0
+(max by (cluster, namespace, statefulset) (kube_statefulset_replicas and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)")) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)"))) > 0
 ```
 
 #### tpg-backup-failed
@@ -1092,9 +1095,9 @@ tanzu_postgres_instance_state{cluster=~"$cluster"} == 1
 
 ```promql
 # A, instant, legend ready
-max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{namespace=~"pg-.*",cluster=~"$cluster"})
+max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{cluster=~"$cluster"} and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)"))
 # B, instant, legend desired
-max by (cluster, namespace, statefulset) (kube_statefulset_replicas{namespace=~"pg-.*",cluster=~"$cluster"})
+max by (cluster, namespace, statefulset) (kube_statefulset_replicas{cluster=~"$cluster"} and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)"))
 ```
 
 **Desired read replicas** (table, panel id 8)
@@ -1318,7 +1321,7 @@ max by (cluster, postgres_instance) (pg_stat_activity_max_tx_duration{cluster=~"
 
 ```promql
 # A, instant, legend {{cluster}} {{persistentvolumeclaim}}
-max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes{cluster=~"$cluster", namespace=~"pg-($instance)"}) / max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{cluster=~"$cluster", namespace=~"pg-($instance)"})
+max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes{cluster=~"$cluster"} and on (cluster, namespace, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~"$cluster", postgres_instance=~"$instance"}))) / max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{cluster=~"$cluster"} and on (cluster, namespace, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~"$cluster", postgres_instance=~"$instance"})))
 ```
 
 ##### Row: Postgres pods
@@ -1329,21 +1332,21 @@ CPU cores used (rate of container_cpu_usage_seconds_total).
 
 ```promql
 # A, range, legend {{cluster}}/{{pod}}
-sum by (cluster, namespace, pod) (rate(container_cpu_usage_seconds_total{cluster=~"$cluster", namespace=~"pg-($instance)", container!="", container!="POD"}[5m]))
+sum by (cluster, namespace, pod) (rate(container_cpu_usage_seconds_total{cluster=~"$cluster", container!="", container!="POD"}[5m]) and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~"$cluster", postgres_instance=~"$instance"}))
 ```
 
 **Memory per pod (working set)** (timeseries, panel id 19)
 
 ```promql
 # A, range, legend {{cluster}}/{{pod}}
-sum by (cluster, namespace, pod) (container_memory_working_set_bytes{cluster=~"$cluster", namespace=~"pg-($instance)", container!="", container!="POD"})
+sum by (cluster, namespace, pod) (container_memory_working_set_bytes{cluster=~"$cluster", container!="", container!="POD"} and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~"$cluster", postgres_instance=~"$instance"}))
 ```
 
 **Container restarts (1h)** (timeseries, panel id 20)
 
 ```promql
 # A, range, legend {{cluster}}/{{pod}}
-sum by (cluster, namespace, pod) (increase(kube_pod_container_status_restarts_total{cluster=~"$cluster", namespace=~"pg-($instance)"}[1h]))
+sum by (cluster, namespace, pod) (increase(kube_pod_container_status_restarts_total{cluster=~"$cluster"}[1h]) and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~"$cluster", postgres_instance=~"$instance"}))
 ```
 
 #### tpg-replication: Tanzu Postgres - Replication and HA
@@ -1373,9 +1376,9 @@ The tpg-replicas-below-desired alert fires when ready stays below desired for 10
 
 ```promql
 # A, instant, legend ready
-max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{cluster=~"$cluster", namespace=~"pg-($instance)"})
+max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{cluster=~"$cluster"} and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{cluster=~"$cluster", postgres_instance=~"$instance"}), "statefulset", "$1", "postgres_instance", "(.*)"))
 # B, instant, legend desired
-max by (cluster, namespace, statefulset) (kube_statefulset_replicas{cluster=~"$cluster", namespace=~"pg-($instance)"})
+max by (cluster, namespace, statefulset) (kube_statefulset_replicas{cluster=~"$cluster"} and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{cluster=~"$cluster", postgres_instance=~"$instance"}), "statefulset", "$1", "postgres_instance", "(.*)"))
 ```
 
 **Desired read replicas (spec)** (stat, panel id 4)
@@ -1420,7 +1423,7 @@ A failover restarts or replaces pods; a count that keeps growing points at a cra
 
 ```promql
 # A, instant, legend {{cluster}}/{{pod}}
-sum by (cluster, pod) (increase(kube_pod_container_status_restarts_total{cluster=~"$cluster", namespace=~"pg-($instance)"}[24h]))
+sum by (cluster, pod) (increase(kube_pod_container_status_restarts_total{cluster=~"$cluster"}[24h]) and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~"$cluster", postgres_instance=~"$instance"}))
 ```
 
 #### tpg-backup: Tanzu Postgres - Backup, WAL and restore
@@ -1568,7 +1571,7 @@ count by (cluster) (tanzu_postgres_instance_state{state="Running"} offset 1h) - 
 
 ```promql
 # A, range
-max by (cluster, namespace, statefulset) (kube_statefulset_replicas{namespace=~"pg-.*"}) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{namespace=~"pg-.*"})
+max by (cluster, namespace, statefulset) (kube_statefulset_replicas and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)")) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)"))
 ```
 
 **Postgres backup failed (24h) (> 0, for 0m, critical)** (timeseries, panel id 8)
@@ -1683,6 +1686,7 @@ Every metric the queries above read, where it comes from, and the alert rules (u
 | `container_cpu_usage_seconds_total` | kubelet and cAdvisor (kube-prometheus-stack on standalone targets, managed Prometheus defaults on azure) | `tpg-instance` |
 | `container_memory_working_set_bytes` | kubelet and cAdvisor (kube-prometheus-stack on standalone targets, managed Prometheus defaults on azure) | `tpg-instance` |
 | `kube_pod_container_status_restarts_total` | kube-state-metrics (release `tpg-ksm`) | `tpg-instance`, `tpg-replication` |
+| `kube_pod_spec_volumes_persistentvolumeclaims_info` | kube-state-metrics (release `tpg-ksm`) | `tpg-instance` |
 | `kube_statefulset_replicas` | kube-state-metrics (release `tpg-ksm`) | `tpg-replicas-below-desired`, `tpg-fleet`, `tpg-replication`, `tpg-alerts` |
 | `kube_statefulset_status_replicas_ready` | kube-state-metrics (release `tpg-ksm`) | `tpg-replicas-below-desired`, `tpg-fleet`, `tpg-replication`, `tpg-alerts` |
 | `kubelet_volume_stats_capacity_bytes` | kubelet and cAdvisor (kube-prometheus-stack on standalone targets, managed Prometheus defaults on azure) | `tpg-instance` |
@@ -1713,6 +1717,6 @@ Every metric the queries above read, where it comes from, and the alert rules (u
 | `tanzu_postgres_instance_state` | kube-state-metrics custom resource metrics (release `tpg-ksm`, `monitoring/ksm/values.yaml`) | `tpg-instance-not-running`, `tpg-instance-count-dropped`, `tpg-fleet`, `tpg-instance`, `tpg-alerts` |
 | `tanzu_postgres_restore_created_timestamp` | kube-state-metrics custom resource metrics (release `tpg-ksm`, `monitoring/ksm/values.yaml`) | `tpg-restore-failed`, `tpg-alerts` |
 | `tanzu_postgres_restore_phase` | kube-state-metrics custom resource metrics (release `tpg-ksm`, `monitoring/ksm/values.yaml`) | `tpg-restore-failed`, `tpg-fleet`, `tpg-backup`, `tpg-alerts` |
-| `up` | scrape status of every target; the queries keep the exporter targets (label `postgres_instance`) | `tpg-exporter-down`, `tpg-instance`, `tpg-alerts` |
+| `up` | scrape status of every target; the queries keep the exporter targets (label `postgres_instance`) | `tpg-replicas-below-desired`, `tpg-exporter-down`, `tpg-fleet`, `tpg-instance`, `tpg-replication`, `tpg-alerts` |
 | `vault_core_unsealed` | Vault on the hub (ServiceMonitor `vault`, `/v1/sys/metrics`) | `tpg-vault-sealed`, `tpg-alerts` |
 <!-- END GENERATED: monitoring-reference -->

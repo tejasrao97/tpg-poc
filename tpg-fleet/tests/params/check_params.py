@@ -144,7 +144,7 @@ for f in sorted(glob.glob(os.path.join(ROOT, "workflows/templates/*.yaml"))):
 # 3
 keys = yaml.safe_load(open(os.path.join(ROOT, "workflows/params/cluster-map-keys.yaml")))
 tmpl = {"scale": "tpg-scale-instance"}
-known_types = {"string", "name", "azureName", "boolean", "integer", "posint", "quantity", "enum", "operatorVersion",
+known_types = {"string", "name", "namespace", "azureName", "boolean", "integer", "posint", "quantity", "enum", "operatorVersion",
                "postgresVersion", "patchFile", "patchFileList", "kindList", "caFile", "nameList", "cidrList", "fqdnList", "stringMap",
                "cron", "k8sName"}
 # tpg-upgrade takes the default of operatorVersion and postgresVersion from

@@ -12,6 +12,17 @@
 #   4 delete      Postgres CR (operator removes pods, services, secrets) and backup location CR
 #   5 purge       optional: PVCs and their Retain PVs/disks; optional: the namespace
 # The Azure Blob backup repository is never deleted by this workflow.
+# Namespace (Round 23): the instance's namespace is read from clusters/fleet.yaml (instance.namespace,
+# default pg-<instance>; the copy in clusters/deleted/ when the entry is gone). Instances may share a
+# namespace, and then
+#   - purgeNamespace=true is refused (NAMESPACE_SHARED, before anything changes) while another instance
+#     of the namespace remains in clusters/fleet.yaml or on the cluster. tpg-delete-apps passes
+#     DELETE_RUN_INSTANCES (the instances of its run: they leave anyway, so the namespace is deleted
+#     after the last of them) and, with deleteOperator, DELETE_OPERATOR_RUN=true (it removes everything:
+#     the namespace is deleted after the last instance of it, by tpg-delete-apps; NS_PURGE_FILE)
+#   - the PVCs of the purge are the ones of this instance (label postgres-instance), not every PVC
+#   - an owner of the shared Secrets hands them over to a remaining instance before its entry leaves
+#     Git (lib.sh ns_handover: one Argo CD Application owns the objects at any moment)
 # DELETE_FROM_MAP=true (tpg-delete-instance, tpg-delete-apps): finalBackup,
 # purgePvcs and purgeNamespace come from clusterMap (P_CLUSTER_MAP) when set for
 # the instance, and the clusterMap postgresVersion guard applies.
@@ -20,7 +31,6 @@ WF="$1"; C="$2"; I="$3"; CONFIRM="$4"; FINAL_BACKUP="${5:-true}"; PURGE_PVCS="${
 source /scripts/lib.sh
 
 key="result.${C}.${I}"
-NS="pg-${I}"
 notes=()
 fail() { record "$key" FAILED "$1" "${2:-}"; exit 1; }
 result_guard "$key"
@@ -47,9 +57,35 @@ if [[ ! -f "$f" ]]; then
   fi
 fi
 use_cluster "$C" || fail NOT_REGISTERED
+# ---- the namespace of the instance (Round 23): its entry, else the audit copy of a deleted entry, else
+#      the live Postgres of that name (ALLOW_UNTRACKED), else pg-<instance>
+if [[ -f "$f" ]]; then
+  NS="$(instance_ns "$C" "$I")"
+else
+  copy="$(compgen -G "$WORK/repo/clusters/deleted/${C}/${I}-*.yaml" | sort | tail -n1 || true)"
+  if [[ -n "$copy" ]]; then NS="$(yq -r '.instance.namespace // ""' "$copy")"
+  else NS="$(tk get postgres -A -o json 2>/dev/null | jq -r --arg i "$I" '[.items[]? | select(.metadata.name == $i) | .metadata.namespace] | if length == 1 then .[0] else empty end' || true)"; fi
+  NS="${NS:-pg-${I}}"
+fi
 if [[ "${DELETE_FROM_MAP:-false}" == "true" ]] && ! g="$(cmap_guard "$C" "$I")"; then
   record "$key" SKIPPED_VERSION_MISMATCH "" "$g"
   exit 0
+fi
+# ---- instances that share the namespace (Round 23)
+SHARED="$(fleet_ns_members "$WORK/repo" "$C" "$NS" | grep -vFx -- "$I" || true)"   # in clusters/fleet.yaml
+LIVE_OTHERS="$(tk -n "$NS" get postgres -o json 2>/dev/null | jq -r --arg i "$I" '.items[]? | select(.metadata.name != $i) | .metadata.name' || true)"
+OTHERS="$(printf '%s\n%s\n' "$SHARED" "$LIVE_OTHERS" | grep -v '^$' | sort -u || true)"   # every other instance that uses the namespace
+RUN_LEAVES="$(tr ' ' '\n' <<<"${DELETE_RUN_INSTANCES:-}")"                             # tpg-delete-apps: the instances of the run leave too
+BLOCKERS=""                                                                              # the others that stay after this run
+for o in $OTHERS; do grep -Fqx -- "$o" <<<"$RUN_LEAVES" || BLOCKERS="${BLOCKERS:+${BLOCKERS} }${o}"; done
+DEFER_NS=false
+if [[ "$PURGE_NS" == "true" && -n "$OTHERS" ]]; then
+  if [[ -n "$BLOCKERS" && "${DELETE_OPERATOR_RUN:-false}" != "true" ]]; then
+    fail NAMESPACE_SHARED "purgeNamespace=true would delete namespace ${NS}, which ${BLOCKERS// /, } also use(s); delete ${BLOCKERS// /, } first, or set purgeNamespace=false (tpg-delete-apps with deleteOperator=true removes everything)"
+  fi
+  # every other instance of the namespace leaves in this run (or deleteOperator removes everything):
+  # the namespace is deleted after the last of them, not while one of them still needs its final backup
+  DEFER_NS=true; PURGE_NS=false
 fi
 EXISTS=true
 tk -n "$NS" get postgres "$I" >/dev/null 2>&1 || EXISTS=false
@@ -90,6 +126,21 @@ if [[ "$EXISTS" == "true" ]]; then
   done
 fi
 
+# ---- 2c shared namespace (Round 23): when other instances of the namespace stay, the Secrets they
+#      share move to one of them before this entry leaves Git (lib.sh ns_handover: commit the owner
+#      flags, sync the successor, check the Argo CD tracking annotation moved - one owner at any moment)
+if [[ -f "$f" && -n "$SHARED" ]]; then
+  stay=""
+  for o in $SHARED; do grep -Fqx -- "$o" <<<"$RUN_LEAVES" || stay="${stay:+${stay} }${o}"; done
+  if [[ -z "$stay" ]]; then
+    notes+=("shared Secrets of ${NS} stay: every other instance of it leaves in this run")
+  elif ! ns_handover "$WORK/repo" "$C" "$I" "$NS" "$TIMEOUT"; then
+    fail "$HANDOVER_REASON" "$HANDOVER_DETAIL"
+  elif [[ -n "$HANDOVER_NOTE" ]]; then
+    notes+=("$HANDOVER_NOTE")
+  fi
+fi
+
 # ---- 3 Git: remove the entry from fleet.yaml, keep a copy for audit and re-creation
 if [[ -f "$f" ]]; then
   mkdir -p "$WORK/repo/clusters/deleted/${C}"
@@ -117,21 +168,31 @@ fi
 tk -n "$NS" delete postgresbackuplocation "${I}-backup-location" --ignore-not-found --wait=true >/dev/null || notes+=("backup location CR not deleted")
 
 # ---- 5 optional purge
-pvcs="$(tk -n "$NS" get pvc -o json 2>/dev/null || echo '{"items":[]}')"
+# a namespace that other instances use: only the PVCs of this instance (label postgres-instance)
+pvc_get=(); pvc_del=(--all)
+[[ -z "$OTHERS" ]] || { pvc_get=(-l "postgres-instance=${I}"); pvc_del=(-l "postgres-instance=${I}"); }
+pvcs="$(tk -n "$NS" get pvc ${pvc_get[@]+"${pvc_get[@]}"} -o json 2>/dev/null || echo '{"items":[]}')"
 count="$(jq '.items | length' <<<"$pvcs")"
 if [[ "$PURGE_PVCS" == "true" && "$count" -gt 0 ]]; then
   # Retain StorageClass: switch each bound PV to Delete first so the Azure disk goes too
   for pv in $(jq -r '.items[].spec.volumeName // empty' <<<"$pvcs"); do
     tk patch pv "$pv" -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}' >/dev/null || notes+=("pv ${pv} not patched")
   done
-  tk -n "$NS" delete pvc --all --wait=true --timeout=600s >/dev/null || fail PVC_DELETE_FAILED
+  tk -n "$NS" delete pvc "${pvc_del[@]}" --wait=true --timeout=600s >/dev/null || fail PVC_DELETE_FAILED
   notes+=("${count} PVCs and disks deleted")
 elif [[ "$count" -gt 0 ]]; then
   notes+=("${count} PVCs kept in ${NS} (Retain)")
+elif [[ "$PURGE_PVCS" == "true" && -n "$OTHERS" ]]; then
+  notes+=("no PVC with the label postgres-instance=${I} in ${NS}, which other instances share: nothing purged")
 fi
 if [[ "$PURGE_NS" == "true" ]]; then
   tk delete namespace "$NS" --wait=true --timeout=600s >/dev/null || fail NAMESPACE_DELETE_FAILED
   notes+=("namespace ${NS} deleted")
+elif [[ "$DEFER_NS" == "true" ]]; then
+  # purgeNamespace with other instances in the namespace that leave in this run (tpg-delete-apps):
+  # the namespace is deleted after the last of them, by delete-apps.sh
+  printf '%s\n' "$NS" >> "${NS_PURGE_FILE:-$WORK/ns-purge}"
+  notes+=("namespace ${NS} is deleted after the last instance of it (${OTHERS//$'\n'/, })")
 fi
 notes+=("backup repository kept: stanza ${stanza:-unknown}")
 detail="$(printf '%s; ' "${notes[@]}")"

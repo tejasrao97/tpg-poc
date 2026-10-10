@@ -1779,11 +1779,13 @@
     },
     "internalLoadBalancerSubnet": "scalar",
     "name": "scalar",
+    "namespace": "scalar",
     "postgresVersion": "scalar",
     "readOnlyExposure": "scalar",
     "readOnlyServiceAnnotations": "*",
     "resources": "*",
     "serviceAnnotations": "*",
+    "sharedSecretsOwner": "scalar",
     "storageClassName": "scalar",
     "storageSize": "scalar",
     "walStorageSize": "scalar"

@@ -5,9 +5,10 @@
 #   caBundle        written with enableSSL: true, and only then; enableSSL: true
 #                   without a bundle fails the render
 #   network policy  none renders nothing; baseline renders NetworkPolicy
-#                   tpg-ingress and CiliumNetworkPolicy tpg-egress; a rule is
-#                   rendered only for a non-empty input, and no peer list is
-#                   empty (an empty peer list allows every source: F9)
+#                   tpg-ingress-<instance> and CiliumNetworkPolicy
+#                   tpg-egress-<instance>; a rule is rendered only for a
+#                   non-empty input, and no peer list is empty (an empty peer
+#                   list allows every source: F9)
 #   Round 13 (D69 to D71)
 #   zero defaults   highAvailability only for an HA instance (enabled true,
 #                   readReplicas 1 or more), refused combinations, tpg.prune on
@@ -28,6 +29,12 @@
 #                   PostgresBackupLocation, PostgresBackupSchedule, FerretDB), each
 #                   merged into its object and winning over the chart values;
 #                   fullRetentionType count or time
+#   Round 23 phase 3 (the instance namespace): the release namespace is the
+#                   instance namespace; the shared Secrets (ServiceAccount
+#                   tpg-vso, VaultStaticSecrets regsecret and backup-storage) only
+#                   from the instance with sharedSecretsOwner true, the network
+#                   policies named and selected by instance, the ApplicationSet
+#                   destination.namespace from instance.namespace
 # Requires: helm (v3 or v4), yq (mikefarah), python3 with PyYAML; skipped without them.
 # shellcheck disable=SC2015
 set -euo pipefail
@@ -421,6 +428,80 @@ appset_render '{instance: {postgresVersion: postgres-17.6, disableInitialBackup:
 appset_render '{instance: {postgresVersion: postgres-17.6}}'
 [[ "$RC" -eq 0 && "$(pg ".metadata.annotations | has(\"$skip_ann\")")" == false ]] \
   && ok "23: ApplicationSet values without the key (and the chart default false): no skip-initial-backup annotation" || bad "appset annotation absent" "$OUT"
+
+# ---- Round 23 phase 3: the instance namespace (locked decision 8). The chart renders in the
+# namespace Argo CD gives it (.Release.Namespace = instance.namespace, default pg-<instance>);
+# instances may share a namespace, and then the namespace-scoped objects with a fixed name are
+# rendered once: the ServiceAccount tpg-vso and the VaultStaticSecrets regsecret and
+# backup-storage by the owner (instance.sharedSecretsOwner, default true) only, and the network
+# policies carry the instance name and select the pods of their instance by the
+# postgres-instance label
+render_ns() {  # render_ns INSTANCE NAMESPACE [VALUES_YAML] -> $OUT, $RC
+  printf 'cluster: {name: c1}\ninstance: {name: %s, postgresVersion: postgres-17.6}\nbackup: {container: pg-backups-c1}\n' "$1" > "$TMP/ns-$1.yaml"
+  printf '%s\n' "${3:-}" > "$TMP/ns-v-$1.yaml"
+  RC=0
+  OUT="$(helm template "$1" "$CHART" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" \
+    -f "$TMP/ns-$1.yaml" -f "$TMP/ns-v-$1.yaml" --namespace "$2" 2>&1)" || RC=$?
+}
+names() { yq -r '.kind + "/" + .metadata.name' <<<"$OUT" | grep -E '^[A-Za-z]+/' | sort; }
+render_ns i1 pg-i1 'network: {policy: baseline}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23: by default (sharedSecretsOwner true) the instance renders the ServiceAccount tpg-vso and the VaultStaticSecrets regsecret and backup-storage" || bad "owner default" "$OUT"
+render_ns i1 pg-i1 'instance: {sharedSecretsOwner: true}
+network: {policy: baseline}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23: sharedSecretsOwner true renders them as well" || bad "owner true" "$OUT"
+pycheck 'K("NetworkPolicy")["metadata"]["name"] == "tpg-ingress-i1" and K("CiliumNetworkPolicy")["metadata"]["name"] == "tpg-egress-i1"' \
+  && ok "23: the network policies are named tpg-ingress-<instance> and tpg-egress-<instance>" || bad "policy names" "$(names)"
+pycheck 'K("NetworkPolicy")["spec"]["podSelector"] == {"matchLabels": {"postgres-instance": "i1"}}
+  and K("CiliumNetworkPolicy")["spec"]["endpointSelector"] == {"matchLabels": {"postgres-instance": "i1"}}' \
+  && ok "23: both policies select the pods of the instance by the postgres-instance label (not every pod of the namespace)" \
+  || bad "policy selectors" "$(yq 'select(.kind == "NetworkPolicy" or .kind == "CiliumNetworkPolicy") | .spec | pick(["podSelector", "endpointSelector"])' <<<"$OUT")"
+render_ns i2 shared 'instance: {sharedSecretsOwner: false}
+network: {policy: baseline}'
+[[ "$RC" -eq 0 ]] && ! names | grep -qE '^(ServiceAccount|VaultStaticSecret)/' \
+  && ok "23: sharedSecretsOwner false: no ServiceAccount and no VaultStaticSecret is rendered" || bad "owner false" "$OUT"
+pycheck 'any(r.get("toEndpoints") == [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "shared"}},
+  {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "tanzu-postgres-operator"}}] for r in egress())' \
+  && ok "23: the egress rule for the own namespace names the release namespace, not pg-<instance>" || bad "egress namespace" "$(yq 'select(.kind == "CiliumNetworkPolicy")' <<<"$OUT")"
+[[ "$(yq 'select(.kind == "PostgresBackupLocation") | .spec.storage.azure.repoPath' <<<"$OUT")" == "/shared/i2" ]] \
+  && ok "23: repoPath default /<namespace>/<instance> uses the real namespace" || bad "repoPath in shared" "$OUT"
+# the pair in one namespace: every kind/name once, the shared objects from the owner only
+render_ns i1 shared 'network: {policy: baseline}'; own="$OUT"; own_rc="$RC"
+render_ns i2 shared 'instance: {sharedSecretsOwner: false}
+network: {policy: baseline}'; nonown="$OUT"; non_rc="$RC"
+pair="$(printf '%s\n---\n%s\n' "$own" "$nonown")"
+[[ "$own_rc" -eq 0 && "$non_rc" -eq 0 && -z "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | grep -E '^[A-Za-z]+/' | sort | uniq -d)" ]] \
+  && ok "23: two instances in one namespace render distinct objects: no kind/name twice" || bad "pair distinct" "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | sort | uniq -c)"
+[[ "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23: exactly one of the two renders the shared Secrets (the owner)" || bad "pair one owner" "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | sort | uniq -c)"
+render_ns i1 pg-other 'instance: {namespace: pg-i1}'
+[[ "$RC" -ne 0 ]] && grep -q 'instance.namespace "pg-i1" differs from the release namespace "pg-other"' <<<"$OUT" \
+  && ok "23: instance.namespace that differs from the release namespace fails the render" || bad "namespace mismatch" "$OUT"
+render_ns i1 pg-i1 'instance: {namespace: pg-i1}'
+[[ "$RC" -eq 0 ]] && ok "23: instance.namespace equal to the release namespace renders" || bad "namespace equal" "$OUT"
+render_ns i1 pg-i1 'instance: {sharedSecretsOwner: maybe}'
+[[ "$RC" -ne 0 ]] && grep -q 'instance.sharedSecretsOwner "maybe" must be true or false' <<<"$OUT" \
+  && ok "23: sharedSecretsOwner other than true or false fails the render" || bad "owner invalid" "$OUT"
+# the ApplicationSet: destination.namespace from the entry, owner flag passed through its values
+appset_dest() {  # appset_dest ENTRY_YAML -> the destination namespace the template builds
+  local fleet
+  printf 'clusters:\n  c1:\n    instances:\n      i1: %s\n' "$1" > "$AS/clusters/fleet.yaml"
+  fleet="$(yq -o=json -I=0 '.' "$AS/clusters/fleet.yaml")"
+  jq -n --arg t "dest: $(yq -r '.spec.template.spec.destination.namespace' "$APPSET")" --argjson f "$fleet" \
+    '{tmpl: $t, ctx: {name: "c1", instance: {name: "i1", values: $f.clusters.c1.instances.i1}, clusters: $f.clusters}}' > "$AS/tpl-dest.json"
+  helm template tplvalues "$AS/tplchart" -f "$AS/tpl-dest.json" 2>&1 | yq '.dest' | tr -d '[:space:]'
+}
+[[ "$(appset_dest '{instance: {postgresVersion: postgres-17.6}}')" == "pg-i1" ]] \
+  && ok "23: ApplicationSet destination.namespace defaults to pg-<instance>" || bad "appset dest default" "$(appset_dest '{instance: {postgresVersion: postgres-17.6}}')"
+[[ "$(appset_dest '{instance: {postgresVersion: postgres-17.6, namespace: team-db}}')" == "team-db" ]] \
+  && ok "23: ApplicationSet destination.namespace is the entry's instance.namespace" || bad "appset dest explicit" "$(appset_dest '{instance: {postgresVersion: postgres-17.6, namespace: team-db}}')"
+appset_render '{instance: {postgresVersion: postgres-17.6, namespace: pg-i1, sharedSecretsOwner: false}}'
+[[ "$RC" -eq 0 ]] && ! names | grep -qE '^(ServiceAccount|VaultStaticSecret)/' \
+  && ok "23: ApplicationSet values pass instance.sharedSecretsOwner false to the chart: no shared Secrets" || bad "appset non-owner" "$OUT"
+appset_render '{instance: {postgresVersion: postgres-17.6, namespace: pg-i1}}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23: ApplicationSet values without the flag: the instance owns the shared Secrets" || bad "appset owner" "$OUT"
 
 echo
 echo "chart: ${PASS} passed, ${FAIL} failed"

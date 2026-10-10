@@ -36,7 +36,8 @@ fi
 
 # ---- Step 2: prepare
 log "preparing namespaces on ${C}"
-nss="$(for i in $INSTANCES; do echo "pg-$i"; done)"
+# the namespace of each instance (clusters/fleet.yaml instance.namespace, default pg-<instance>; instances may share one)
+nss="$(for i in $INSTANCES; do instance_ns "$C" "$i"; echo; done | grep -v '^$' | sort -u)"
 [[ "$SCOPE" != "all" ]] || nss="tanzu-postgres-operator ${nss}"
 for ns in $nss; do
   tk create namespace "$ns" --dry-run=client -o yaml | tk apply -f - >/dev/null
@@ -107,7 +108,8 @@ while read -r v; do
 done < <(inventory_cluster "$C" | jq -r --arg l "$INSTANCES" '($l | split(" ") | map(select(length > 0))) as $k
   | .instances[] | select(.name as $n | $k | index($n)) | .postgresVersion' | sort -u)
 
-# ---- Step 4: instances (sync, then the instance pods every 5 seconds until Running)
+# ---- Step 4: instances (sync, then the instance pods every 5 seconds until Running).
+# inventory_instances lists the owner of the shared Secrets of a namespace first (instance.sharedSecretsOwner)
 for i in $INSTANCES; do
   rc=0
   # --prune: objects the entry no longer renders go (FerretDB after ferret=false,
@@ -120,11 +122,12 @@ done
 # ---- Step 5: verify
 details=()
 for i in $INSTANCES; do
+  ns="$(instance_ns "$C" "$i")"
   pg_wait_ready "$i" "$TIMEOUT" || fail "INSTANCE_${POD_WATCH_REASON:-NOT_RUNNING}" "$POD_WATCH_DETAIL"
   for sec in regsecret backup-storage; do
-    wait_secret "pg-$i" "$sec" || fail SECRET_NOT_SYNCED "pg-$i/$sec from Vault"
+    wait_secret "$ns" "$sec" || fail SECRET_NOT_SYNCED "${ns}/${sec} from Vault"
   done
-  stanza="$(tk -n "pg-$i" get postgres "$i" -o jsonpath='{.status.stanzaName}' 2>/dev/null || true)"
+  stanza="$(tk -n "$ns" get postgres "$i" -o jsonpath='{.status.stanzaName}' 2>/dev/null || true)"
   [[ -n "$stanza" ]] || fail BACKUP_LOCATION_NOT_INITIALIZED "$i"
   # FerretDB (D71): the CRD (a new operator is in place now), the connection
   # Secrets, then the proxies

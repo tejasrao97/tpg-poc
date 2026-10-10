@@ -33,7 +33,7 @@ spec:
       description: "Registered cluster that runs the instance to restore from"
       value: ""
     - name: instance
-      description: "Source Postgres instance (namespace pg-<instance>)"
+      description: "Source Postgres instance (its namespace from clusters/fleet.yaml, default pg-<instance>)"
       value: ""
     - name: mode
       description: "time (targetTime), latest (newest WAL), backup (a PostgresBackup name), lsn or xid"

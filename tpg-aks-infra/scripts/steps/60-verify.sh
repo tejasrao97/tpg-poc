@@ -331,6 +331,39 @@ target_storageclass() {
   fi
   field "$desc" "$c" "" storageclass/tpg-data-retain '{.parameters.skuName}' "$(data_disk_sku)"
 }
+# target_instances CLUSTER
+#   The instances declared for CLUSTER in clusters/fleet.yaml of the tpg-fleet clone (FLEET_LOCAL_DIR), each
+#   in its namespace: instance.namespace, default pg-<instance> (Round 23). The namespace is not reserved;
+#   exactly one instance of a namespace renders the Secrets the chart names the same in every instance
+#   (instance.sharedSecretsOwner is not false); a namespace or Postgres object that does not exist yet is
+#   a warning (tpg-day0 and tpg-create-instance create them). Skipped without a clone.
+target_instances() {
+  local c="$1" f="${FLEET_LOCAL_DIR:-}/clusters/fleet.yaml" keys="${FLEET_LOCAL_DIR:-}/workflows/params/cluster-map-keys.yaml" i ns own reserved why
+  local -A owners=() members=()
+  [[ -n "${FLEET_LOCAL_DIR:-}" && -f "$f" ]] || return 0
+  reserved="$(yq -r '.instance.namespace.reserved[]' "$keys" 2>/dev/null || true)"
+  for i in $(C="$c" yq -r '.clusters[strenv(C)].instances // {} | keys | .[]' "$f"); do
+    ns="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.namespace // ""' "$f")"; ns="${ns:-pg-$i}"
+    own="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner | select(. != null)' "$f")"   # (// would turn false into true)
+    members[$ns]="${members[$ns]:+${members[$ns]}, }${i}"
+    [[ "$own" == false ]] || owners[$ns]=$(( ${owners[$ns]:-0} + 1 ))
+    if grep -Fqx -- "$ns" <<<"$reserved"; then
+      issue "instance ${c}/${i} namespace ${ns}" "${ns} is a reserved namespace: instance.namespace of clusters.${c}.instances.${i} in clusters/fleet.yaml must be another one"
+    elif why="$(_obj_missing "$c" "" "namespace/${ns}")"; then
+      advisory "namespace ${ns} of instance ${c}/${i}" "${why}; tpg-day0 or tpg-create-instance creates it"
+    elif kubectl --context "$c" get crd postgres.sql.tanzu.vmware.com >/dev/null 2>&1 \
+         && why="$(_obj_missing "$c" "$ns" "postgres/${i}")"; then
+      advisory "Postgres ${c}/${i}" "${why}; declared in clusters/fleet.yaml, not deployed yet"
+    else
+      ok "instance ${c}/${i} in namespace ${ns}"
+    fi
+  done
+  for ns in "${!members[@]}"; do
+    [[ "${owners[$ns]:-0}" -eq 1 ]] \
+      || issue "namespace ${ns} shared Secrets" "${owners[$ns]:-0} of the instances ${members[$ns]} render the shared Secrets (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage); exactly one must (instance.sharedSecretsOwner false on the others in clusters/fleet.yaml)"
+  done
+  return 0
+}
 for c in $(target_names); do
   log "Target: $c"
   CUR="$c"
@@ -341,6 +374,7 @@ for c in $(target_names); do
   exists "cert-manager available" "$c" "" crd/certificates.cert-manager.io
   exists "Vault Secrets Operator available" "$c" "" crd/vaultstaticsecrets.secrets.hashicorp.com
   target_storageclass "$c"
+  target_instances "$c"
   field "VaultAuth tpg-vault/tpg-vault (auth/k8s-$c)" "$c" tpg-vault vaultauth/tpg-vault \
     '{.spec.mount}' "k8s-$c"
   exists "ServiceAccount kube-system/tpg-vault-reviewer" "$c" kube-system secret/tpg-vault-reviewer-token

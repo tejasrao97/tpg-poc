@@ -6,7 +6,8 @@
 #                                       (Argo CD label tpg.fleet/managed=true)
 #     operator.version                  required: operator chart version (OCI tag)
 #     cluster / backup                  optional overrides of _template/cluster.yaml
-#     instances.<instance>              one Postgres instance, namespace pg-<instance>
+#     instances.<instance>              one Postgres instance, namespace instance.namespace
+#                                       (default pg-<instance>; immutable; instances may share one)
 #       instance / backup               overrides of _template/instance.yaml
 #
 #       overlays.postgres / .postgresValues   {current, previous: {path, commit}}: the

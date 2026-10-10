@@ -41,7 +41,7 @@ cm = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cm)
 
 DISPLAY = {
-    "string": "String", "name": "String (name)", "azureName": "String (Azure name)", "k8sName": "String (name)",
+    "string": "String", "name": "String (name)", "namespace": "String (namespace)", "azureName": "String (Azure name)", "k8sName": "String (name)",
     "boolean": "Boolean", "integer": "Integer", "posint": "Integer", "quantity": "String (quantity)",
     "enum": "Enum", "operatorVersion": "String (version)", "postgresVersion": "String (version)",
     "patchFile": "List (one file path)", "patchFileList": "List (file paths)", "caFile": "List (one file path)",
@@ -65,7 +65,7 @@ EXAMPLE = {
         "backupSchedule": "operator", "operatorFullSchedule": "0 1 * * 0", "operatorIncrementalSchedule": "0 1 * * 1-6",
         "ferret": True, "ferretReplicas": 2, "ferretReadOnlyReplicas": 1, "ferretExposure": "clusterIP",
         "ferretSecretName": "orders-db-app-user-db-secret", "ferretReadOnlySecretName": "orders-db-read-only-user-db-secret",
-        "backupEnableSSL": True, "backupCaBundleFile": ["repo:ca-bundles/azure-storage.pem"],
+        "namespace": "orders-db", "backupEnableSSL": True, "backupCaBundleFile": ["repo:ca-bundles/azure-storage.pem"],
         "disableInitialBackup": False,
         "backupFullRetention": 4, "backupFullRetentionType": "count",
         "postgresPatchFilePath": ["./orders-resources.yaml", "repo:helm_artifacts/instance/tpg-instance/patches/team-backup-schedule.yaml"],
@@ -109,6 +109,8 @@ def value_schema(spec):
     if t in ("name", "azureName", "k8sName"):
         rx = {"name": cm.NAME, "azureName": cm.AZURE_NAME, "k8sName": cm.K8S_NAME}[t]
         return {"type": "string", "pattern": _p(rx)}
+    if t == "namespace":
+        return {"type": "string", "pattern": _p(cm.NAMESPACE), "not": {"enum": list(spec.get("reserved", []))}}
     if t == "boolean":
         return {"enum": [True, False, "true", "false"]}
     if t in ("integer", "posint"):
@@ -186,7 +188,7 @@ def schema_of(keys, wf):
     cluster_props = props("cluster")
     cluster_props["instances"] = {
         "type": "object", "minProperties": inst_min,
-        "description": "The instances of the cluster (namespace pg-<instance>)"
+        "description": "The instances of the cluster (namespace: the key namespace of tpg-day0 and tpg-create-instance, default pg-<instance>)"
                        + ("; at least one" if inst_min else ""),
         "propertyNames": {"pattern": _p(cm.NAME)},
         "additionalProperties": instance,

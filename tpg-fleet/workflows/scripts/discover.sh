@@ -22,7 +22,7 @@
 # changes, with UNKNOWN_INSTANCE and the instances that are declared.
 # Outputs:
 #   /tmp/inventory.json       [{name, wave, maxReadReplicas, operatorVersion, instances:[{name,
-#                             postgresVersion, highAvailability, readReplicas, scheduledBackups,
+#                             namespace, secretsOwner, postgresVersion, highAvailability, readReplicas, scheduledBackups,
 #                             backupMode (fleet|none|operator), ferret, ferretReadOnlyReplicas,
 #                             enableSSL, egressToFqdns, networkPolicy}]}]
 #   /tmp/instance-items.json  [{cluster, instance, scheduled}]
@@ -136,10 +136,14 @@ for c in ${wanted_list[@]+"${wanted_list[@]}"}; do
     [[ "$ssl" == "true" ]] || ssl=false
     fqdns="$(C="$c" I="$i" yq -o=json -I=0 '.clusters[strenv(C)].instances[strenv(I)].network.egressToFqdns // []' "$REPO/$FLEET_REL")"
     npol="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].network.policy // "none"' "$REPO/$FLEET_REL")"
-    obj="$(jq -cn --arg n "$i" --arg v "$(fleet_instance_value "$REPO" "$c" "$i" '.instance.postgresVersion' '')" \
+    # the namespace (Round 23): instance.namespace, default pg-<instance>; the steps after this one read it
+    # from the inventory (lib.sh instance_ns) when they have no clone of the fleet repository
+    ns="$(instance_ns_in "$REPO" "$c" "$i")"
+    own="$(instance_effective "$REPO" "$c" "$i" '.instance.sharedSecretsOwner' true)"; [[ "$own" == false ]] || own=true
+    obj="$(jq -cn --arg n "$i" --arg ns "$ns" --argjson own "$own" --arg v "$(fleet_instance_value "$REPO" "$c" "$i" '.instance.postgresVersion' '')" \
       --argjson ha "$ha" --argjson rr "$rr" --argjson s "$sched" --argjson ssl "$ssl" \
       --argjson fq "${fqdns:-[]}" --arg np "$npol" --arg bm "$bmode" --argjson fe "$fer" --argjson fro "$fro" \
-      '{name:$n, postgresVersion:$v, highAvailability:$ha, readReplicas:$rr, scheduledBackups:$s, backupMode:$bm,
+      '{name:$n, namespace:$ns, secretsOwner:$own, postgresVersion:$v, highAvailability:$ha, readReplicas:$rr, scheduledBackups:$s, backupMode:$bm,
         enableSSL:$ssl, egressToFqdns:$fq, networkPolicy:$np, ferret:$fe, ferretReadOnlyReplicas:$fro}')"
     instances="$(jq -c --argjson o "$obj" '. + [$o]' <<<"$instances")"
   done

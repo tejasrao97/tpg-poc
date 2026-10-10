@@ -266,7 +266,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{namespace=~\"pg-.*\",cluster=~\"$cluster\"})",
+          "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{cluster=~\"$cluster\"} and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=\"\"}), \"statefulset\", \"$1\", \"postgres_instance\", \"(.*)\"))",
           "legendFormat": "ready",
           "instant": true,
           "range": false
@@ -277,7 +277,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_replicas{namespace=~\"pg-.*\",cluster=~\"$cluster\"})",
+          "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_replicas{cluster=~\"$cluster\"} and on (cluster, namespace, statefulset) label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=\"\"}), \"statefulset\", \"$1\", \"postgres_instance\", \"(.*)\"))",
           "legendFormat": "desired",
           "instant": true,
           "range": false

@@ -15,7 +15,8 @@
 #   clusters.<cluster>.cluster.maxReadReplicas          maxReadReplicas
 #   clusters.<cluster>.instances.<instance>.instance.*  postgresVersion, highAvailability,
 #                                                       readReplicas, sizing, storageClass,
-#                                                       exposure (service type and annotations)
+#                                                       exposure (service type and annotations),
+#                                                       namespace and sharedSecretsOwner (Round 23)
 #   clusters.<cluster>.instances.<instance>.backup.*    enableSSL, caBundle (from a file, Vault or
 #                                                       tpg-settings), fullRetention, fullRetentionType,
 #                                                       backupSchedule (scheduled,
@@ -23,6 +24,15 @@
 #   clusters.<cluster>.instances.<instance>.ferret.*    ferret and its keys (D71; false removes the block)
 #   clusters.<cluster>.instances.<instance>.network.*   networkPolicy and its rules
 # Existing entries keep their other settings.
+#
+# Namespace (Round 23, locked decision 8): the clusterMap key namespace, default pg-<instance>,
+# is written as instance.namespace for a new instance and is immutable: a different value for
+# an instance that is declared is refused (NAMESPACE_IMMUTABLE: tpg-day0 blocks the cluster,
+# tpg-create-instance the instance); a reserved namespace is refused by the clusterMap check
+# (cluster-map-keys.yaml, reserved). Instances may share a namespace; the plan keeps exactly one
+# of them the owner of the Secrets the chart names the same in every instance
+# (instance.sharedSecretsOwner, ns_owner_plan): an instance that joins a namespace which has an
+# owner gets sharedSecretsOwner: false.
 #
 # Versions (design decision D49): the cluster decides, not clusters/fleet.yaml.
 #   - The operator (or an instance) does not run on the target yet: the input wins
@@ -174,10 +184,42 @@ live_operator() {
   if [[ "$tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then norm_operator_version "$tag"; else echo unknown; fi
 }
 live_postgres() {
-  # live_postgres INSTANCE -> "none" or the spec.postgresVersion.name of the running instance (use_cluster first)
+  # live_postgres INSTANCE NAMESPACE -> "none" or the spec.postgresVersion.name of the running instance (use_cluster first)
   local v
-  v="$(tk -n "pg-$1" get postgres "$1" -o jsonpath='{.spec.postgresVersion.name}' 2>/dev/null || true)"
-  if tk -n "pg-$1" get postgres "$1" >/dev/null 2>&1; then printf '%s' "${v:-unknown}"; else echo none; fi
+  v="$(tk -n "$2" get postgres "$1" -o jsonpath='{.spec.postgresVersion.name}' 2>/dev/null || true)"
+  if tk -n "$2" get postgres "$1" >/dev/null 2>&1; then printf '%s' "${v:-unknown}"; else echo none; fi
+}
+plan_namespace() {
+  # plan_namespace CLUSTER INSTANCE REQUESTED -> NS_PLAN: the namespace this run uses and
+  # NS_WRITE ("true": the plan writes instance.namespace). A declared instance keeps the namespace
+  # of its entry (instance_ns); asking for another one fails with NS_REASON NAMESPACE_IMMUTABLE
+  # and NS_DETAIL (return 1). A new instance gets REQUESTED, else pg-<instance>
+  local c="$1" i="$2" want="$3" cur
+  NS_REASON=""; NS_DETAIL=""; NS_WRITE=false
+  if fleet_has_instance_file "$F" "$c" "$i"; then
+    cur="$(instance_ns "$c" "$i")"; NS_PLAN="$cur"
+    if [[ -n "$want" && "$want" != "$cur" ]]; then
+      NS_REASON=NAMESPACE_IMMUTABLE
+      NS_DETAIL="${i} is declared in namespace ${cur} on ${c}, the namespace key asks for ${want}; the namespace of an instance cannot change (leave the key out, or delete the instance and create it again)"
+      return 1
+    fi
+  else
+    NS_PLAN="${want:-pg-$i}"; NS_WRITE=true
+  fi
+}
+ns_owner_plan() {
+  # ns_owner_plan CLUSTER INSTANCE NAMESPACE: exactly one instance of a namespace renders the
+  # shared Secrets (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage).
+  # When another instance of the namespace owns them, this one gets instance.sharedSecretsOwner
+  # false; otherwise it is the owner (the key is removed: the chart default is true)
+  local c="$1" i="$2" ns="$3" others
+  others="$(fleet_ns_owners "$REPO" "$c" "$ns" | grep -vFx -- "$i" || true)"
+  if [[ -n "$others" ]]; then
+    C="$c" I="$i" yq -i '.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner = false' "$F"
+    NOTES+=("NAMESPACE_SHARED ${c}/${i} joins namespace ${ns}; the shared Secrets stay with $(head -n1 <<<"$others")")
+  else
+    C="$c" I="$i" yq -i 'del(.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner)' "$F"
+  fi
 }
 newer() { [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]; }   # A newer than B
 block() {  # block CLUSTER REASON DETAIL: the cluster keeps its fleet.yaml entry; the pre-check reports it
@@ -304,7 +346,7 @@ create_render_check() {  # create_render_check CLUSTER INSTANCE -> 0, or 1 with 
   printf '%s\n' "$out" > "$WORK/render-$1-$2.yaml"
   [[ -z "${IP_POSTGRES:-}" ]] || patch_unrendered_warnings "$WORK/render-$1-$2.yaml" "$REPO/$IP_POSTGRES" "$1" "$2"
   # Server-side dry run of the Postgres object through the operator's admission
-  # webhooks (the pg-<instance> namespace does not exist yet: the object is sent
+  # webhooks (the instance namespace does not exist yet: the object is sent
   # to the default namespace under a probe name, without its backup location)
   pg="$(yq 'select(.kind == "Postgres") | del(.spec.backupLocation) | .metadata.namespace = "default"
         | .metadata.name = "tpg-create-probe" | del(.metadata.annotations)' "$WORK/render-$1-$2.yaml")"
@@ -366,7 +408,15 @@ for c in $(jq -r 'keys[]' "$WORK/effective.json"); do
     pgv="$(jq -r --arg i "$i" '.instances[$i].postgresVersion // ""' <<<"$entry")"
     [[ -n "$pgv" ]] || { FAILED+=("${c}/${i}: postgresVersion is required"); continue; }
     cur_pgv="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.postgresVersion // ""' "$F")"
-    lpg="none"; [[ "$live" == "none" ]] || lpg="$(live_postgres "$i")"
+    # the namespace is immutable: a declared instance keeps its own (Round 23)
+    if ! plan_namespace "$c" "$i" "$(jq -r --arg i "$i" '.instances[$i].namespace // ""' <<<"$entry")"; then
+      if [[ "$MODE" == "create" ]]; then
+        jq -cn --arg i "$i" --arg r "$NS_REASON" --arg d "$NS_DETAIL" '{instance:$i, reason:$r, detail:$d}' >> "$WORK/instance-blocks.$c"
+        continue
+      fi
+      stop="${NS_REASON} ${NS_DETAIL}"; break
+    fi
+    lpg="none"; [[ "$live" == "none" ]] || lpg="$(live_postgres "$i" "$NS_PLAN")"
     [[ "$lpg" == none ]] || RUNNING[$i]=1
     if [[ "$MODE" == "create" ]]; then
       # An instance that already runs is compared with the request after the
@@ -475,12 +525,18 @@ for c in $(jq -r 'keys[]' "$WORK/effective.json"); do
       FAILED+=("${c}/${i}: a CA bundle source (backupCaBundleFile or backupCaBundleVaultSecret) needs backupEnableSSL=true"); continue
     fi
     cp "$F" "$WORK/fleet.pre-$c-$i.yaml"
+    plan_namespace "$c" "$i" "$(jq -r '.namespace // ""' <<<"$ientry")" \
+      || { FAILED+=("${c}/${i}: ${NS_REASON} ${NS_DETAIL}"); continue; }
     while IFS=$'\t' read -r key fmt paths; do
       v="$(entry_value "$ientry" "$key")"
       [[ -n "$v" ]] || continue
       [[ "$key" != disableInitialBackup || -z "${RUNNING[$i]:-}" ]] || continue   # new instances only
+      [[ "$key" != namespace ]] || continue   # written below: new instances only, default pg-<instance>
       for p in $paths; do write_value '.clusters[strenv(C)].instances[strenv(I)]' "$p" "$fmt" "$v"; done
     done < <(key_rows instance)
+    # the namespace (Round 23) and who owns the shared Secrets of it
+    [[ "$NS_WRITE" != true ]] || write_value '.clusters[strenv(C)].instances[strenv(I)]' .instance.namespace string "$NS_PLAN"
+    ns_owner_plan "$c" "$i" "$NS_PLAN"
     # patch files (Round 14 create-instance, Round 15 day0, D83): checked with the
     # creation rules and made current; a running instance keeps an identical file
     old_pg="$(patch_ref "$F" "$c" "$i" postgres 2>/dev/null)" || old_pg=""
@@ -551,7 +607,7 @@ for c in $(jq -r 'keys[]' "$WORK/effective.json"); do
       # Idempotent create: a declared instance that already runs is left alone
       # when the request matches its entry, and refused when it differs.
       declared=false; fleet_has_instance_file "$WORK/fleet.pre-$c-$i.yaml" "$c" "$i" && declared=true
-      running=false; [[ "$(live_postgres "$i")" != "none" ]] && running=true
+      running=false; [[ "$(live_postgres "$i" "$NS_PLAN")" != "none" ]] && running=true
       same=false
       C="$c" I="$i" yq -e '.clusters[strenv(C)].instances[strenv(I)]' "$WORK/fleet.pre-$c-$i.yaml" > "$WORK/a.yaml" 2>/dev/null || true
       C="$c" I="$i" yq -e '.clusters[strenv(C)].instances[strenv(I)]' "$F" > "$WORK/b.yaml" 2>/dev/null || true

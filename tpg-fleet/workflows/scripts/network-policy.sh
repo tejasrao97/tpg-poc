@@ -5,10 +5,13 @@
 # policy of Postgres instances. The policies are rendered by the tpg-instance
 # chart from clusters/fleet.yaml clusters.<c>.instances.<i>.network, so Argo CD
 # owns them like the rest of the instance:
-#   NetworkPolicy tpg-ingress        ingress default deny + the flows the instance
-#                                    needs + the client rules
-#   CiliumNetworkPolicy tpg-egress   egress default deny + the flows the instance
-#                                    needs + the egress rules
+#   NetworkPolicy tpg-ingress-<instance>       ingress default deny + the flows the instance
+#                                              needs + the client rules
+#   CiliumNetworkPolicy tpg-egress-<instance>  egress default deny + the flows the instance
+#                                              needs + the egress rules
+# Both select the pods of the instance by the label postgres-instance=<instance> and live in
+# the namespace of the instance (clusters/fleet.yaml instance.namespace, default pg-<instance>),
+# which instances may share (Round 23).
 #
 # plan  every selected instance (discover: clusterMap, or clusters x instances):
 #   mode apply   network becomes {policy: baseline} plus exactly the rules given
@@ -80,8 +83,9 @@ if [[ "$CMD" == "plan" ]]; then
     for i in $(jq -r --arg c "$c" '.[] | select(.name == $c) | .instances[].name' <<<"$inv"); do
       [[ -z "$cblock" ]] || break
       if ! g="$(cmap_guard "$c" "$i")"; then record_entry "result.${c}.${i}" SKIPPED_VERSION_MISMATCH "" "$g"; continue; fi
-      tk -n "pg-$i" get postgres "$i" >/dev/null 2>&1 \
-        || { record_entry "result.${c}.${i}" FAILED INSTANCE_NOT_FOUND "pg-${i}/${i} does not exist on ${c}"; continue; }
+      ins="$(instance_ns "$c" "$i")"
+      tk -n "$ins" get postgres "$i" >/dev/null 2>&1 \
+        || { record_entry "result.${c}.${i}" FAILED INSTANCE_NOT_FOUND "${ins}/${i} does not exist on ${c}"; continue; }
       rules="$(jq -c --arg c "$c" --arg i "$i" '.[$c].instances[$i] // {}' "$WORK/targets.json")"
       if [[ "$NP_MODE" != "remove" ]] && jq -e '(.egressToFqdns // []) | length > 0' <<<"$rules" >/dev/null && [[ "$ACNS" != "true" ]]; then
         record_entry "result.${c}.${i}" FAILED ACNS_NOT_ENABLED "egressToFqdns needs ACNS (Terraform acns_enabled = true; run.sh sets acnsEnabled in tpg-settings)"
@@ -107,7 +111,7 @@ if [[ "$CMD" == "plan" ]]; then
         if ! out="$(instance_render "$REPO" "$c" "$i" 2>&1)"; then cblock="RENDER_FAILED:${i}: $(tail -n 2 <<<"$out" | tr '\n' ' ')"; break; fi
         pol="$(yq 'select(.kind == "NetworkPolicy" or .kind == "CiliumNetworkPolicy")' <<<"$out")"
         [[ -n "$(tr -d '[:space:]-' <<<"$pol")" ]] || { cblock="RENDER_FAILED:${i}: no policy rendered"; break; }
-        if ! out="$(printf '%s\n' "$pol" | tk -n "pg-$i" apply --dry-run=server -f - 2>&1)"; then
+        if ! out="$(printf '%s\n' "$pol" | tk -n "$(instance_ns "$c" "$i")" apply --dry-run=server -f - 2>&1)"; then
           cblock="DRY_RUN_REJECTED:${i}: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; break
         fi
       done
@@ -153,10 +157,11 @@ rev="$(run_data revision | jq -r '.detail // empty')"
 failed=0
 
 archive_check() {  # archive_check INSTANCE -> 0 when a WAL switch is archived after the policy change
-  local i="$1" pod before after f0 f1 n
-  pod="$(tk -n "pg-$i" get pod -l "postgres-instance=${i},role=primary" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  local i="$1" pod before after f0 f1 n ins
+  ins="$(instance_ns "$C" "$i")"
+  pod="$(tk -n "$ins" get pod -l "postgres-instance=${i},role=primary" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   [[ -n "$pod" ]] || { CHECK_DETAIL="no primary pod (label role=primary)"; return 1; }
-  q() { tk -n "pg-$i" exec "$pod" -c pg-container -- psql -tAc "$1" 2>/dev/null | tr -d '[:space:]'; }
+  q() { tk -n "$ins" exec "$pod" -c pg-container -- psql -tAc "$1" 2>/dev/null | tr -d '[:space:]'; }
   before="$(q "select coalesce(last_archived_wal,'') from pg_stat_archiver")"
   f0="$(q "select failed_count from pg_stat_archiver")"
   # pg_switch_wal() does nothing when no WAL was written since the last switch
@@ -174,12 +179,12 @@ archive_check() {  # archive_check INSTANCE -> 0 when a WAL switch is archived a
   CHECK_DETAIL="no WAL archived within 120s (last ${after:-none})"
   return 1
 }
-probe() {  # probe NAMESPACE INSTANCE LABELS_JSON -> 0 connected, 1 refused or timed out, 2 the probe pod did not run
-  local ns="$1" i="$2" labels="$3" name phase="" args=()
+probe() {  # probe NAMESPACE INSTANCE LABELS_JSON INSTANCE_NAMESPACE -> 0 connected, 1 refused or timed out, 2 the probe pod did not run
+  local ns="$1" i="$2" labels="$3" ins="$4" name phase="" args=()
   name="tpg-np-probe-$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)"
   while IFS= read -r l; do [[ -z "$l" ]] || args+=(--labels "$l"); done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$labels")
   tk -n "$ns" run "$name" --image="${TOOLS_IMAGE:-alpine/k8s:1.35.8}" --restart=Never --quiet "${args[@]}" \
-    --command -- sh -c "nc -z -w 5 ${i}.pg-${i}.svc.cluster.local 5432" >/dev/null 2>&1 || return 2
+    --command -- sh -c "nc -z -w 5 ${i}.${ins}.svc.cluster.local 5432" >/dev/null 2>&1 || return 2
   for _ in $(seq 1 40); do
     phase="$(tk -n "$ns" get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     [[ "$phase" == "Succeeded" || "$phase" == "Failed" ]] && break
@@ -194,12 +199,13 @@ for i in $(tr ',' ' ' <<<"$targets"); do
   opts=(); [[ "$NP_MODE" == "remove" ]] && opts=(--prune)
   rc=0; sync_instance_app "$C" "$i" "$TIMEOUT" "$rev" "${opts[@]}" || rc=$?
   if [[ "$rc" -ne 0 ]]; then record_entry "$ikey" FAILED "$SYNC_FAIL_REASON" "$SYNC_FAIL_DETAIL"; failed=1; continue; fi
-  n_np="$(tk -n "pg-$i" get networkpolicy tpg-ingress -o name 2>/dev/null | wc -l)"
-  n_cnp="$(tk -n "pg-$i" get ciliumnetworkpolicy tpg-egress -o name 2>/dev/null | wc -l)"
+  ins="$(instance_ns "$C" "$i")"
+  n_np="$(tk -n "$ins" get networkpolicy "tpg-ingress-${i}" -o name 2>/dev/null | wc -l)"
+  n_cnp="$(tk -n "$ins" get ciliumnetworkpolicy "tpg-egress-${i}" -o name 2>/dev/null | wc -l)"
   if [[ "$NP_MODE" == "remove" ]]; then
-    [[ "$n_np" -eq 0 && "$n_cnp" -eq 0 ]] || { record_entry "$ikey" FAILED POLICY_NOT_REMOVED "tpg-ingress or tpg-egress still exists in pg-${i}"; failed=1; continue; }
+    [[ "$n_np" -eq 0 && "$n_cnp" -eq 0 ]] || { record_entry "$ikey" FAILED POLICY_NOT_REMOVED "tpg-ingress-${i} or tpg-egress-${i} still exists in ${ins}"; failed=1; continue; }
   else
-    [[ "$n_np" -eq 1 && "$n_cnp" -eq 1 ]] || { record_entry "$ikey" FAILED POLICY_NOT_APPLIED "NetworkPolicy tpg-ingress and CiliumNetworkPolicy tpg-egress expected in pg-${i}"; failed=1; continue; }
+    [[ "$n_np" -eq 1 && "$n_cnp" -eq 1 ]] || { record_entry "$ikey" FAILED POLICY_NOT_APPLIED "NetworkPolicy tpg-ingress-${i} and CiliumNetworkPolicy tpg-egress-${i} expected in ${ins}"; failed=1; continue; }
   fi
   detail="${NP_MODE}"
   if [[ "${CONNECTIVITY_CHECK:-true}" == "true" ]]; then
@@ -209,7 +215,7 @@ for i in $(tr ',' ' ' <<<"$targets"); do
       ns="$(C="$C" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].network.ingressFromNamespaces[0] // ""' "$WORK/repo/$FLEET_REL")"
       labels="$(C="$C" I="$i" yq -o=json -I=0 '.clusters[strenv(C)].instances[strenv(I)].network.ingressFromPodLabels // {}' "$WORK/repo/$FLEET_REL")"
       if [[ -n "$ns" ]]; then
-        prc=0; probe "$ns" "$i" "$labels" || prc=$?
+        prc=0; probe "$ns" "$i" "$labels" "$ins" || prc=$?
         case "$prc" in
           0) detail="${detail}; ${ns} reaches 5432" ;;
           1) record_entry "$ikey" FAILED CLIENT_BLOCKED "a pod in ${ns} (labels ${labels}) cannot reach ${i}:5432"; failed=1; continue ;;
@@ -218,7 +224,7 @@ for i in $(tr ',' ' ' <<<"$targets"); do
       fi
       allowed="$(C="$C" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].network.ingressFromNamespaces // [] | .[]' "$WORK/repo/$FLEET_REL")"
       if ! grep -qx default <<<"$allowed"; then
-        prc=0; probe default "$i" '{}' || prc=$?
+        prc=0; probe default "$i" '{}' "$ins" || prc=$?
         case "$prc" in
           0) record_entry "$ikey" FAILED NOT_ISOLATED "a pod in namespace default reaches ${i}:5432 although it is not allowed"; failed=1; continue ;;
           1) detail="${detail}; default is denied" ;;

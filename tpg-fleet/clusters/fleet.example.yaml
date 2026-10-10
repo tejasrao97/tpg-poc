@@ -23,6 +23,10 @@ clusters:
             current: patches/example-postgres-resources-ex4m1.yaml
       billing-db:
         instance:
+          # tpg-day0 / tpg-create-instance clusterMap key namespace (Round 23; default
+          # pg-billing-db): instances may share a namespace. billing-db owns the shared
+          # Secrets (regsecret, backup-storage, ServiceAccount tpg-vso) of finance
+          namespace: finance
           postgresVersion: postgres-17.6
           highAvailability:
             enabled: false
@@ -32,6 +36,16 @@ clusters:
         overlays:
           postgresValues:
             current: overlays/example-values-retention-ov1v1.yaml
+      billing-reports:
+        instance:
+          namespace: finance
+          # false: another instance of the namespace renders the shared Secrets
+          # (written by the workflows; one owner per namespace)
+          sharedSecretsOwner: false
+          postgresVersion: postgres-17.6
+          highAvailability:
+            enabled: false
+            readReplicas: 0
   aks-tpg-poc-02:
     operator:
       version: v4.5.0

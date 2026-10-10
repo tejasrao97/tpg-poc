@@ -122,7 +122,7 @@ Inputs used by several workflows:
 <cluster>:                  # a registered cluster
   <cluster key>: <value>
   instances:
-    <instance>:             # an instance (namespace pg-<instance>)
+    <instance>:             # an instance (namespace: its key namespace, default pg-<instance>)
       <instance key>: <value>
 ```
 
@@ -177,6 +177,7 @@ Instance keys:
 | `ferretSecretName` | `String (name)` | day0, create-instance | FerretDB connection Secret (default: the operator's <instance>-app-user-db-secret) |
 | `ferretReadOnlySecretName` | `String (name)` | day0, create-instance | FerretDB read-only connection Secret (default: <instance>-read-only-user-db-secret) |
 | `backupEnableSSL` | `Boolean` | day0, create-instance | Backups over HTTPS (spec.storage.azure.enableSSL); the CA bundle comes from backupCaBundleFile, backupCaBundleVaultSecret or ConfigMap tpg-settings backupCaBundle. Renamed from enableSSL in Round 15 |
+| `namespace` | `String (namespace)` | day0, create-instance | Round 23: the namespace of the instance, default pg-<instance>; written to clusters/fleet.yaml as instance.namespace and immutable (a different value for an instance that exists is refused). Instances may share a namespace: the first one owns the shared Secrets (regsecret, backup-storage, ServiceAccount tpg-vso), each has its own network policy selected by the postgres-instance label, and purgeNamespace is refused while another instance of the namespace remains. Reserved namespaces are refused. Every other workflow reads the namespace from clusters/fleet.yaml |
 | `disableInitialBackup` | `Boolean` | day0, create-instance | Round 22: true writes the annotation sql.tanzu.vmware.com/skip-initial-backup: "true" on the new Postgres instance, so the operator takes no initial backup at creation; false (the default) leaves the operator's behaviour. Only new instances |
 | `backupCaBundleFile` | `List (one file path)` | day0, create-instance, patch | The backup CA bundle of this instance (backupEnableSSL true): a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Wins over the cluster level and the inputs; not together with backupCaBundleVaultSecret |
 | `backupCaBundleVaultSecret` | `String (name)` | day0, create-instance, patch | The backup CA bundle of this instance from Vault tpg/ca-bundles/<name> (key caBundle). Wins over the cluster level and the inputs; not together with backupCaBundleFile |
@@ -195,7 +196,7 @@ Instance keys:
 | `preUpgradeBackup` | `Boolean` | upgrade | As the input |
 | `allowMajor` | `Boolean` | upgrade | As the input: allow a major Postgres upgrade |
 | `purgePvcs` | `Boolean` | delete-instance, delete-apps | As the input: delete the volumes |
-| `purgeNamespace` | `Boolean` | delete-instance, delete-apps | As the input: delete the namespace (needs purgePvcs true) |
+| `purgeNamespace` | `Boolean` | delete-instance, delete-apps | As the input: delete the namespace (needs purgePvcs true). Refused (NAMESPACE_SHARED) while another instance of clusters/fleet.yaml, or another Postgres, uses the namespace; tpg-delete-apps deletes a shared namespace after the last instance of the run, and with deleteOperator whoever else is there |
 | `finalBackup` | `Enum` | delete-instance, delete-apps | As the input: true (a final backup, best effort), false (none) or required (fail when the instance is not Running) |
 | `exposure` | `Enum` | day0, create-instance | Read-write Service: clusterIP, internalLoadBalancer or loadBalancer |
 | `serviceAnnotations` | `Map` | day0, create-instance | Extra annotations of the read-write Service |
@@ -244,6 +245,7 @@ map that uses every key in `clustermap-<workflow>.example.yaml`:
       ferretSecretName               String (name)         optional (default: the input ferretSecretName)
       ferretReadOnlySecretName       String (name)         optional (default: the input ferretReadOnlySecretName)
       backupEnableSSL                Boolean               optional (default: the input backupEnableSSL)
+      namespace                      String (namespace)    optional
       disableInitialBackup           Boolean               optional (default: the input disableInitialBackup)
       backupCaBundleFile             List (one file path)  optional (the instance key, else the cluster key, else the inputs)
       backupCaBundleVaultSecret      String (name)         optional (the instance key, else the cluster key, else the inputs)
@@ -292,6 +294,7 @@ map that uses every key in `clustermap-<workflow>.example.yaml`:
       ferretSecretName               String (name)         optional (default: the input ferretSecretName)
       ferretReadOnlySecretName       String (name)         optional (default: the input ferretReadOnlySecretName)
       backupEnableSSL                Boolean               optional (default: the input backupEnableSSL)
+      namespace                      String (namespace)    optional
       disableInitialBackup           Boolean               optional (default: the input disableInitialBackup)
       backupCaBundleFile             List (one file path)  optional (the instance key, else the cluster key, else the inputs)
       backupCaBundleVaultSecret      String (name)         optional (the instance key, else the cluster key, else the inputs)
@@ -444,7 +447,7 @@ The operator step waits until the Postgres CRDs are Established and the operator
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
 | `clusters` | `List` | yes, without `clusterMap` | | Registered clusters or `all` |
-| `instances` | `List` | yes, without `clusterMap` | | Instances to deploy on every selected cluster (namespace `pg-<instance>`) |
+| `instances` | `List` | yes, without `clusterMap` | | Instances to deploy on every selected cluster (namespace `pg-<instance>`; the `clusterMap` key `namespace` sets another) |
 | `clusterMap` | `Map` | no | | Targets and per-target values (section 3); replaces `clusters` and `instances` |
 | `highAvailability` | `Boolean` | yes (input or map key) | | `true` (primary and standby, plus `readReplicas`) or `false` (single node) |
 | `operatorVersion` | `String (version)` | yes (input or map key) | | Operator chart version |
@@ -519,6 +522,8 @@ Warnings (the run goes on): `ORPHAN_CRD` (Postgres CRDs without any operator: th
 `backupEnableSSL=true` needs a CA bundle: `backupCaBundleFile` or `backupCaBundleVaultSecret` (the instance's `clusterMap` key, else its cluster's, else the inputs), else `tpg-settings` `backupCaBundle` (written by `tpg-aks-infra/scripts/run.sh` from Terraform). The plan checks that the bundle holds PEM certificates that have not expired; without any bundle it fails with `CA_BUNDLE_MISSING` before anything changes. Between the steps the plan carries each bundle as `@ca:<first 12 characters of its sha256>@` (one workflow parameter is limited to 128 KiB) and records the PEM once in the run record `ca.<hash>`; the commit writes the PEM itself, and fails `CA_BUNDLE_MISSING` when a bundle is in neither the run record nor `tpg-settings`. The report names the source of every bundle that does not come from `tpg-settings` (`CA_BUNDLE <cluster>/<instance> from file ...` or `from Vault tpg/ca-bundles/<name>`).
 
 **Backup repository path** (Round 22). `spec.storage.azure.repoPath` is `/<namespace>/<instance>` by default (for example `/pg-orders-db/orders-db`), so no two instances share a pgBackRest repository. `backup.repoPath` in the instance entry of `clusters/fleet.yaml` overrides it and must start with `/`. **An instance created before Round 22 used `/<namespace>`: pin it with `backup.repoPath: /pg-<instance>` before the next sync**, or the sync moves it to an empty repository and its stanza and backups are left behind. The cross-cluster copy of tpg-restore does not inherit the source's pinned path. A values overlay or patch file may not set `backup.repoPath` or `instance.disableInitialBackup`.
+
+**Namespace** (Round 23). The `clusterMap` instance key `namespace` (tpg-day0, tpg-create-instance; default `pg-<instance>`) is written to `clusters/fleet.yaml` as `instance.namespace`, is immutable (a different value for a declared instance is refused: `NAMESPACE_IMMUTABLE`, which blocks the cluster in tpg-day0 and the instance in tpg-create-instance) and may not be a reserved namespace (`kube-system`, `kube-public`, `kube-node-lease`, `default`, `argocd`, `argo`, `vault`, `cert-manager`, `monitoring`, `tanzu-postgres-operator`). Every other workflow reads the namespace from `clusters/fleet.yaml`; the `tpg-instances` ApplicationSet deploys into it. Instances may share a namespace: the first instance planned owns the Secrets the chart names the same in every instance (ServiceAccount `tpg-vso`, VaultStaticSecrets `regsecret` and `backup-storage`; chart value `instance.sharedSecretsOwner`, `false` on the others), each instance has its own network policy, and `purgeNamespace` is refused while another instance uses the namespace. When the owner is deleted, tpg-delete-instance hands the Secrets to a remaining instance first: the owner flags move in one commit, the successor's Application is synced (it adopts the objects; Argo CD tracks an object with one annotation, so exactly one Application owns them at any moment and they are never deleted), the tracking annotation is checked, and only then the entry and the Application of the old owner go.
 
 **Overlay files at Day 0** (Round 15, design decision D83; renamed in Round 22). `postgresOverlayFilePath`, `postgresValuesOverlayFilePath` and `operatorValuesOverlayFilePath` (inputs or `clusterMap` keys; the old `...PatchFilePath` names are no longer accepted by tpg-day0 and tpg-create-instance, which answer with the new name) work like the patch files of tpg-patch, with the creation rules of a new target: the files are checked in the validate step, stored in `helm_artifacts/instance/tpg-instance/overlays/` (the operator file in `helm_artifacts/operator/overlays/`), recorded as `current` under `overlays:` in `clusters/fleet.yaml` and rendered with the new instances and the operator. They apply at the initial deployment, before any patch: tpg-patch stacks its patch files on top of the overlays (a patch wins over an overlay, an overlay over the chart values). An instance or an operator that already runs with another overlay is `BLOCKED` `OVERLAY_USE_TPG_PATCH`; an identical overlay is left alone (change running objects with tpg-patch, which shows the diff and can revert). Local files travel in `patchFiles`: pack them with `scripts/submit/pack-patch-files.sh -o <parameter file>` and submit the parameter file (section 7).
 
@@ -693,7 +698,7 @@ Adds Postgres instances to clusters that already run the fleet's operator (deplo
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
 | `clusters` | `List` | yes, without `clusterMap` | | Registered clusters that run the fleet's operator (`all` is not accepted) |
-| `instances` | `List` | yes, without `clusterMap` | | New instances, created on every listed cluster (namespace `pg-<instance>`) |
+| `instances` | `List` | yes, without `clusterMap` | | New instances, created on every listed cluster (namespace `pg-<instance>`; the `clusterMap` key `namespace` sets another) |
 | `clusterMap` | `Map` | no | | Each cluster with its own instances and values (section 3); replaces `clusters` and `instances` |
 | `highAvailability` | `Boolean` | yes (input or map key) | | `true` (primary and standby, plus `readReplicas`) or `false` (single node) |
 | `postgresVersion` | `String (version)` | yes (input or map key) | | A PostgresVersion the cluster's operator offers |
@@ -1224,10 +1229,10 @@ argo submit --from workflowtemplate/tpg-scale-instance -p pushMode=direct -p rep
 
 ## 9. tpg-network-policy
 
-Creates, changes or removes the network policy of Postgres instances. The rules are written to `clusters/fleet.yaml` (`clusters.<c>.instances.<i>.network`) and rendered by the tpg-instance chart, so Argo CD owns the two objects in `pg-<instance>` like the rest of the instance:
+Creates, changes or removes the network policy of Postgres instances. The rules are written to `clusters/fleet.yaml` (`clusters.<c>.instances.<i>.network`) and rendered by the tpg-instance chart, so Argo CD owns the two objects in the namespace of the instance (`instance.namespace`, default `pg-<instance>`) like the rest of the instance. Both are named after the instance and select its pods by the label `postgres-instance=<instance>`, so instances that share a namespace each have their own pair:
 
-- **NetworkPolicy `tpg-ingress`** (every pod of the namespace): selecting the pods makes ingress default deny.
-- **CiliumNetworkPolicy `tpg-egress`** (every endpoint of the namespace): an egress section makes egress default deny. AKS runs Azure CNI powered by Cilium (Terraform `network_policy = "cilium"`), which enforces both kinds and adds up their allow rules.
+- **NetworkPolicy `tpg-ingress-<instance>`** (the pods of the instance): selecting the pods makes ingress default deny.
+- **CiliumNetworkPolicy `tpg-egress-<instance>`** (the endpoints of the instance): an egress section makes egress default deny. AKS runs Azure CNI powered by Cilium (Terraform `network_policy = "cilium"`), which enforces both kinds and adds up their allow rules.
 
 `networkPolicy=baseline` on tpg-day0 and tpg-create-instance sets the same policy when an instance is created.
 
@@ -1321,7 +1326,7 @@ The applications per cluster come from `apps` (JSON) or from `clusterMap`: the i
 | `confirm` | `List` | yes | | Repeat the cluster names (`clusters`, or the clusters of `clusterMap`) |
 | `dryRun` | `Boolean` | no | `true` | `true` records the plan; `false` deletes (set `false` explicitly to delete) |
 | `purgePvcs` | `Boolean` | yes (input or map key per instance) | | `true` deletes PVCs and Azure disks; `false` keeps them |
-| `purgeNamespace` | `Boolean` | yes (input or map key per instance) | | `true` deletes `pg-<instance>` (needs `purgePvcs=true`); `false` keeps it |
+| `purgeNamespace` | `Boolean` | yes (input or map key per instance) | | `true` deletes the namespace of the instance (needs `purgePvcs=true`; refused while another instance uses it); `false` keeps it |
 | `pushMode` | `Enum` | yes | | `direct` or `pr` |
 | `force` | `Boolean` | no | `false` | With the operator: also delete Postgres instances not listed, and do not wait for running backups or restores |
 | `forceDeleteStuckApps` | `Boolean` | no | `true` | An Application that cannot be rendered (`ComparisonError`, for example an expired Broadcom registry token: 401) stays in `Deleting` for ever. `true`: after the delete wait the condition is logged, the Argo CD finalizer is removed (nothing is rendered), the leftovers are cleaned up as usual and the result carries `FORCED: Application removed without rendering (...)`; `false`: the run fails `APPLICATION_NOT_REMOVED` |
@@ -1416,7 +1421,7 @@ Guarded delete of instances (the per-instance step that `tpg-delete-apps` uses).
 | `forceDeleteStuckApps` | `Boolean` | no | `true` | As tpg-delete-apps: an Application stuck in `Deleting` with a `ComparisonError` is removed by clearing its Argo CD finalizer, and the result carries `FORCED:`; `false` fails `APPLICATION_NOT_REMOVED` |
 | `finalBackup` | `Enum` | no | `true` | `true`, `false` or `required` (fail when the instance is not Running) |
 | `purgePvcs` | `Boolean` | no | `false` | `true` deletes PVCs and Azure disks |
-| `purgeNamespace` | `Boolean` | no | `false` | `true` deletes `pg-<instance>` (needs `purgePvcs=true`) |
+| `purgeNamespace` | `Boolean` | no | `false` | `true` deletes the namespace of the instance (needs `purgePvcs=true`; refused while another instance uses it) |
 | `pushMode` | `Enum` | no | `direct` | `direct` or `pr` |
 | `timeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `1800`, `3600` | Per instance, pull request |
 
@@ -1614,7 +1619,7 @@ Restores one instance to a chosen recovery point. Four things are chosen indepen
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
 | `sourceCluster` | `String (name)` | yes | | Registered cluster that runs the instance to restore from |
-| `instance` | `String (name)` | yes | | Source instance (namespace `pg-<instance>`) |
+| `instance` | `String (name)` | yes | | Source instance (its namespace from `clusters/fleet.yaml`, default `pg-<instance>`) |
 | `mode` | `Enum` | yes | | `time`, `latest`, `backup`, `lsn` or `xid` |
 | `targetTime` | `String (UTC time)` | with `mode=time` | | UTC timestamp, for example `2026-09-15T08:30:00Z` |
 | `backupName` | `String (name)` | with `mode=backup` | | A `PostgresBackup` name in the source namespace |
@@ -1702,7 +1707,7 @@ The new value comes from a wrapping token (section 14), or for a CA bundle from 
 [12:31:06]   checksum live 15ad3ddd != Vault 7c01b2e9: not yet; VaultStaticSecret: SecretSynced=True (Secret synced); Ready=True (VaultStaticSecretReady) | secretMAC S3atz4E1eWKh
 ```
 
-Only the first 8 characters of the two checksums are logged, never a value. The operator namespace is checked first, then the `pg-*` namespaces; each gets up to 5 minutes and ends as soon as the live Secret holds the Vault value, and the step fails `SECRET_NOT_SYNCED` only after checking all of them, naming every namespace that did not match. The hub part also logs the Argo CD repository poll and fails `RBAC_MISSING` when `workflow-bot` may read no repositories (it needs `p, role:tpg-sync, repositories, get, *, allow`). Up to Round 20 the live checksum was taken with a trailing newline that the Vault one lacked, so this step always failed `SECRET_NOT_SYNCED`. The Day 0 and restore waits for the `regsecret` and `backup-storage` Secrets log the same way.
+Only the first 8 characters of the two checksums are logged, never a value. The operator namespace is checked first, then the namespaces of the instances declared for the cluster in `clusters/fleet.yaml`; each gets up to 5 minutes and ends as soon as the live Secret holds the Vault value, and the step fails `SECRET_NOT_SYNCED` only after checking all of them, naming every namespace that did not match. The hub part also logs the Argo CD repository poll and fails `RBAC_MISSING` when `workflow-bot` may read no repositories (it needs `p, role:tpg-sync, repositories, get, *, allow`). Up to Round 20 the live checksum was taken with a trailing newline that the Vault one lacked, so this step always failed `SECRET_NOT_SYNCED`. The Day 0 and restore waits for the `regsecret` and `backup-storage` Secrets log the same way.
 
 ```bash
 cd ~/src/tpg-aks-infra

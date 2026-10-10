@@ -14,9 +14,11 @@ Connection (given by hand; nothing is read from the cluster):
   --sslmode prefer (disable | allow | prefer | require | verify-ca | verify-full)
   --sslrootcert FILE   CA certificate for verify-ca / verify-full
 Reach the instance through its Service address (exposure internalLoadBalancer
-or loadBalancer), or run "kubectl -n pg-<instance> port-forward svc/<instance>
+or loadBalancer), or run "kubectl -n <namespace> port-forward svc/<instance>
 5432" first and use --host 127.0.0.1. The credentials are in the Secret
-pg-<instance>/<instance>-db-secret (keys username and password).
+<namespace>/<instance>-db-secret (keys username and password). <namespace> is
+instance.namespace of the instance in clusters/fleet.yaml (pg-<instance> when the
+entry has none; the tpg-day0 / tpg-create-instance clusterMap key namespace).
 
 Commands:
   create-db     --name NAME [--owner ROLE] [--if-not-exists]

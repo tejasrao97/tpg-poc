@@ -16,7 +16,7 @@ source /scripts/lib.sh
 
 key="${RESULT_KEY:-result.${C}.${I}}"
 result_guard "$key"
-NS="pg-${I}"
+NS="$(instance_ns "$C" "$I")"   # clusters/fleet.yaml instance.namespace, default pg-<instance> (Round 23)
 if ! use_cluster "$C"; then record "$key" FAILED NOT_REGISTERED; exit 0; fi
 if [[ "${BACKUP_FROM_MAP:-false}" == "true" ]]; then
   TYPE="$(cmap_ival "$C" "$I" backupType "$TYPE")"

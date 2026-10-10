@@ -43,6 +43,14 @@ ARGS = _ap.parse_args()
 # NOTE: argo_workflows_* counter names get a _total suffix in Prometheus exposition.
 # Confirm on the hub: curl -s http://<controller-metrics-svc>:8080/metrics | grep tpg_
 
+# Round 23: instances live in the namespace of their fleet.yaml entry (default pg-<instance>) and may
+# share one, so no query selects namespaces by a pg- prefix any more. The pods of an instance are the series
+# up{postgres_instance=...}: the PodMonitor postgres-instances (namespaceSelector any) copies the pod
+# label postgres-instance to postgres_instance (podTargetLabels). The StatefulSet of an instance is
+# named like the instance, so a StatefulSet series is matched to it by (cluster, namespace, statefulset).
+STS_ALL = 'label_replace(max by (cluster, namespace, postgres_instance) (up{postgres_instance!=""}), "statefulset", "$1", "postgres_instance", "(.*)")'
+
+
 ALERTS = [
     dict(uid="tpg-instance-not-running", title="Postgres instance not Running",
          expr='1 - max by (cluster, instance_namespace, instance_name) (tanzu_postgres_instance_state{state="Running"})',
@@ -53,7 +61,7 @@ ALERTS = [
          op="gt", threshold=0, for_="0m", severity="warning",
          summary="Fewer Postgres instances on {{ $labels.cluster }} than one hour ago"),
     dict(uid="tpg-replicas-below-desired", title="Postgres pod replicas below desired",
-         expr='max by (cluster, namespace, statefulset) (kube_statefulset_replicas{namespace=~"pg-.*"}) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{namespace=~"pg-.*"})',
+         expr='max by (cluster, namespace, statefulset) (kube_statefulset_replicas and on (cluster, namespace, statefulset) %s) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready and on (cluster, namespace, statefulset) %s)' % (STS_ALL, STS_ALL),
          op="gt", threshold=0, for_="10m", severity="warning",
          summary="{{ $labels.cluster }}/{{ $labels.statefulset }} has fewer ready pods than desired"),
     dict(uid="tpg-backup-failed", title="Postgres backup failed (24h)",
@@ -251,8 +259,8 @@ panel("Instance state", "table",
                            {"id": "organize", "options": {"excludeByName": {"Time": True, "Value": True, "__name__": True, "job": True, "instance": True, "pod": True, "service": True, "endpoint": True, "container": True, "customresource_group": True, "customresource_kind": True, "customresource_version": True}}}]})
 row("Replicas", 16)
 panel("Pod replicas: ready vs desired", "table",
-      [('max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{namespace=~"pg-.*",cluster=~"$cluster"})', "ready"),
-       ('max by (cluster, namespace, statefulset) (kube_statefulset_replicas{namespace=~"pg-.*",cluster=~"$cluster"})', "desired")], 0, 17, 14, 8,
+      [('max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{cluster=~"$cluster"} and on (cluster, namespace, statefulset) %s)' % STS_ALL, "ready"),
+       ('max by (cluster, namespace, statefulset) (kube_statefulset_replicas{cluster=~"$cluster"} and on (cluster, namespace, statefulset) %s)' % STS_ALL, "desired")], 0, 17, 14, 8,
       {"transformations": [{"id": "merge", "options": {}},
                            {"id": "organize", "options": {"excludeByName": {"Time": True}, "renameByName": {"Value #A": "ready", "Value #B": "desired"}}}]})
 panel("Desired read replicas", "table",
@@ -378,10 +386,16 @@ V_CLUSTER = var_query("cluster", "Cluster", "label_values(tanzu_postgres_instanc
 V_INSTANCE = var_query("instance", "Instance",
                        'label_values(tanzu_postgres_instance_state{cluster=~"$cluster"}, instance_name)')
 # Selectors: the exporter labels pods with postgres_instance, the custom
-# resource metrics carry instance_name, and the pods live in pg-<instance>.
+# resource metrics carry instance_name. The kube-state-metrics, kubelet and cAdvisor series
+# have neither: they are narrowed to the pods of the selected instances with
+# "and on (cluster, namespace, pod) PODS" (Round 23; no namespace pattern: instances may be in
+# any namespace and share one).
 PG = 'cluster=~"$cluster", postgres_instance=~"$instance"'
 CR = 'cluster=~"$cluster", instance_name=~"$instance"'
-NSX = 'cluster=~"$cluster", namespace=~"pg-($instance)"'
+PODS = 'max by (cluster, namespace, pod) (up{%s})' % PG
+STS = 'label_replace(max by (cluster, namespace, postgres_instance) (up{%s}), "statefulset", "$1", "postgres_instance", "(.*)")' % PG
+PVCS = '(kube_pod_spec_volumes_persistentvolumeclaims_info and on (cluster, namespace, pod) %s)' % PODS
+CL = 'cluster=~"$cluster"'
 
 
 def unit(u, decimals=None, extra=None):
@@ -461,20 +475,20 @@ b.panel("Deadlocks (15m)", "timeseries",
 b.panel("Longest running transaction", "timeseries",
         [('max by (cluster, postgres_instance) (pg_stat_activity_max_tx_duration{%s})' % PG, "{{cluster}}/{{postgres_instance}}")], 0, 12, 8, unit("s"))
 b.panel("Volume usage (data and WAL)", "bargauge",
-        [('max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes{%s}) / max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{%s})' % (NSX, NSX),
+        [('max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes{%s} and on (cluster, namespace, persistentvolumeclaim) %s) / max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{%s} and on (cluster, namespace, persistentvolumeclaim) %s)' % (CL, PVCS, CL, PVCS),
           "{{cluster}} {{persistentvolumeclaim}}")], 12, 12, 8,
         {"options": {"orientation": "horizontal", "displayMode": "gradient", "reduceOptions": {"calcs": ["lastNotNull"]}},
          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [
              {"color": "green", "value": None}, {"color": "orange", "value": 0.75}, {"color": "red", "value": 0.9}]}}, "overrides": []}})
 b.row("Postgres pods")
 b.panel("CPU per pod", "timeseries",
-        [('sum by (cluster, namespace, pod) (rate(container_cpu_usage_seconds_total{%s, container!="", container!="POD"}[5m]))' % NSX, "{{cluster}}/{{pod}}")],
+        [('sum by (cluster, namespace, pod) (rate(container_cpu_usage_seconds_total{%s, container!="", container!="POD"}[5m]) and on (cluster, namespace, pod) %s)' % (CL, PODS), "{{cluster}}/{{pod}}")],
         0, 8, 8, unit("short", 2), description="CPU cores used (rate of container_cpu_usage_seconds_total).")
 b.panel("Memory per pod (working set)", "timeseries",
-        [('sum by (cluster, namespace, pod) (container_memory_working_set_bytes{%s, container!="", container!="POD"})' % NSX, "{{cluster}}/{{pod}}")],
+        [('sum by (cluster, namespace, pod) (container_memory_working_set_bytes{%s, container!="", container!="POD"} and on (cluster, namespace, pod) %s)' % (CL, PODS), "{{cluster}}/{{pod}}")],
         8, 8, 8, unit("bytes"))
 b.panel("Container restarts (1h)", "timeseries",
-        [('sum by (cluster, namespace, pod) (increase(kube_pod_container_status_restarts_total{%s}[1h]))' % NSX, "{{cluster}}/{{pod}}")],
+        [('sum by (cluster, namespace, pod) (increase(kube_pod_container_status_restarts_total{%s}[1h]) and on (cluster, namespace, pod) %s)' % (CL, PODS), "{{cluster}}/{{pod}}")],
         16, 8, 8, unit("short", 0))
 n_instance = b.write()
 
@@ -488,8 +502,8 @@ b.panel("Role per pod (1 = replica, 0 = primary)", "table",
         table({"Value": "is_replica"}),
         description="pg_replication_is_replica from the exporter: 0 on the primary, 1 on a standby or read replica.")
 b.panel("Pods ready vs desired", "table",
-        [('max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{%s})' % NSX, "ready"),
-         ('max by (cluster, namespace, statefulset) (kube_statefulset_replicas{%s})' % NSX, "desired")], 12, 12, 8,
+        [('max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{%s} and on (cluster, namespace, statefulset) %s)' % (CL, STS), "ready"),
+         ('max by (cluster, namespace, statefulset) (kube_statefulset_replicas{%s} and on (cluster, namespace, statefulset) %s)' % (CL, STS), "desired")], 12, 12, 8,
         {"transformations": [{"id": "merge", "options": {}},
                              {"id": "organize", "options": {"excludeByName": {"Time": True},
                                                             "renameByName": {"Value #A": "ready", "Value #B": "desired"}}}]},
@@ -512,7 +526,7 @@ b.panel("WAL archive failures (15m)", "timeseries",
         12, 12, 8, unit("short", 0, {"thresholds": {"mode": "absolute", "steps": GREEN_RED_1}, "custom": {"thresholdsStyle": {"mode": "line"}}}),
         description="The tpg-wal-archiving-failing alert fires on any failure: point-in-time recovery is at risk.")
 b.panel("Pod restarts (24h)", "bargauge",
-        [('sum by (cluster, pod) (increase(kube_pod_container_status_restarts_total{%s}[24h]))' % NSX, "{{cluster}}/{{pod}}")], 0, 24, 7,
+        [('sum by (cluster, pod) (increase(kube_pod_container_status_restarts_total{%s}[24h]) and on (cluster, namespace, pod) %s)' % (CL, PODS), "{{cluster}}/{{pod}}")], 0, 24, 7,
         {"options": {"orientation": "horizontal", "displayMode": "basic", "reduceOptions": {"calcs": ["lastNotNull"]}},
          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": GREEN_RED_1}}, "overrides": []}},
         description="A failover restarts or replaces pods; a count that keeps growing points at a crash loop.")

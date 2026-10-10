@@ -40,7 +40,7 @@ fi
 # An instance that exists must be Running (design decision D61).
 PRESENT=()
 for i in $(inventory_instances "$C"); do
-  if ! gerr="$(tk -n "pg-$i" get postgres "$i" -o name 2>&1 >/dev/null)"; then
+  if ! gerr="$(tk -n "$(instance_ns "$C" "$i")" get postgres "$i" -o name 2>&1 >/dev/null)"; then
     # Only NotFound means absent; any other error (API timeout, RBAC) stops the run
     grep -qiE 'NotFound|not found' <<<"$gerr" \
       || fail CLUSTER_API_ERROR "${i}: cannot read the Postgres object on ${C}: $(head -c 300 <<<"$gerr")"

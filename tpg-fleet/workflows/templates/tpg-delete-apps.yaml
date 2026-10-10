@@ -56,7 +56,7 @@ spec:
       value: ""
       enum: ["", "false", "true"]
     - name: purgeNamespace
-      description: "true: delete the pg-<instance> namespaces (needs purgePvcs=true); false: keep them"
+      description: "true: delete the instance namespaces (needs purgePvcs=true; refused while another instance uses the namespace, except with deleteOperator); false: keep them"
       value: ""
       enum: ["", "false", "true"]
     - name: pushMode

@@ -1,4 +1,5 @@
-# One Application per Postgres instance: tpg-<cluster>-<instance>.
+# One Application per Postgres instance: tpg-<cluster>-<instance>, deployed into the
+# namespace of its entry (instance.namespace, default pg-<instance>).
 #
 # Generator: registered clusters (label tpg.fleet/managed=true) x clusters/fleet.yaml,
 # then one element per clusters.<cluster>.instances.<instance> entry. A cluster
@@ -79,7 +80,10 @@ spec:
             {{- toJson (mergeOverwrite $base $clusterOverrides $instance) -}}
       destination:
         server: "{{.server}}"
-        namespace: "pg-{{.instance.name}}"
+        # clusters.<cluster>.instances.<instance>.instance.namespace (tpg-day0, tpg-create-instance
+        # clusterMap key namespace, immutable); pg-<instance> when the entry has none. Instances
+        # may share a namespace: the chart renders the shared Secrets for the owner only
+        namespace: '{{ default (printf "pg-%s" .instance.name) (dig "instance" "namespace" "" .instance.values) }}'
       # PostgresBackupLocation fields the operator's CRD serializes with
       # omitempty: the API server stores nothing for forcePathStyle=false or an
       # empty additionalParameters, so an Application that declares them can

@@ -65,6 +65,9 @@ AZURE_NAME = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]{0,78}[A-Za-z0-9_])?$")
 FQDN = re.compile(r"^(\*\.)?([a-z0-9]([-a-z0-9]*[a-z0-9])?\.)+[a-z]{2,}$")
 CRON = re.compile(r"^[0-9*/,A-Za-z-]+(\s+[0-9*/,A-Za-z-]+){4}$")
 K8S_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")
+# a namespace: a DNS-1123 label, at most 63 characters (Round 23); the reserved ones are listed
+# in cluster-map-keys.yaml (key namespace, "reserved")
+NAMESPACE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
 
 # Workflows where every cluster needs at least one instance, and the cluster keys
 # that make an instance-less cluster meaningful in the others.
@@ -344,6 +347,13 @@ def check_value(spec, value, where):
             return "", None
         s = " ".join(s.split())
         return s, None if CRON.match(s) else f"{where}: '{s}' must be a cron schedule of 5 fields (minute hour day month weekday), for example 0 0 * * 0"
+    if t == "namespace":
+        if not NAMESPACE.match(s):
+            return s, f"{where}: '{s}' must be a namespace name: a lowercase DNS label of at most 63 characters (letters, digits and '-')"
+        reserved = spec.get("reserved", [])
+        if s in reserved:
+            return s, f"{where}: namespace '{s}' is reserved ({', '.join(reserved)}); choose another, or leave the key out for pg-<instance>"
+        return s, None
     if t == "k8sName":
         return s, None if K8S_NAME.match(s) else f"{where}: '{s}' must be a Kubernetes object name (lowercase letters, digits, '-' and '.')"
     if t == "integer":

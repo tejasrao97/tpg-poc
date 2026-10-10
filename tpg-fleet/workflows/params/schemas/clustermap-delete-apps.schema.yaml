@@ -28,7 +28,7 @@ additionalProperties:
     instances:
       type: object
       minProperties: 0
-      description: The instances of the cluster (namespace pg-<instance>)
+      description: 'The instances of the cluster (namespace: the key namespace of tpg-day0 and tpg-create-instance, default pg-<instance>)'
       propertyNames:
         pattern: ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$
       additionalProperties:
@@ -54,7 +54,7 @@ additionalProperties:
             - false
             - 'true'
             - 'false'
-            description: 'As the input: delete the namespace (needs purgePvcs true) [Boolean; optional (default: the input purgeNamespace)]'
+            description: 'As the input: delete the namespace (needs purgePvcs true). Refused (NAMESPACE_SHARED) while another instance of clusters/fleet.yaml, or another Postgres, uses the namespace; tpg-delete-apps deletes a shared namespace after the last instance of the run, and with deleteOperator whoever else is there [Boolean; optional (default: the input purgeNamespace)]'
           finalBackup:
             enum:
             - 'true'

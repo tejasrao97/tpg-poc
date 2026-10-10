@@ -680,7 +680,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes{cluster=~\"$cluster\", namespace=~\"pg-($instance)\"}) / max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{cluster=~\"$cluster\", namespace=~\"pg-($instance)\"})",
+          "expr": "max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes{cluster=~\"$cluster\"} and on (cluster, namespace, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~\"$cluster\", postgres_instance=~\"$instance\"}))) / max by (cluster, namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{cluster=~\"$cluster\"} and on (cluster, namespace, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~\"$cluster\", postgres_instance=~\"$instance\"})))",
           "legendFormat": "{{cluster}} {{persistentvolumeclaim}}",
           "instant": true,
           "range": false
@@ -755,7 +755,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (cluster, namespace, pod) (rate(container_cpu_usage_seconds_total{cluster=~\"$cluster\", namespace=~\"pg-($instance)\", container!=\"\", container!=\"POD\"}[5m]))",
+          "expr": "sum by (cluster, namespace, pod) (rate(container_cpu_usage_seconds_total{cluster=~\"$cluster\", container!=\"\", container!=\"POD\"}[5m]) and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~\"$cluster\", postgres_instance=~\"$instance\"}))",
           "legendFormat": "{{cluster}}/{{pod}}",
           "instant": false,
           "range": true
@@ -791,7 +791,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (cluster, namespace, pod) (container_memory_working_set_bytes{cluster=~\"$cluster\", namespace=~\"pg-($instance)\", container!=\"\", container!=\"POD\"})",
+          "expr": "sum by (cluster, namespace, pod) (container_memory_working_set_bytes{cluster=~\"$cluster\", container!=\"\", container!=\"POD\"} and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~\"$cluster\", postgres_instance=~\"$instance\"}))",
           "legendFormat": "{{cluster}}/{{pod}}",
           "instant": false,
           "range": true
@@ -825,7 +825,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (cluster, namespace, pod) (increase(kube_pod_container_status_restarts_total{cluster=~\"$cluster\", namespace=~\"pg-($instance)\"}[1h]))",
+          "expr": "sum by (cluster, namespace, pod) (increase(kube_pod_container_status_restarts_total{cluster=~\"$cluster\"}[1h]) and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~\"$cluster\", postgres_instance=~\"$instance\"}))",
           "legendFormat": "{{cluster}}/{{pod}}",
           "instant": false,
           "range": true

@@ -1,10 +1,13 @@
 {{- /*
-Network policy of the instance namespace pg-<instance> (design decision D65),
-rendered only when network.policy is baseline (tpg-day0 and
-tpg-create-instance input networkPolicy, or tpg-network-policy).
+Network policy of the instance (design decision D65), rendered only when
+network.policy is baseline (tpg-day0 and tpg-create-instance input
+networkPolicy, or tpg-network-policy). Round 23: the policies are named after
+the instance and select the pods of the instance by the postgres-instance
+label the operator puts on them, because several instances may share a
+namespace; the namespace is the release namespace (default pg-<instance>).
 
-  NetworkPolicy tpg-ingress (every pod of the namespace): selecting the pods
-  makes ingress default deny; allowed are
+  NetworkPolicy tpg-ingress-<instance> (the pods of the instance): selecting the
+  pods makes ingress default deny; allowed are
     - the pods of this namespace (Patroni replication and REST API, pgBackRest)
     - the operator namespace (reconcilers, backups, upgrades)
     - the metrics port 9187 from network.monitoringNamespaces
@@ -14,7 +17,7 @@ tpg-create-instance input networkPolicy, or tpg-network-policy).
     - with FerretDB (ferret.enabled, D71): port 27017 from the same client
       rules, and from the health probe address when ferret.exposure is a load
       balancer
-  CiliumNetworkPolicy tpg-egress (every endpoint of the namespace): an egress
+  CiliumNetworkPolicy tpg-egress-<instance> (the endpoints of the instance): an egress
   section makes egress default deny; allowed are
     - the endpoints of this namespace and the operator namespace
     - DNS (kube-system kube-dns and AKS LocalDNS, UDP and TCP 53)
@@ -39,11 +42,13 @@ every source (F9).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: tpg-ingress
+  name: tpg-ingress-{{ $name }}
   labels:
     tpg.fleet/instance: {{ $name }}
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      postgres-instance: {{ $name }}
   policyTypes:
     - Ingress
   ingress:
@@ -87,16 +92,18 @@ spec:
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: tpg-egress
+  name: tpg-egress-{{ $name }}
   labels:
     tpg.fleet/instance: {{ $name }}
 spec:
-  endpointSelector: {}
+  endpointSelector:
+    matchLabels:
+      postgres-instance: {{ $name }}
   egress:
     # this namespace and the operator
     - toEndpoints:
         - matchLabels:
-            k8s:io.kubernetes.pod.namespace: pg-{{ $name }}
+            k8s:io.kubernetes.pod.namespace: {{ $.Release.Namespace }}
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ $n.operatorNamespace }}
     # DNS: CoreDNS, and AKS LocalDNS (169.254.10.0/24 and the host entity, as

@@ -146,8 +146,11 @@ tk() {
       printf ']}' ;;
     *"get postgresversion"*) return 0 ;;
     *" get postgres "*)
-      local ns="\${2#pg-}"
-      if [[ " \${S_RUNNING:-} " == *" \$ns "* ]]; then
+      # -n NAMESPACE get postgres INSTANCE: a running instance is in pg-<instance>, or in the
+      # namespace S_NSMAP gives it ("name=namespace" words, Round 23)
+      local ns="\$5" want m
+      want="pg-\$ns"; for m in \${S_NSMAP:-}; do [[ "\${m%%=*}" == "\$ns" ]] && want="\${m#*=}"; done
+      if [[ " \${S_RUNNING:-} " == *" \$ns "* && "\$2" == "\$want" ]]; then
         case "\$*" in *currentState*) printf 'Running' ;; *jsonpath*) printf 'postgres-17.6' ;; esac
         return 0
       fi
@@ -620,6 +623,138 @@ RC=0; P_PATCH_FILES="$PF_SCHED" P_FILTER=pairs P_INSTANCES='[new-db]' bash "$TMP
 jq -e '.[0].instances[] | select(.name == "new-db") | .backupMode == "operator" and .scheduledBackups == false' /tmp/inventory.json >/dev/null \
   && ok "12 discover writes the planned patch file of a new instance: its backup scheduler is seen" \
   || bad "12 discover materialize" "$(cat /tmp/inventory.json 2>/dev/null) $(cat "$TMP/out")"
+
+# ---- Round 23 phase 3: the instance namespace (locked decision 8)
+# default: a new instance is written with instance.namespace pg-<instance>; the declared orders-db
+# (no key) keeps its entry
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-db"].instance.namespace == "pg-new-db" and (.clusters.c1.instances["new-db"].instance | has("sharedSecretsOwner") | not)
+  and (.clusters.c1.instances["orders-db"].instance | has("namespace") | not)' /tmp/fleet.json >/dev/null \
+  && ok "23.3 namespace default: a new instance is written with instance.namespace pg-<instance> (and owns its Secrets); declared entries are not touched" \
+  || bad "ns default" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# clusterMap key namespace, in create mode and in tpg-day0
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    new-a: {postgresVersion: "17.6", highAvailability: false, namespace: team-db}
+    new-b: {postgresVersion: "17.6", highAvailability: false}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-a"].instance.namespace == "team-db" and .clusters.c1.instances["new-b"].instance.namespace == "pg-new-b"' /tmp/fleet.json >/dev/null \
+  && ok "23.3 clusterMap namespace: team-db is written as instance.namespace of that instance, the other keeps the default" \
+  || bad "ns clustermap" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_OPERATOR_VERSION=v4.5.0 P_CLUSTER_MAP='c1:
+  instances:
+    new-a: {postgresVersion: "17.6", highAvailability: false, namespace: team-db}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-a"].instance.namespace == "team-db"' /tmp/fleet.json >/dev/null \
+  && ok "23.3 tpg-day0 clusterMap namespace is written as well" || bad "ns day0" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# immutable: orders-db is declared in pg-orders-db; another namespace is refused, the same one (the
+# default spelled out) is not
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, namespace: other-ns}
+    new-a: {postgresVersion: "17.6", highAvailability: false}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "result.c1.orders-db|BLOCKED|NAMESPACE_IMMUTABLE" | grep -q "declared in namespace pg-orders-db on c1, the namespace key asks for other-ns" \
+  && jq -e '.clusters.c1.instances["orders-db"].instance | has("namespace") | not' /tmp/fleet.json >/dev/null \
+  && jq -e '.clusters.c1.instances["new-a"].instance.namespace == "pg-new-a"' /tmp/fleet.json >/dev/null \
+  && ok "23.3 create: a different namespace for a declared instance is BLOCKED NAMESPACE_IMMUTABLE and its entry is not changed; the other instance goes ahead" \
+  || bad "ns immutable create" "$(cat "$TMP/records") $(cat "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_OPERATOR_VERSION=v4.5.0 P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, namespace: other-ns}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "block.c1|BLOCKED|NAMESPACE_IMMUTABLE" | grep -q "the namespace of an instance cannot change" \
+  && ok "23.3 tpg-day0: a different namespace for a declared instance blocks the cluster (NAMESPACE_IMMUTABLE), fleet.yaml is not changed for it" \
+  || bad "ns immutable day0" "$(cat "$TMP/records") $(cat "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, namespace: pg-orders-db}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "result.c1.orders-db|SUCCEEDED|ALREADY_EXISTS" | grep -q . \
+  && ok "23.3 the namespace that equals the declared one (here the default spelled out) is not a change: ALREADY_EXISTS" \
+  || bad "ns same" "$(cat "$TMP/records") $(cat "$TMP/out")"
+# an instance whose entry names a namespace keeps it, and the live check looks there
+reset
+yq -i '.clusters.c1.instances["orders-db"].instance.namespace = "team-orders"' "$TMP/fleet.yaml"
+S_OPERATOR=ours S_RUNNING="orders-db" S_NSMAP="orders-db=team-orders" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "result.c1.orders-db|SUCCEEDED|ALREADY_EXISTS" | grep -q . \
+  && jq -e '.clusters.c1.instances["orders-db"].instance.namespace == "team-orders"' /tmp/fleet.json >/dev/null \
+  && ok "23.3 a declared instance in a custom namespace is found there (not in pg-<instance>) and keeps it" \
+  || bad "ns custom live" "$(cat "$TMP/records") $(cat "$TMP/out")"
+# (a reserved namespace or one that is not a DNS label is refused by the validate step, tests/cluster-map)
+# shared namespace: two new instances in one run share one owner; the first (by name) owns the Secrets
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    app-b: {postgresVersion: "17.6", highAvailability: false, namespace: shared}
+    app-a: {postgresVersion: "17.6", highAvailability: false, namespace: shared}
+    app-c: {postgresVersion: "17.6", highAvailability: false, namespace: shared}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances as $i
+  | ([$i["app-a"], $i["app-b"], $i["app-c"]] | map(.instance.namespace) | unique) == ["shared"]
+  and ($i["app-a"].instance | has("sharedSecretsOwner") | not)
+  and $i["app-b"].instance.sharedSecretsOwner == false and $i["app-c"].instance.sharedSecretsOwner == false' /tmp/fleet.json >/dev/null \
+  && ok "23.3 three new instances in one namespace: exactly one owner (app-a); the others get sharedSecretsOwner false" \
+  || bad "ns shared new" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# joining the namespace of a declared instance: the declared one stays the owner
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    aaa-first: {postgresVersion: "17.6", highAvailability: false, namespace: pg-orders-db}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["aaa-first"].instance | .namespace == "pg-orders-db" and .sharedSecretsOwner == false' /tmp/fleet.json >/dev/null \
+  && jq -e '.clusters.c1.instances["orders-db"].instance | has("sharedSecretsOwner") | not' /tmp/fleet.json >/dev/null \
+  && ok "23.3 a new instance that joins the namespace of a declared one gets sharedSecretsOwner false even when it sorts first; the declared owner is untouched" \
+  || bad "ns shared join" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# a namespace without an owner (every entry false): the planned instance becomes the owner
+reset
+yq -i '.clusters.c1.instances["orders-db"].instance.namespace = "shared" | .clusters.c1.instances["orders-db"].instance.sharedSecretsOwner = false' "$TMP/fleet.yaml"
+S_OPERATOR=ours S_RUNNING="orders-db" S_NSMAP="orders-db=shared" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    new-a: {postgresVersion: "17.6", highAvailability: false, namespace: shared}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-a"].instance | has("sharedSecretsOwner") | not' /tmp/fleet.json >/dev/null \
+  && jq -e '.clusters.c1.instances["orders-db"].instance.sharedSecretsOwner == false' /tmp/fleet.json >/dev/null \
+  && ok "23.3 a namespace whose entries are all non-owners gets an owner: the instance this run plans" \
+  || bad "ns shared no owner" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# the planned entries of a shared namespace render once (chart, real helm)
+fleetrender() {  # fleetrender INSTANCE -> the chart rendered from /tmp/fleet.json like instance_render does
+  yq -P '.' /tmp/fleet.json > "$REPO/clusters/fleet.yaml"
+  ( source "$TMP/prelude.sh"; instance_render "$REPO" c1 "$1" )
+}
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    app-a: {postgresVersion: "17.6", highAvailability: false, namespace: shared}
+    app-b: {postgresVersion: "17.6", highAvailability: false, namespace: shared}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+pair="$( { fleetrender app-a; printf '\n---\n'; fleetrender app-b; } 2>&1)"
+[[ -z "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | grep -E '^[A-Za-z]+/' | sort | uniq -d)" \
+   && "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | grep -c -E '^VaultStaticSecret/regsecret$')" == 1 \
+   && "$(yq -N 'select(.kind == "PostgresBackupLocation") | .spec.storage.azure.repoPath' <<<"$pair" | sort | paste -sd,)" == "/shared/app-a,/shared/app-b" ]] \
+  && ok "23.3 the planned pair renders in the namespace 'shared': distinct objects, one regsecret, repoPath /shared/<instance>" \
+  || bad "ns shared render" "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | sort | uniq -c) $(tail -3 <<<"$pair")"
+cp "$TMP/fleet.base.yaml" "$REPO/clusters/fleet.yaml"
+# discover records the namespace of every instance in the inventory
+reset
+yq -i '.clusters.c1.instances["orders-db"].instance.namespace = "team-orders"' "$TMP/fleet.yaml"
+RC=0; P_FILTER=none bash "$TMP/discover.sh" wf c1 > "$TMP/out" 2>&1 || RC=$?
+jq -e '.[0].instances[0] | .name == "orders-db" and .namespace == "team-orders"' /tmp/inventory.json >/dev/null \
+  && ok "23.3 discover: the inventory carries the namespace of each instance" || bad "ns inventory" "$(cat /tmp/inventory.json) $(cat "$TMP/out")"
+reset
+RC=0; P_FILTER=none bash "$TMP/discover.sh" wf c1 > "$TMP/out" 2>&1 || RC=$?
+jq -e '.[0].instances[0] | .name == "orders-db" and .namespace == "pg-orders-db"' /tmp/inventory.json >/dev/null \
+  && ok "23.3 discover: an entry without namespace is recorded as pg-<instance>" || bad "ns inventory default" "$(cat /tmp/inventory.json)"
 
 echo
 echo "day0-plan: ${PASS} passed, ${FAIL} failed"

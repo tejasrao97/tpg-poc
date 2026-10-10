@@ -6,6 +6,21 @@ cluster:
 
 instance:
   name: ""
+  # Namespace of the instance (Round 23). Written by tpg-day0 and tpg-create-instance
+  # (clusterMap key namespace) to clusters/fleet.yaml, immutable; empty means
+  # pg-<name>. The tpg-instances ApplicationSet deploys into it (destination.namespace)
+  # and the chart renders in it (.Release.Namespace); a value that differs from the
+  # release namespace fails the render. Instances may share a namespace
+  namespace: ""
+  # Who renders the objects of the namespace that two instances would both name the
+  # same: the ServiceAccount tpg-vso and the VaultStaticSecrets regsecret and
+  # backup-storage (templates/vault-secrets.yaml). true: this instance renders them;
+  # false: another instance of the namespace does. Exactly one instance per
+  # namespace is the owner. The workflows write it: tpg-day0 and tpg-create-instance
+  # give false to an instance that joins a namespace which has an owner, and
+  # tpg-delete-instance moves it to a remaining instance when the owner leaves. A
+  # values patch file cannot set it
+  sharedSecretsOwner: true
   postgresVersion: ""
   storageClassName: tpg-data-retain
   storageSize: 20Gi
@@ -114,10 +129,13 @@ registry:
 
 # Network policy of the instance namespace (design decision D65, tpg-network-policy).
 # policy none renders nothing. baseline renders
-#   NetworkPolicy tpg-ingress        default deny for ingress, then the flows the
-#                                    instance needs and the client rules below
-#   CiliumNetworkPolicy tpg-egress   default deny for egress, then the flows the
-#                                    instance needs and the egress rules below
+#   NetworkPolicy tpg-ingress-<instance>       default deny for ingress, then the flows the
+#                                              instance needs and the client rules below
+#   CiliumNetworkPolicy tpg-egress-<instance>  default deny for egress, then the flows the
+#                                              instance needs and the egress rules below
+# Both select the pods of their instance by the label postgres-instance=<instance>
+# (not every pod of the namespace), so instances that share a namespace each have
+# their own policy
 # An empty list or map renders no rule: an empty peer list would allow every
 # source (F9), so a rule exists only for a non-empty input.
 network:

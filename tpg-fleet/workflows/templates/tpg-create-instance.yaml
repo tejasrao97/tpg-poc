@@ -47,7 +47,7 @@ spec:
       description: "List: registered clusters that run the operator, in brackets, [aks-tpg-poc-01] (also with one value) (without clusterMap)"
       value: ""
     - name: instances
-      description: "List: new Postgres instances in brackets, [orders-db], created on every listed cluster, namespace pg-<instance> (without clusterMap)"
+      description: "List: new Postgres instances in brackets, [orders-db], created on every listed cluster, namespace pg-<instance> (the clusterMap key namespace sets another one; without clusterMap)"
       value: ""
     - name: clusterMap
       description: "Map (YAML or JSON): cluster -> {maxReadReplicas, instances: {instance -> {postgresVersion, highAvailability, readReplicas, storageSize, walStorageSize, storageClass, cpu, memory, backupSchedule, operatorFullSchedule, operatorIncrementalSchedule, backupEnableSSL, backupCaBundleFile, backupCaBundleVaultSecret, backupFullRetention, backupFullRetentionType, ferret, ferretReplicas, ferretReadOnlyReplicas, ferretExposure, ferretSecretName, ferretReadOnlySecretName, postgresOverlayFilePath (a list), postgresValuesOverlayFilePath, exposure, serviceAnnotations, readOnlyExposure, readOnlyServiceAnnotations, allowedSourceRanges, internalLoadBalancerSubnet, networkPolicy, ingressFromNamespaces, ingressFromPodLabels, ingressFromCidrs, egressToCidrs, egressToFqdns}}}; the inputs below are the defaults. Schema: workflows/params/schemas/clustermap-create-instance.schema.json"

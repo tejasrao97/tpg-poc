@@ -141,17 +141,19 @@ overrides_print() {
 echo "== helm lint / template (every instance of fleet.yaml and fleet.example.yaml, patch files included)"
 mkdir -p "$OUT/values" "$OUT/work"   # values/ and work/ are not manifests: kubeconform reads only $OUT/*.yaml
 render_failed=()   # every entry that does not render, named, before the script stops
+declare -A owners=()   # "<file> <cluster> <namespace>" -> how many instances render the shared Secrets (Round 23)
 for ff in clusters/fleet.yaml clusters/fleet.example.yaml; do
 for c in $(yq -r '.clusters | keys | .[]' "$ff"); do
   for i in $(C="$c" yq -r '.clusters[strenv(C)].instances // {} | keys | .[]' "$ff"); do
     values_for "$ff" "$c" "$i" | yq 'del(.patches) | del(.overlays)' > "$OUT/values/$c-$i.yaml"
     # the value files of the tpg-instances ApplicationSet: the fleet file carries the patch references (Round 14)
     set -- -f clusters/_template/cluster.yaml -f clusters/_template/instance.yaml -f "$ff" -f "$OUT/values/$c-$i.yaml"
-    if ! helm template "$i" helm_artifacts/instance/tpg-instance "$@" --namespace "pg-$i" > "$OUT/chart_${c}_${i}.yaml" 2> "$OUT/render.err"; then
+    ns="$(yq -r '.instance.namespace // ""' "$OUT/values/$c-$i.yaml")"; ns="${ns:-pg-$i}"   # Round 23: instance.namespace, default pg-<instance>
+    if ! helm template "$i" helm_artifacts/instance/tpg-instance "$@" --namespace "$ns" > "$OUT/chart_${c}_${i}.yaml" 2> "$OUT/render.err"; then
       render_failed+=("${ff}: ${c}/${i}: $(grep -v '^[[:space:]]*$' "$OUT/render.err" | tail -n 2 | tr '\n' ' ')")
       continue
     fi
-    helm lint helm_artifacts/instance/tpg-instance "$@" >/dev/null
+    helm lint helm_artifacts/instance/tpg-instance "$@" --namespace "$ns" >/dev/null
     overrides_print "$ff" "$c" "$i"
     # PostgresBackupLocation must not carry the two fields the CRD drops on
     # apply (spec.additionalParameters when empty, spec.storage.azure.forcePathStyle
@@ -164,9 +166,15 @@ for c in $(yq -r '.clusters | keys | .[]' "$ff"); do
       echo "the CRD drops both on apply and the Application never reaches Synced" >&2
       exit 1
     fi
-    echo "ok ${ff}: ${c}/${i}"
+    n="$(yq 'select(.kind == "VaultStaticSecret" and .metadata.name == "regsecret") | .metadata.name' "$OUT/chart_${c}_${i}.yaml" | grep -c . || true)"
+    owners["${ff} ${c} ${ns}"]=$(( ${owners["${ff} ${c} ${ns}"]:-0} + n ))
+    echo "ok ${ff}: ${c}/${i} (namespace ${ns})"
   done
 done
+done
+# the instances of one namespace render the shared Secrets once: the owner (instance.sharedSecretsOwner)
+for k in "${!owners[@]}"; do
+  [[ "${owners[$k]}" -eq 1 ]] || { echo "namespace '${k}': ${owners[$k]} instances render the shared Secrets (regsecret, backup-storage, tpg-vso), exactly one must (instance.sharedSecretsOwner false on the others)" >&2; exit 1; }
 done
 if [[ "${#render_failed[@]}" -gt 0 ]]; then
   echo "These fleet.yaml entries do not render, each with the chart's message. An entry with highAvailability" >&2
@@ -187,7 +195,7 @@ got="$(helm template orders-db helm_artifacts/instance/tpg-instance -f clusters/
   | yq 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number')"
 [[ "$got" == "6" ]] || { echo "values patch not merged: fullRetention is '${got}', expected 6" >&2; exit 1; }
 got="$(helm template billing-db helm_artifacts/instance/tpg-instance -f clusters/_template/cluster.yaml -f clusters/_template/instance.yaml \
-  -f clusters/fleet.example.yaml -f "$OUT/values/aks-tpg-poc-01-billing-db.yaml" --namespace pg-billing-db \
+  -f clusters/fleet.example.yaml -f "$OUT/values/aks-tpg-poc-01-billing-db.yaml" --namespace finance \
   | yq 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number')"
 [[ "$got" == "4" ]] || { echo "values overlay not merged: fullRetention is '${got}', expected 4" >&2; exit 1; }
 echo "ok postgres and values patch and overlay files (the current files of clusters/fleet.example.yaml)"
@@ -226,7 +234,7 @@ done
 if helm template i1 helm_artifacts/instance/tpg-instance "${base[@]}" --set instance.serviceType=LoadBalancer --namespace pg-i1 >/dev/null 2>&1; then
   echo "instance.serviceType must fail the render (replaced by instance.exposure)" >&2; exit 1
 fi
-echo "ok exposure, NetworkPolicy tpg-ingress, CiliumNetworkPolicy tpg-egress"
+echo "ok exposure, NetworkPolicy tpg-ingress-<instance>, CiliumNetworkPolicy tpg-egress-<instance>"
 
 echo "== chart: backup schedules and FerretDB (D70, D71)"
 # Detailed cases in tests/chart; here one render of both new kinds for kubeconform

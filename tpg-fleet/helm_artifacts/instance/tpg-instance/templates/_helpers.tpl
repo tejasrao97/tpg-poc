@@ -3,6 +3,20 @@
 {{- if not .Values.instance.postgresVersion }}{{ fail "instance.postgresVersion is required" }}{{ end -}}
 {{- if not .Values.backup.container }}{{ fail "backup.container is required" }}{{ end -}}
 {{- if hasKey .Values.instance "serviceType" }}{{ fail "instance.serviceType is replaced by instance.exposure (clusterIP, internalLoadBalancer or loadBalancer)" }}{{ end -}}
+{{- /* Round 23: the instance namespace. Argo CD deploys into instance.namespace (default pg-<instance>); a render in another namespace is a mistake in the values */ -}}
+{{- $ns := toString (default "" .Values.instance.namespace) -}}
+{{- if and $ns (ne $ns .Release.Namespace) }}{{ fail (printf "instance.namespace %q differs from the release namespace %q: render with --namespace %s (the tpg-instances ApplicationSet deploys into instance.namespace)" $ns .Release.Namespace $ns) }}{{ end -}}
+{{- if not (has (toString .Values.instance.sharedSecretsOwner) (list "true" "false")) }}{{ fail (printf "instance.sharedSecretsOwner %q must be true or false" (toString .Values.instance.sharedSecretsOwner)) }}{{ end -}}
+{{- end -}}
+
+{{- /*
+tpg.sharedSecretsOwner: "true" when this instance renders the objects of its namespace that two
+instances would both name the same (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and
+backup-storage), "false" otherwise (Round 23). Read from the chart values, not from the context
+the patch files are merged into: a patch file cannot move the ownership.
+*/ -}}
+{{- define "tpg.sharedSecretsOwner" -}}
+{{- ternary "false" "true" (eq (toString .Values.instance.sharedSecretsOwner) "false") -}}
 {{- end -}}
 
 {{- /*

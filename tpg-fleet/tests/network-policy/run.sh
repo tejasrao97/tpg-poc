@@ -60,6 +60,7 @@ appset_refresh() { :; }
 git_commit_push() { cp "\$1/clusters/fleet.yaml" "$TMP/pushed.yaml"; PUSHED_REVISION=abc123def456; }
 use_cluster() { CLUSTER="\$1"; }
 tk() {
+  case "\$*" in *" get postgres "*|*"--dry-run=server"*) printf '%s\n' "\$*" >> "$TMP/tk-calls" ;; esac
   case "\$*" in
     *"get crd ciliumnetworkpolicies.cilium.io"*) [[ "\${S_CILIUM:-yes}" == yes ]] ;;
     *"--dry-run=server"*)
@@ -76,7 +77,7 @@ tk() {
 PRELUDE
 sed "s#source /scripts/lib.sh#source $TMP/prelude.sh#" "$ROOT/workflows/scripts/network-policy.sh" > "$TMP/network-policy.sh"
 
-reset() { rm -rf "$TMP/work"; : > "$TMP/records"; : > "$TMP/dryrun.yaml"; rm -f "$TMP/pushed.yaml"; cp "$TMP/fleet.base.yaml" "$TMP/fleet.yaml"
+reset() { rm -rf "$TMP/work"; : > "$TMP/records"; : > "$TMP/dryrun.yaml"; : > "$TMP/tk-calls"; rm -f "$TMP/pushed.yaml"; cp "$TMP/fleet.base.yaml" "$TMP/fleet.yaml"
   unset S_CILIUM S_REJECT S_ACNS S_MISSING P_CLUSTER_MAP P_INGRESS_FROM_NAMESPACES P_INGRESS_FROM_POD_LABELS P_INGRESS_FROM_CIDRS \
     P_EGRESS_TO_CIDRS P_EGRESS_TO_FQDNS P_DRY_RUN; }
 inv() {  # inv JSON: discover output, [{name, instances: [names]}]
@@ -151,6 +152,31 @@ P_NP_MODE=apply P_PUSH_MODE=direct P_INGRESS_FROM_CIDRS='[10.1.2.3/16]' plan
 reset; inv '[{"name":"c1","instances":["orders-db"]}]'
 P_NP_MODE=apply P_PUSH_MODE=direct P_DRY_RUN=true P_INGRESS_FROM_NAMESPACES='[app]' plan
 rec "result.git|SUCCEEDED|DRY_RUN" | grep -q . && [[ ! -f "$TMP/pushed.yaml" ]] && ok "dryRun: planned and dry-run, nothing pushed" || bad "dry run" "$(cat "$TMP/records")"
+
+# ---- Round 23 phase 3: the namespace comes from fleet.yaml (instance.namespace), the policies are named
+# after the instance and select its pods by the postgres-instance label; instances may share a namespace
+reset; inv '[{"name":"c1","instances":["orders-db"]}]'
+yq -i '.clusters.c1.instances["orders-db"].instance.namespace = "team-db"' "$TMP/fleet.yaml"
+P_NP_MODE=apply P_PUSH_MODE=direct P_INGRESS_FROM_NAMESPACES='[app]' plan
+grep -q -- '^-n team-db get postgres orders-db' "$TMP/tk-calls" && grep -q -- '^-n team-db apply --dry-run=server' "$TMP/tk-calls" \
+  && ! grep -q -- '-n pg-orders-db' "$TMP/tk-calls" \
+  && ok "23.3 namespace: the instance is looked up and the policies are dry-run in instance.namespace (team-db), not pg-<instance>" \
+  || bad "namespace from fleet.yaml" "$(cat "$TMP/tk-calls") $OUT"
+grep -q 'name: tpg-ingress-orders-db' "$TMP/dryrun.yaml" && grep -q 'name: tpg-egress-orders-db' "$TMP/dryrun.yaml" \
+  && grep -q 'k8s:io.kubernetes.pod.namespace: team-db' "$TMP/dryrun.yaml" \
+  && [[ "$(yq 'select(.kind == "NetworkPolicy") | .spec.podSelector.matchLabels["postgres-instance"]' "$TMP/dryrun.yaml")" == "orders-db" ]] \
+  && ok "23.3 the rendered policies are tpg-ingress-orders-db and tpg-egress-orders-db, in team-db, selecting the pods of orders-db" \
+  || bad "namespace policies" "$(cat "$TMP/dryrun.yaml")"
+reset; inv '[{"name":"c1","instances":["orders-db","billing-db"]}]'
+yq -i '.clusters.c1.instances["orders-db"].instance.namespace = "team-db" | .clusters.c1.instances["billing-db"].instance.namespace = "team-db" | .clusters.c1.instances["billing-db"].instance.sharedSecretsOwner = false' "$TMP/fleet.yaml"
+P_NP_MODE=apply P_PUSH_MODE=direct P_INGRESS_FROM_NAMESPACES='[app]' plan
+[[ "$(yq -N 'select(.kind == "NetworkPolicy" or .kind == "CiliumNetworkPolicy") | .metadata.name' "$TMP/dryrun.yaml" | sort | paste -sd,)" == "tpg-egress-billing-db,tpg-egress-orders-db,tpg-ingress-billing-db,tpg-ingress-orders-db" ]] \
+  && ok "23.3 two instances in one namespace each get their own pair of policies" || bad "shared namespace policies" "$(yq -N '.metadata.name' "$TMP/dryrun.yaml")"
+reset; inv '[{"name":"c1","instances":["orders-db"]}]'
+yq -i '.clusters.c1.instances["orders-db"].instance.namespace = "team-db"' "$TMP/fleet.yaml"
+P_NP_MODE=apply P_PUSH_MODE=direct S_MISSING=orders-db plan
+rec "precheck.c1|PASSED" | grep -q . && ! rec "INSTANCE_NOT_FOUND" | grep -q . \
+  && ok "23.3 the Postgres object is found in team-db (S_MISSING names pg-orders-db only)" || bad "namespace found" "$(cat "$TMP/records")"
 
 echo
 echo "network-policy: ${PASS} passed, ${FAIL} failed"

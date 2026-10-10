@@ -286,20 +286,21 @@ patch_size_check() {  # patch_size_check CLUSTER INSTANCE: a volume of the rende
 }
 
 patch_dry_run() {  # patch_dry_run CLUSTER (use_cluster first): the after renders through the API server
-  local c="$1" i f docs dr
+  local c="$1" i f docs dr ns
   for i in $(jq -r '.instances[]' <<<"$PREP_PLAN"); do
     f="$WORK/render/after-${c}-${i}.yaml"
+    ns="$(instance_ns "$c" "$i")"
     [[ -s "$f" ]] || continue
     docs="$(yq 'select(.kind == "Postgres" or .kind == "PostgresBackupLocation"
                or .kind == "PostgresBackupSchedule" or .kind == "PostgresFerretDocumentDB")' "$f")"
     exposure_warning_rendered "$c" "$i" "$(cat "$f")"
     # FerretDB switched on by a values patch (D71): the documentdb extension is a manual step
     if yq -e 'select(.kind == "PostgresFerretDocumentDB") | .metadata.name' "$f" >/dev/null 2>&1 \
-       && ! tk -n "pg-${i}" get postgresferretdocumentdb "$i" >/dev/null 2>&1; then
+       && ! tk -n "$ns" get postgresferretdocumentdb "$i" >/dev/null 2>&1; then
       record_entry "warning.${c}.${i}.ferret" WARNING FERRET_EXTENSION_REQUIRED \
         "${i}: FerretDB (Tech Preview) needs the documentdb extension in the instance; prepare it by hand (Runbook, FerretDB) or the FerretDB proxies do not start"
     fi
-    if [[ -n "$docs" ]] && ! dr="$(tk -n "pg-${i}" apply --server-side --dry-run=server --field-manager="$ARGOCD_MANAGER" \
+    if [[ -n "$docs" ]] && ! dr="$(tk -n "$ns" apply --server-side --dry-run=server --field-manager="$ARGOCD_MANAGER" \
         --force-conflicts -f - <<<"$docs" 2>&1)"; then
       C_ERRS+=("${i}: the API server rejects the patched instance: $(tr '\n' ' ' <<<"$dr" | cut -c1-400)")
     fi
@@ -388,7 +389,7 @@ patch_diff() {
   : > "$WORK/diff-${c}.txt"
   for t in $(jq -r '.instances[]' <<<"$PREP_PLAN") $( [[ "$(jq -r '.operator' <<<"$PREP_PLAN")" == "true" ]] && echo operator); do
     before="$WORK/render/before-${c}-${t}.yaml"; after="$WORK/render/after-${c}-${t}.yaml"
-    if [[ "$t" == operator ]]; then app="tpg-${c}-operator"; ns="$OPERATOR_NS"; else app="tpg-${c}-${t}"; ns="pg-${t}"; fi
+    if [[ "$t" == operator ]]; then app="tpg-${c}-operator"; ns="$OPERATOR_NS"; else app="tpg-${c}-${t}"; ns="$(instance_ns "$c" "$t")"; fi
     [[ -f "$before" ]] || : > "$before"
     removed="$(patch_removed "$before" "$after")"
     list="$(patch_tracked_list "$after" "$app" "$ns" | patch_ignore_live "$ns")"

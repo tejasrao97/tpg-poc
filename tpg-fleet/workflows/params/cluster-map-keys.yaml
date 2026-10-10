@@ -17,7 +17,8 @@
 # "flag"). An unknown key fails the run with the closest known key.
 #
 # Adding a key is one entry here:
-#   type       string | name | boolean | integer | posint | quantity | enum |
+#   type       string | name | namespace (a DNS label of at most 63 characters; "reserved" lists the
+#              refused names) | boolean | integer | posint | quantity | enum |
 #              operatorVersion | postgresVersion |
 #              patchFile (one .yaml/.yml file, in brackets: [./a.yaml]; a path of the
 #                submitting machine, absolute or relative, whose contents come in
@@ -255,6 +256,17 @@ instance:
     workflows: {day0: optional, create-instance: optional}
     fleet: [.backup.enableSSL]
     format: boolean
+  namespace:
+    doc: "Round 23: the namespace of the instance, default pg-<instance>; written to clusters/fleet.yaml as instance.namespace and immutable (a different value for an instance that exists is refused). Instances may share a namespace: the first one owns the shared Secrets (regsecret, backup-storage, ServiceAccount tpg-vso), each has its own network policy selected by the postgres-instance label, and purgeNamespace is refused while another instance of the namespace remains. Reserved namespaces are refused. Every other workflow reads the namespace from clusters/fleet.yaml"
+    # chart value instance.namespace (templates/_helpers.tpl tpg.required); the tpg-instances
+    # ApplicationSet destination.namespace. The reserved list: the Kubernetes system
+    # namespaces, the namespaces of the platform components, and the operator namespace
+    # (OPERATOR_NS in workflows/scripts/lib.sh, chart value network.operatorNamespace)
+    type: namespace
+    reserved: [kube-system, kube-public, kube-node-lease, default, argocd, argo, vault, cert-manager, monitoring, tanzu-postgres-operator]
+    flag: ""
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.namespace]
   disableInitialBackup:
     doc: "Round 22: true writes the annotation sql.tanzu.vmware.com/skip-initial-backup: \"true\" on the new Postgres instance, so the operator takes no initial backup at creation; false (the default) leaves the operator's behaviour. Only new instances"
     # chart value instance.disableInitialBackup; templates/postgres.yaml writes the annotation only when true
@@ -362,7 +374,7 @@ instance:
     type: boolean
     workflows: {delete-instance: optional, delete-apps: optional}
   purgeNamespace:
-    doc: "As the input: delete the namespace (needs purgePvcs true)"
+    doc: "As the input: delete the namespace (needs purgePvcs true). Refused (NAMESPACE_SHARED) while another instance of clusters/fleet.yaml, or another Postgres, uses the namespace; tpg-delete-apps deletes a shared namespace after the last instance of the run, and with deleteOperator whoever else is there"
     type: boolean
     workflows: {delete-instance: optional, delete-apps: optional}
   finalBackup:

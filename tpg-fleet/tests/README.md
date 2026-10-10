@@ -25,6 +25,7 @@ tests/run-all.sh --against-cli   # also compare every flag with the installed CL
 | `chart/` | `helm_artifacts/instance/tpg-instance`: Service exposure and its Azure annotations, `instance.serviceType` refused, `caBundle` only with `enableSSL: true` (and required then), the network policy objects, no empty NetworkPolicy peer list, the `highAvailability` block (only for enabled with read replicas), zero defaults left out, PostgresBackupSchedule and PostgresFerretDocumentDB, the patch map shapes, a multi-document postgres file (one document per kind, an unknown kind refused), `backup.fullRetentionType`, and kubeconform against the CRD schemas | helm (skipped without it), python3 (PyYAML), yq |
 | `day0-plan/` | tpg-day0 and tpg-create-instance: the plan (`fleet-day0.sh`, the CA bundle placeholder), ownership from the Argo CD Application's resource list (`day0-precheck.sh`), `ORPHAN_CRD`, `OPERATOR_NOT_INSTALLED`, `HA_NODES_EXCEED_ZONES`, `AZURE_BACKUP_UNSUPPORTED`, the creation rules, `ALREADY_EXISTS`, `INSTANCE_EXISTS`, `fleet-commit.sh` (passed clusters only, `FLEET_CHANGED_DURING_RUN`), `blocked-gate.sh`, the upgrade guard for absent instances, the patch files of tpg-day0 and tpg-create-instance (combined per instance as `<instance>-postgres-<hash>.yaml`, committed by `fleet-commit.sh`, written by `discover.sh`, kept for a repeated run), the CA bundle from a file or from Vault, and `FLEET_ENTRY_INVALID` for a fleet entry written before Round 15 | helm (skipped without it), python3, jq, yq |
 | `network-policy/` | tpg-network-policy planning (`network-policy.sh plan`): `apply`, `update`, `remove`, clusterMap rules over the inputs, the postgresVersion guard, `CILIUM_NOT_AVAILABLE`, `DRY_RUN_REJECTED`, `ACNS_NOT_ENABLED`, `INSTANCE_NOT_FOUND`, invalid CIDRs, dry run | helm (skipped without it), python3, jq, yq |
+| `delete/` | `delete-instance.sh` and `delete-apps.sh` with instances that share a namespace (Round 23): the hand-over of the shared Secrets when the owner leaves (commit, sync of the successor, tracking annotation, then the entry and the Application go; one owner at every step), `NAMESPACE_SHARED` for `purgeNamespace`, the PVCs of one instance only, the namespace deleted after the last instance of a `tpg-delete-apps` run and with `deleteOperator` | helm (skipped without it), python3, jq, yq |
 | `submit/` | `scripts/submit/tpg-*.sh` through the numbered menus with stub `argo` and `kubectl`: type checks, optional inputs, map inputs, a pasted clusterMap, the kubectl fallback, Cancel, the tpg-scale-instance run kinds (scale, cap only), the patch files read and sent as `patchFiles`, the scripts run from any directory, through a link or with `TPG_FLEET_DIR` (Round 15, 1f), and `pack-patch-files.sh -o` reading the parameter file itself (2ii); Round 23: plain names typed at a prompt are sent bracketed (`[a, b]`, `[path]`), bracketed list inputs and clusterMap sequences are read by the pack helper, a comma string or `[repo: x.yaml]` is refused | python3, jq, yq |
 | `rotate/` | `workflows/scripts/rotate-write.sh`, the write step of tpg-rotate-credential, with stub `kubectl` and `curl` (the Vault API): a wrapped value checked and written without `_secretName`, and in no file, log line or record of the step; a value wrapped for another `secretName`; a used token (`WRAPPING_TOKEN_INVALID`); an unwrap that breaks off (curl's error, never the response); password length; a CA bundle from `caBundleFile` and an expired one; an unexpected exit still recorded | jq, python3, openssl |
 | `pgdata/` | `tools/pgdata/pgdata.py` against a throwaway local PostgreSQL (initdb on a free port): every command and format, and the refused input (types, identifiers, `--where`, writes through `--sql`) | PostgreSQL server binaries and psycopg 3 (skipped without them) |
@@ -356,6 +357,16 @@ sent to a stub `kubectl apply --dry-run=server` that can refuse them
 The apply phase (`network-policy.sh apply`: the sync, `archive_check`, the probe
 pods) needs a cluster with Cilium and is covered by the lab checks V48 to V50
 of the tpg-fleet README, not by this suite.
+
+## delete
+
+Runs `delete-instance.sh` and `delete-apps.sh` with the real `lib.sh`, `clustermap.py` and chart, and stubs
+for Git (a push writes `clusters/fleet.yaml` for the next clone), the Argo CD Applications and the target
+cluster. A stub sync renders the real chart of the Application from the pushed `fleet.yaml`; the Application
+whose chart renders the VaultStaticSecret `regsecret` becomes the one the tracking annotation names, as an
+apply by Argo CD would. The events file shows the order of commits, syncs, Application removals and
+deletes, so the hand-over order and the one-owner rule are assertions on it. The fleet has `app-a` (owner),
+`app-b` and `app-c` in the namespace `shared`, and `orders-db` in `pg-orders-db`.
 
 ## submit
 

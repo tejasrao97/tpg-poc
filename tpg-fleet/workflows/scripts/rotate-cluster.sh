@@ -3,9 +3,11 @@
 # Target side of a credential rotation: wait until the Vault Secrets Operator on
 # the cluster has written the new Vault value into every managed namespace, then
 # verify it. The expected value comes from Vault through Vault Agent (this pod).
-#   broadcom-registry: regsecret in tanzu-postgres-operator and every pg-* managed
-#                      namespace; then an image pull with the operator image
-#   backup-storage:    backup-storage in every pg-* managed namespace; then every
+#   broadcom-registry: regsecret in tanzu-postgres-operator and every managed instance
+#                      namespace (clusters/fleet.yaml instance.namespace, default
+#                      pg-<instance>; instances may share one); then an image pull with
+#                      the operator image
+#   backup-storage:    backup-storage in every managed instance namespace; then every
 #                      PostgresBackupLocation reconciles the new Secret version
 # Records result.<cluster> UPDATED | FAILED | SKIPPED. Exits 1 on FAILED.
 WF="$1"; C="$2"; TYPE="$3"
@@ -18,11 +20,14 @@ result_guard "$key"
 if ! use_cluster "$C" || ! tk get --raw=/readyz >/dev/null 2>&1; then
   record "$key" SKIPPED UNREACHABLE; exit 0
 fi
+# the namespaces of the instances declared for the cluster (Round 23: instance.namespace, not pg-<instance>)
+repo="$(instance_ns_repo)" || fail FLEET_UNREADABLE "the fleet repository could not be cloned to read the instance namespaces"
+FLEET_NS="$(for i in $(fleet_instances "$repo" "$C"); do instance_ns "$C" "$i"; echo; done | grep -v '^$' | sort -u)"
 mapfile -t NSS < <(tk get namespace -l tpg.fleet/managed=true -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
-  | grep -E '^(tanzu-postgres-operator|pg-.+)$' | sort | awk '$0 == "tanzu-postgres-operator" { print "0 " $0; next } { print "1 " $0 }' | sort | cut -d' ' -f2 || true)
+  | grep -Fx -f <(printf '%s\n' tanzu-postgres-operator "$FLEET_NS") | sort | awk '$0 == "tanzu-postgres-operator" { print "0 " $0; next } { print "1 " $0 }' | sort | cut -d' ' -f2 || true)
 [[ "${#NSS[@]}" -gt 0 ]] || { record "$key" SKIPPED NO_MANAGED_NAMESPACES; exit 0; }
 
-# check_namespaces SECRET JQ_EXPR WANT_SHA16 [pg-only]: wait for the Secret of every namespace to hold the Vault value.
+# check_namespaces SECRET JQ_EXPR WANT_SHA16 [instances-only]: wait for the Secret of every namespace to hold the Vault value.
 # Every namespace is checked (5 minutes each, stopping as soon as it matches); the ones that
 # never match are collected in NOT_SYNCED with their short checksums.
 NOT_SYNCED=""
@@ -30,7 +35,7 @@ check_namespaces() {
   local name="$1" expr="$2" want="$3" only="${4:-}" ns
   NOT_SYNCED=""
   for ns in "${NSS[@]}"; do
-    [[ "$only" != pg-only || "$ns" == pg-* ]] || continue
+    [[ "$only" != instances-only || "$ns" != tanzu-postgres-operator ]] || continue
     if ! wait_logged "${ns}/${name} holds the Vault value" 30 10 secret_matches "$ns" "$name" "$expr" "$want"; then
       NOT_SYNCED="${NOT_SYNCED:+${NOT_SYNCED}, }${ns}/${name} (live ${LIVE_SHA:0:8}, Vault ${want:0:8})"
     fi
@@ -86,12 +91,12 @@ case "$TYPE" in
   backup-storage)
     K="$(vault_secret backup-storage accountKey)" || fail NO_VAULT_SECRET backup-storage
     want="$(printf '%s' "$K" | sha16)"
-    log "the Vault value of tpg/shared/backup-storage (accountKey) has checksum ${want:0:8}; checking the pg-* namespaces of: ${NSS[*]}"
-    check_namespaces backup-storage '.data.accountKey | @base64d' "$want" pg-only \
+    log "the Vault value of tpg/shared/backup-storage (accountKey) has checksum ${want:0:8}; checking the instance namespaces of: ${NSS[*]}"
+    check_namespaces backup-storage '.data.accountKey | @base64d' "$want" instances-only \
       || fail SECRET_NOT_SYNCED "not synced after 5 minutes: ${NOT_SYNCED}"
     count=0
     for ns in "${NSS[@]}"; do
-      [[ "$ns" == pg-* ]] || continue
+      [[ "$ns" != tanzu-postgres-operator ]] || continue
       rv="$(tk -n "$ns" get secret backup-storage -o jsonpath='{.metadata.resourceVersion}')"
       for bl in $(tk -n "$ns" get postgresbackuplocation -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
         wait_logged "${ns}/${bl} picks up Secret resourceVersion ${rv}" 30 10 backup_location_current "$ns" "$bl" "$rv" \

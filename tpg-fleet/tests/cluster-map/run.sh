@@ -138,6 +138,54 @@ valid "day0: the list inputs without clusterMap stay valid"
 vp day0 P_CLUSTER_MAP='just words' P_PUSH_MODE=direct
 invalid "day0: a clusterMap that is not a mapping is refused" "clusterMap must be a mapping"
 
+# ---- Round 23 phase 3: the instance key namespace (day0 and create-instance only)
+for wf in day0 create-instance; do
+  OPV=''; [[ "$wf" != day0 ]] || OPV='  operatorVersion: v4.5.0'   # a cluster key of tpg-day0 only
+  vp "$wf" P_CLUSTER_MAP="aks-tpg-poc-01:
+${OPV}
+  instances:
+    orders-db: {postgresVersion: \"17.6\", highAvailability: true, namespace: team-orders}
+    billing-db: {postgresVersion: \"17.6\", highAvailability: false, namespace: team-orders}" P_PUSH_MODE=direct
+  valid "${wf}: key namespace is accepted, also the same one on two instances (a shared namespace)"
+  jq -e '.["aks-tpg-poc-01"].instances["orders-db"].namespace == "team-orders"' "$TMP/work/cmap.json" >/dev/null \
+    && ok "${wf}: the namespace is kept in the normalized map" || bad "${wf} namespace normalized" "$(cat "$TMP/work/cmap.json")"
+  for r in kube-system kube-public kube-node-lease default argocd argo vault cert-manager monitoring tanzu-postgres-operator; do
+    vp "$wf" P_CLUSTER_MAP="aks-tpg-poc-01:
+${OPV}
+  instances:
+    orders-db: {postgresVersion: \"17.6\", highAvailability: true, namespace: ${r}}" P_PUSH_MODE=direct
+    invalid "${wf}: reserved namespace ${r} is refused" "namespace '${r}' is reserved"
+  done
+  vp "$wf" P_CLUSTER_MAP="aks-tpg-poc-01:
+${OPV}
+  instances:
+    orders-db: {postgresVersion: \"17.6\", highAvailability: true, namespace: Team_Orders}" P_PUSH_MODE=direct
+  invalid "${wf}: a namespace that is not a lowercase DNS label is refused" "instances.orders-db.namespace: 'Team_Orders' must be a namespace name"
+  vp "$wf" P_CLUSTER_MAP="aks-tpg-poc-01:
+${OPV}
+  instances:
+    orders-db: {postgresVersion: \"17.6\", highAvailability: true, namespace: $(printf 'a%.0s' $(seq 1 64))}" P_PUSH_MODE=direct
+  invalid "${wf}: a namespace of 64 characters is refused (63 at most)" "must be a namespace name"
+  vp "$wf" P_CLUSTER_MAP="aks-tpg-poc-01:
+${OPV}
+  instances:
+    orders-db: {postgresVersion: \"17.6\", highAvailability: true, namespace: $(printf 'a%.0s' $(seq 1 63))}" P_PUSH_MODE=direct
+  valid "${wf}: a namespace of 63 characters is accepted"
+  vp "$wf" P_CLUSTER_MAP="aks-tpg-poc-01:
+${OPV}
+  instances:
+    orders-db: {postgresVersion: \"17.6\", highAvailability: true, namespace: [team-orders]}" P_PUSH_MODE=direct
+  invalid "${wf}: a list is not a namespace" "a single value is expected"
+done
+vp delete-instance P_CLUSTER_MAP='aks-tpg-poc-01:
+  instances:
+    orders-db: {namespace: team-orders}' P_CONFIRM='[aks-tpg-poc-01]' P_PUSH_MODE=direct
+invalid "delete-instance: namespace is not a key of it (the delete reads fleet.yaml)" "namespace: not used by tpg-delete-instance (used by tpg-day0, tpg-create-instance)"
+vp patch P_CLUSTER_MAP='aks-tpg-poc-01:
+  instances:
+    orders-db: {namespace: team-orders}' P_PUSH_MODE=direct
+invalid "patch: namespace is not a key of it" "namespace: not used by tpg-patch"
+
 # ---- CA bundle sources (Round 15, 3.i and 3.ii)
 vp day0 P_CLUSTER_MAP='aks-tpg-poc-01: {operatorVersion: v4.5.0, instances: {orders-db: {postgresVersion: "17.6", highAvailability: true, backupEnableSSL: true, backupCaBundleFile: [./ca.pem]}}}' P_PUSH_MODE=direct \
   P_PATCH_FILES="{\"./ca.pem\": \"$(printf 'x' | base64)\"}"

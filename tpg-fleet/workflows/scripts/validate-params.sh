@@ -794,7 +794,7 @@ case "$MODE" in
       err "mode=backup restores only inside the source namespace, and the default target is a new instance in its own namespace: set targetInstance=${P_INSTANCE} and confirm=${P_INSTANCE} (in place), or use time, latest, lsn or xid"
     fi
     if [[ -n "${P_TARGET_INSTANCE:-}" && "${P_TARGET_INSTANCE}" != "${P_INSTANCE:-}" && "${P_MODE:-}" == "backup" ]]; then
-      err "mode=backup restores only inside the source namespace (target namespace pg-${P_TARGET_INSTANCE}); use time, latest, lsn or xid"
+      err "mode=backup restores only inside the source namespace (a new target is created in its own namespace, pg-${P_TARGET_INSTANCE}); use time, latest, lsn or xid"
     fi
     if [[ "${P_TARGET_INSTANCE:-}" == "${P_INSTANCE:-}" && -n "${P_INSTANCE:-}" ]]; then
       [[ "${P_CONFIRM:-}" == "${P_INSTANCE}" ]] || err "an in-place restore overwrites ${P_INSTANCE}: set confirm=${P_INSTANCE}"
@@ -876,7 +876,7 @@ case "$MODE" in
           && { same_set confirm "$P_CONFIRM" clusters "${P_CLUSTERS:-}" || err "confirm must repeat the clusters value (${P_CLUSTERS:-})"; }
       fi
       need purgePvcs "${P_PURGE_PVCS:-}" "true deletes PVCs and Azure disks, false keeps them"
-      need purgeNamespace "${P_PURGE_NS:-}" "true deletes the pg-<instance> namespaces, false keeps them"
+      need purgeNamespace "${P_PURGE_NS:-}" "true deletes the instance namespaces (refused while another instance uses one), false keeps them"
       [[ "${P_PURGE_NS:-}" != "true" || "${P_PURGE_PVCS:-}" == "true" ]] || err "purgeNamespace=true needs purgePvcs=true"
     fi
     need dryRun "${P_DRY_RUN:-}" "true (plan only) or false"; [[ -z "${P_DRY_RUN:-}" ]] || bool dryRun "$P_DRY_RUN"

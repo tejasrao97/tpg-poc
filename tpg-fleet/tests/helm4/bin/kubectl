@@ -9,7 +9,9 @@ Cluster state comes from the JSON file in STUB_KUBECTL_STATE:
                       "availableReplicas": 1}],
      "statefulsets": [{"namespace": "vault", "name": "vault",
                        "image": "hashicorp/vault:1.18.0"}],
-     "secrets": [{"namespace": "monitoring", "name": "grafana-admin"}]}
+     "secrets": [{"namespace": "monitoring", "name": "grafana-admin"}],
+     "namespaces": ["pg-orders-db"],
+     "postgres": [{"namespace": "pg-orders-db", "name": "orders-db"}]}
 
 Anything not in the state is reported NotFound, with kubectl's wording, so the
 scripts take the same branch they take against a real cluster.
@@ -130,6 +132,21 @@ def main():
         items = st.get("statefulsets", [])
         print(json.dumps(_wrap(items, "StatefulSet")))
         return 0
+
+    if kind in ("namespace", "namespaces", "ns"):
+        # state "namespaces": the names that exist
+        if name in st.get("namespaces", []):
+            print("namespace/%s" % name)
+            return 0
+        notfound("namespaces", name or "")
+
+    if kind in ("postgres", "postgreses"):
+        # state "postgres": [{"namespace", "name"}]
+        for p in st.get("postgres", []):
+            if p["name"] == name and p["namespace"] == ns:
+                print("postgres.sql.tanzu.vmware.com/%s" % name)
+                return 0
+        notfound("postgres.sql.tanzu.vmware.com", name or "")
 
     if kind in ("secret", "secrets"):
         for s in st.get("secrets", []):
