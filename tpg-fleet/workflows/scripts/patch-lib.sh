@@ -42,18 +42,18 @@ ARGOCD_MANAGER="argocd-controller"
 patch_targets() {  # patch_targets CLUSTER INVENTORY_JSON -> the targets of the cluster (JSON)
   # {operator: null | {path, mode, clear},
   #  instances: [{name, postgres: null | {paths, mode, clear}, postgresValues: null | {path, mode, clear}}]}
-  # apply: the path inputs and clusterMap keys (paths: comma-separated);
+  # apply: the path inputs (bracketed lists) and clusterMap keys (paths: comma-separated, the internal form);
   # clear: clearKinds (instance key, cluster key, input), whose instance kinds clear
   # the instance's files and operatorValues the cluster's operator file (D82)
   local c="$1" inv="$2" op opm ock out i pg val m ik ca
   opm="$(cmap_cval "$c" patchMode "${P_PATCH_MODE:-apply}")"
-  ock="$(cmap_cval "$c" clearKinds "${P_CLEAR_KINDS:-}")"
+  ock="$(cmap_cval "$c" clearKinds "$(list_csv clearKinds "${P_CLEAR_KINDS:-}" --bare all)")"
   if [[ "$opm" == clear ]]; then
     op=""
     if [[ ",${ock// /}," == *",all,"* || ",${ock// /}," == *",operatorValues,"* ]]; then op="clear"; fi
     out="$(jq -cn --arg p "$op" '{operator: (if $p == "" then null else {path: "", mode: "clear"} end), instances: []}')"
   else
-    op="$(cmap_cval "$c" operatorValuesPatchFilePath "${P_OPERATOR_VALUES_PATCH:-}")"
+    op="$(cmap_cval "$c" operatorValuesPatchFilePath "$(file_item operatorValuesPatchFilePath "${P_OPERATOR_VALUES_PATCH:-}")")"
     out="$(jq -cn --arg p "$op" '{operator: (if $p == "" then null else {path: $p, mode: "apply"} end), instances: []}')"
   fi
   for i in $(jq -r --arg c "$c" '.[] | select(.name == $c) | .instances[].name' <<<"$inv"); do
@@ -67,8 +67,8 @@ patch_targets() {  # patch_targets CLUSTER INVENTORY_JSON -> the targets of the 
         postgres: (if $pg == "" then null else {paths: "", mode: "clear", clear: $pg} end),
         postgresValues: (if $v == "" then null else {path: "", mode: "clear"} end)}]' <<<"$out")"
     else
-      pg="$(cmap_ival "$c" "$i" postgresPatchFilePath "${P_POSTGRES_PATCH:-}")"
-      val="$(cmap_ival "$c" "$i" postgresValuesPatchFilePath "${P_VALUES_PATCH:-}")"
+      pg="$(cmap_ival "$c" "$i" postgresPatchFilePath "$(list_csv postgresPatchFilePath "${P_POSTGRES_PATCH:-}" --files)")"
+      val="$(cmap_ival "$c" "$i" postgresValuesPatchFilePath "$(file_item postgresValuesPatchFilePath "${P_VALUES_PATCH:-}")")"
       # a CA bundle source of the instance, its cluster or the inputs (Round 15, D86)
       ca="$(cmap_ival "$c" "$i" backupCaBundleFile)$(cmap_ival "$c" "$i" backupCaBundleVaultSecret)$(cmap_cval "$c" backupCaBundleFile)$(cmap_cval "$c" backupCaBundleVaultSecret)${P_BACKUP_CA_FILE:-}${P_BACKUP_CA_VAULT:-}"
       [[ -n "$pg$val$ca" ]] || continue

@@ -39,4 +39,4 @@ kubectl delete application tpg-aks-tpg-poc-01-orders-db -n argocd --cascade=fals
 kubectl rollout status deploy/argocd-server -n argocd -w=false
 
 # argo-submit-instanceid-flag (warning)
-argo submit --from workflowtemplate/tpg-day0 --instanceid tpg -p clusters=all
+argo submit --from workflowtemplate/tpg-day0 --instanceid tpg -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]'

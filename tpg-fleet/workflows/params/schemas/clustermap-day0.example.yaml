@@ -5,8 +5,8 @@
 aks-tpg-poc-01:
   operatorVersion: v4.5.0
   maxReadReplicas: 3
-  operatorValuesOverlayFilePath: ./operator-resources.yaml
-  # backupCaBundleFile: ./azure-ca.pem   # or this instead of backupCaBundleVaultSecret (one source per level)
+  operatorValuesOverlayFilePath: [./operator-resources.yaml]
+  # backupCaBundleFile: [./azure-ca.pem]   # or this instead of backupCaBundleVaultSecret (one source per level)
   backupCaBundleVaultSecret: azure-storage
   instances:
     orders-db:
@@ -29,12 +29,12 @@ aks-tpg-poc-01:
       ferretReadOnlySecretName: orders-db-read-only-user-db-secret
       backupEnableSSL: true
       disableInitialBackup: false
-      backupCaBundleFile: repo:ca-bundles/azure-storage.pem
+      backupCaBundleFile: ['repo:ca-bundles/azure-storage.pem']
       # backupCaBundleVaultSecret: azure-storage   # or this instead of backupCaBundleFile (one source per level)
       backupFullRetention: 4
       backupFullRetentionType: count
       postgresOverlayFilePath: [./orders-resources.yaml, 'repo:helm_artifacts/instance/tpg-instance/overlays/team-backup-schedule.yaml']
-      postgresValuesOverlayFilePath: ~/overlays/orders-values.yaml
+      postgresValuesOverlayFilePath: [~/overlays/orders-values.yaml]
       exposure: internalLoadBalancer
       serviceAnnotations: {service.beta.kubernetes.io/azure-dns-label-name: orders}
       readOnlyExposure: clusterIP

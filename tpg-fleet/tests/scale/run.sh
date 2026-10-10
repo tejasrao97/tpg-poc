@@ -88,7 +88,7 @@ pushed() { yq -r "$1" "$TMP/pushed.yaml" 2>/dev/null; }
 
 echo "== 1: maxReadReplicas alone"
 inventory c1:orders-db,billing-db c2:orders-db
-plan P_CLUSTERS=c1,c2 P_MAX_READ_REPLICAS=5 P_PUSH_MODE=direct
+plan P_CLUSTERS='[c1, c2]' P_MAX_READ_REPLICAS=5 P_PUSH_MODE=direct
 [[ "$(pushed '.clusters.c1.cluster.maxReadReplicas')" == 5 && "$(pushed '.clusters.c2.cluster.maxReadReplicas')" == 5 ]] \
   && ok "the cap is written for every selected cluster" || bad "the cap is written for every selected cluster" "$OUT"
 [[ "$(jq length "$TMP/items.json")" == 0 ]] && ok "no instance is synced" || bad "no instance is synced" "$(cat "$TMP/items.json")"
@@ -101,20 +101,20 @@ rec result.c2.maxReadReplicas | grep -q "SUCCEEDED||maxReadReplicas 4 -> 5" \
 
 echo "== 2: the same cap again"
 inventory c2:orders-db
-plan P_CLUSTERS=c2 P_MAX_READ_REPLICAS=4 P_PUSH_MODE=direct
+plan P_CLUSTERS='[c2]' P_MAX_READ_REPLICAS=4 P_PUSH_MODE=direct
 rec result.c2.maxReadReplicas | grep -q "ALREADY_AT_TARGET" && ok "an unchanged cap is ALREADY_AT_TARGET" || bad "an unchanged cap is ALREADY_AT_TARGET" "$(cat "$TMP/records")"
 rec result.git | grep -q NO_CHANGE && [[ ! -f "$TMP/pushed.yaml" ]] && ok "and nothing is pushed" || bad "and nothing is pushed"
 
 echo "== 3: a cap and a scale in one run"
 inventory c1:orders-db
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_REPLICAS=5 P_MAX_READ_REPLICAS=5 P_PUSH_MODE=direct
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_REPLICAS=5 P_MAX_READ_REPLICAS=5 P_PUSH_MODE=direct
 [[ "$(pushed '.clusters.c1.instances.orders-db.instance.highAvailability.readReplicas')" == 5 \
    && "$(pushed '.clusters.c1.cluster.maxReadReplicas')" == 5 ]] \
   && ok "replicas 5 is within the new cap and both are in one commit" || bad "replicas 5 is within the new cap" "$OUT"
 [[ "$(jq -c '[.[] | .cluster + "/" + .instance]' "$TMP/items.json")" == '["c1/orders-db"]' ]] \
   && ok "the instance is planned for the sync" || bad "the instance is planned for the sync" "$(cat "$TMP/items.json")"
 rec precheck.c1 | grep -q "PASSED||instances: orders-db" && ok "precheck.c1 PASSED for the rollout" || bad "precheck.c1 PASSED" "$(cat "$TMP/records")"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_REPLICAS=5 P_PUSH_MODE=direct
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_REPLICAS=5 P_PUSH_MODE=direct
 rec result.c1.orders-db | grep -q "OUT_OF_BOUNDS|replicas 5 > maxReadReplicas 3" \
   && ok "without the new cap the default 3 still bounds it" || bad "without the new cap the default 3 bounds it" "$(cat "$TMP/records")"
 
@@ -169,7 +169,7 @@ yq -e '.spec.arguments.parameters[] | select(.name == "rolloutMode") | .value ==
 
 echo "== 7: a failed batch: the targets it did not reach get their previous count back"
 inventory c1:orders-db c2:orders-db
-plan P_CLUSTERS=c1,c2 P_INSTANCES=orders-db P_REPLICAS=3 P_PUSH_MODE=direct
+plan P_CLUSTERS='[c1, c2]' P_INSTANCES='[orders-db]' P_REPLICAS=3 P_PUSH_MODE=direct
 rec plan.items | grep -q '"previousEnabled":true' && ok "the plan records the previous highAvailability of each target" \
   || bad "the plan records the previous highAvailability" "$(cat "$TMP/records")"
 printf 'result.c1.orders-db|FAILED|SYNC_REJECTED|stub\n' >> "$TMP/records"   # the canary failed, c2 never ran

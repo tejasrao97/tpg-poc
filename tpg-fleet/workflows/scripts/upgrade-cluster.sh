@@ -20,7 +20,8 @@ if ! cmap_set; then
   if [[ "$COMP" == "operator" ]]; then
     exec bash /scripts/operator-upgrade.sh "$WF" "$C" "$P_TARGET_VERSION" "$TIMEOUT"
   fi
-  exec bash /scripts/postgres-upgrade.sh "$WF" "$C" "$P_TARGET_VERSION" "$P_INSTANCES" "$TIMEOUT"
+  # the instances input is a bracketed list or all; postgres-upgrade.sh takes all or the internal comma form
+  exec bash /scripts/postgres-upgrade.sh "$WF" "$C" "$P_TARGET_VERSION" "$(list_csv instances "$P_INSTANCES" --bare all)" "$TIMEOUT"
 fi
 
 rc=0

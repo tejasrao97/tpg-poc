@@ -1637,7 +1637,7 @@ Then run the Day 0 pre-check (dry run: nothing is pushed or deployed):
 
 ```bash
 argo submit -n argo --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
   -p dryRun=true --watch
 ```

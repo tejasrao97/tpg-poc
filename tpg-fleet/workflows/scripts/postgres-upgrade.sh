@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # postgres-upgrade.sh WORKFLOW_NAME CLUSTER TARGET_VERSION INSTANCES TIMEOUT_SECONDS
 # tpg-upgrade component=postgres: upgrade Postgres instances on one cluster with
-# PostgresVersionUpgrade. INSTANCES is all or a comma-separated list.
+# PostgresVersionUpgrade. INSTANCES is all or a comma-separated list (internal form: upgrade-cluster.sh
+# turns the bracketed instances input into it).
 # With clusterMap, each instance's postgresVersion, preUpgradeBackup and
 # allowMajor come from the map; TARGET_VERSION (targetVersion, may be empty) and
 # the inputs are their defaults.

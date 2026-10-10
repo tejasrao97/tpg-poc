@@ -66,13 +66,13 @@ tpg-scale-instance: cluster is not an input of tpg-scale-instance. See docs/work
 
 | Type | Accepted values | Example |
 |---|---|---|
-| `List` | Comma-separated names (lowercase DNS labels). Where the table says so, `all` selects every registered cluster or every declared instance. `components` takes `auto`, or a list of `cert-manager`, `vso` and `monitoring` | `aks-tpg-poc-01,aks-tpg-poc-02`, `all` |
-| `String (file path)` | One file: a path of the machine that submits the run (absolute, `~/` or relative, `..` allowed), whose contents go in `patchFiles`, or `repo:<path>` in the fleet repository (Round 15). A patch file is `.yaml` or `.yml`, a CA bundle `.pem`, `.crt` or `.cer` | `./orders-backup.yaml`, `~/certs/azure.pem`, `repo:helm_artifacts/instance/tpg-instance/patches/team.yaml` |
-| `List (file paths)` | Comma-separated `String (file path)` values of `.yaml` or `.yml` files | `./orders.yaml, repo:helm_artifacts/instance/tpg-instance/patches/team.yaml` |
-| `List (kinds)` | Comma-separated patch kinds: `Postgres`, `PostgresBackupLocation`, `PostgresBackupSchedule`, `PostgresFerretDocumentDB`, `postgresValues`, `operatorValues`; or `all` alone | `PostgresBackupSchedule,postgresValues` |
+| `List` | A list in brackets of names (lowercase DNS labels), also with one value. Both YAML flow lists and JSON arrays are accepted: `[a, b]`, `["a","b"]`. A comma-separated string without brackets, an empty list `[]` and an empty element `[a, , b]` are refused, with the list syntax in the message. Where the table says so, the bare word `all` (never in brackets) selects every registered cluster or every declared instance. `components` takes the bare word `auto`, or a list of `cert-manager`, `vso` and `monitoring` | `[aks-tpg-poc-01]`, `[aks-tpg-poc-01, aks-tpg-poc-02]`, `all` |
+| `List (one file path)` | A list that holds exactly one file: a path of the machine that submits the run (absolute, `~/` or relative, `..` allowed), whose contents go in `patchFiles`, or `repo:<path>` in the fleet repository (Round 15). A patch file is `.yaml` or `.yml`, a CA bundle `.pem`, `.crt` or `.cer`. `repo: <path>` with a space after the colon fails with `repo:<file path> "check for white spaces in between"` | `[./orders-backup.yaml]`, `[~/certs/azure.pem]`, `[repo:ca-bundles/azure.pem]` |
+| `List (file paths)` | A list of `.yaml` or `.yml` files, each written as in `List (one file path)` | `[./orders.yaml, repo:helm_artifacts/instance/tpg-instance/patches/team.yaml]` |
+| `List (kinds)` | A list of patch kinds, or `all` alone (bare): `Postgres`, `PostgresBackupLocation`, `PostgresBackupSchedule`, `PostgresFerretDocumentDB`, `postgresValues`, `operatorValues` | `[PostgresBackupSchedule, postgresValues]`, `all` |
 | `String (Vault token)` | A Vault wrapping token, as `tpg-aks-infra/scripts/vault-secret.sh wrap` prints it | `hvs.CAESIJ...` |
-| `List (CIDRs)` | Comma-separated IPv4 or IPv6 networks with the host bits zero | `10.20.0.0/16,192.168.10.0/24` |
-| `List (host names)` | Comma-separated DNS names; `*.` in front matches every subdomain | `api.example.com,*.example.org` |
+| `List (CIDRs)` | A list of IPv4 or IPv6 networks with the host bits zero | `[10.20.0.0/16, 192.168.10.0/24]` |
+| `List (host names)` | A list of DNS names; `*.` in front matches every subdomain | `[api.example.com, *.example.org]` |
 | `String` | Any text | `alpine/k8s:1.35.8` |
 | `String (name)` | One lowercase DNS label (a Kubernetes object name for `backupName`, `ferretSecretName` and `ferretReadOnlySecretName`) | `orders-db` |
 | `String (cron)` | A cron schedule of 5 fields: minute, hour, day of month, month, day of week (UTC) | `0 0 * * 0` |
@@ -98,8 +98,8 @@ Inputs used by several workflows:
 | `dryRun` | `Boolean` | `true`: validate and record the plan; change nothing | day0, create-instance, upgrade, patch, scale, network-policy, delete-apps, helm-addons |
 | `rolloutMode` | `Enum` | `canary` (default): the wave-0 cluster alone, then the other waves in batches of `maxParallel`. `batches`: no canary, batches of `maxParallel` in wave order. `all`: every selected cluster in one batch | day0, create-instance, upgrade, patch, network-policy |
 
-- Put values that contain commas, spaces or JSON in single quotes.
-- `-p name=value` sets one input. `--parameter-file inputs.yaml` reads several from a file (examples in each section, for one cluster and for several with `clusterMap`). In a parameter file, quote `true`, `false` and numbers, and write `clusterMap` as a block (`clusterMap: |`). A `-p` after `--parameter-file` overrides the file (for example `-p dryRun=true`). Files of your machine that the parameter file names are packed into it with `scripts/submit/pack-patch-files.sh -o <parameter file>` (section 7).
+- Put values that contain brackets (every list: `-p 'clusters=[aks-tpg-poc-01]'`; the shell reads `[...]` as a file pattern), spaces or JSON in single quotes.
+- `-p name=value` sets one input. `--parameter-file inputs.yaml` reads several from a file (examples in each section, for one cluster and for several with `clusterMap`). In a parameter file, quote `true`, `false` and numbers, write every list input as a quoted string (`clusters: '[aks-tpg-poc-01, aks-tpg-poc-02]'`; a plain YAML sequence is not an input value), and write `clusterMap` as a block (`clusterMap: |`). A `-p` after `--parameter-file` overrides the file (for example `-p dryRun=true`). Files of your machine that the parameter file names are packed into it with `scripts/submit/pack-patch-files.sh -o <parameter file>` (section 7).
 - `--watch` follows the run in the terminal. Without it, the command prints the workflow name.
 - `--name` or `--generate-name` sets the workflow name, which is also the results ConfigMap `tpg-run-<name>`.
 - Every run ends with a report (exit handler). `argo logs @latest -c main | sed -n '/tpg run report/,$p'` prints it again. Warnings (section 19) have their own part of the report.
@@ -126,7 +126,7 @@ Inputs used by several workflows:
       <instance key>: <value>
 ```
 
-It is written as YAML or JSON. Values can be YAML booleans and numbers (`true`, `2`); a Postgres version written as a number (`16.10`) keeps its trailing zero. List values are YAML lists or comma-separated strings, map values are YAML or JSON maps of strings. A key set to `null`, or to an empty list or map, is refused: remove the key to use the default. The accepted keys are listed in `workflows/params/cluster-map-keys.yaml`; adding a key is one entry there. The `validate` step checks the whole map before anything changes:
+It is written as YAML or JSON. Values can be YAML booleans and numbers (`true`, `2`); a Postgres version written as a number (`16.10`) keeps its trailing zero. List values are YAML sequences, also with one value (`ingressFromNamespaces: [orders-app]`); a comma-separated string (`orders-app,reporting`) or a bare name is refused with the list syntax, and so is `[]`, an empty element (`[a, , b]`) and a file entry such as `repo: x.yaml` (YAML reads it as a mapping; it fails with `repo:<file path> "check for white spaces in between"`). A single-file key is a sequence of exactly one path (`[./ca.pem]`); `clearKinds` also takes the bare word `all`. Map values are YAML or JSON maps of strings. A key set to `null`, or to an empty list or map, is refused: remove the key to use the default. The accepted keys are listed in `workflows/params/cluster-map-keys.yaml`; adding a key is one entry there. The `validate` step checks the whole map before anything changes:
 
 - every cluster is registered, and every name is a DNS label;
 - every key exists and the workflow accepts it (an unknown key names the closest known one: `replica` gives "did you mean replicas?"; an invalid name shows a valid form: `orders_db` gives "for example orders-db"; an unregistered cluster names the closest registered one);
@@ -146,10 +146,10 @@ Cluster keys:
 |---|---|---|---|
 | `operatorVersion` | `String (version)` | day0 (required), upgrade | Operator chart version of the cluster. tpg-day0: required (the key or the input operatorVersion); tpg-upgrade: the version to upgrade this cluster to |
 | `maxReadReplicas` | `Integer` | day0, create-instance, scale | The cap on readReplicas of every instance of the cluster (clusters.<c>.cluster.maxReadReplicas, template default 3), 1 or more. tpg-scale-instance: the input maxReadReplicas is its default, and a cluster entry may carry it without instances (only the cap changes) |
-| `operatorValuesPatchFilePath` | `String (file path)` | patch | An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/patches/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0 |
-| `operatorValuesOverlayFilePath` | `String (file path)` | day0 | An operator values overlay file (Round 22; tpg-day0 only; was operatorValuesPatchFilePath): a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/overlays/<file>. Applied when the run installs the operator, recorded as clusters.<c>.operator.overlays.values; an operator that runs with another overlay is BLOCKED OVERLAY_USE_TPG_PATCH (use tpg-patch operatorValuesPatchFilePath, which stacks on top) |
+| `operatorValuesPatchFilePath` | `List (one file path)` | patch | An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/patches/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0 |
+| `operatorValuesOverlayFilePath` | `List (one file path)` | day0 | An operator values overlay file (Round 22; tpg-day0 only; was operatorValuesPatchFilePath): a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/overlays/<file>. Applied when the run installs the operator, recorded as clusters.<c>.operator.overlays.values; an operator that runs with another overlay is BLOCKED OVERLAY_USE_TPG_PATCH (use tpg-patch operatorValuesPatchFilePath, which stacks on top) |
 | `patchMode` | `Enum` | patch | apply or clear, for the operator file of this cluster and the default of its instances |
-| `backupCaBundleFile` | `String (file path)` | day0, create-instance, patch | The backup CA bundle of the cluster's instances with backupEnableSSL: a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Not together with backupCaBundleVaultSecret on this level; an instance key wins |
+| `backupCaBundleFile` | `List (one file path)` | day0, create-instance, patch | The backup CA bundle of the cluster's instances with backupEnableSSL: a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Not together with backupCaBundleVaultSecret on this level; an instance key wins |
 | `backupCaBundleVaultSecret` | `String (name)` | day0, create-instance, patch | The backup CA bundle from Vault tpg/ca-bundles/<name> (key caBundle; tpg-aks-infra scripts/vault-secret.sh ca put). Not together with backupCaBundleFile on this level; an instance key wins |
 | `clearKinds` | `List (kinds)` | patch | patchMode=clear: the kinds whose current file is removed. operatorValues clears the operator file of the cluster; instance kinds are the default of its instances |
 | `deleteOperator` | `Boolean` | delete-apps | true deletes the operator and its CRDs after the listed instances |
@@ -178,14 +178,14 @@ Instance keys:
 | `ferretReadOnlySecretName` | `String (name)` | day0, create-instance | FerretDB read-only connection Secret (default: <instance>-read-only-user-db-secret) |
 | `backupEnableSSL` | `Boolean` | day0, create-instance | Backups over HTTPS (spec.storage.azure.enableSSL); the CA bundle comes from backupCaBundleFile, backupCaBundleVaultSecret or ConfigMap tpg-settings backupCaBundle. Renamed from enableSSL in Round 15 |
 | `disableInitialBackup` | `Boolean` | day0, create-instance | Round 22: true writes the annotation sql.tanzu.vmware.com/skip-initial-backup: "true" on the new Postgres instance, so the operator takes no initial backup at creation; false (the default) leaves the operator's behaviour. Only new instances |
-| `backupCaBundleFile` | `String (file path)` | day0, create-instance, patch | The backup CA bundle of this instance (backupEnableSSL true): a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Wins over the cluster level and the inputs; not together with backupCaBundleVaultSecret |
+| `backupCaBundleFile` | `List (one file path)` | day0, create-instance, patch | The backup CA bundle of this instance (backupEnableSSL true): a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Wins over the cluster level and the inputs; not together with backupCaBundleVaultSecret |
 | `backupCaBundleVaultSecret` | `String (name)` | day0, create-instance, patch | The backup CA bundle of this instance from Vault tpg/ca-bundles/<name> (key caBundle). Wins over the cluster level and the inputs; not together with backupCaBundleFile |
 | `backupFullRetention` | `Integer` | day0, create-instance | Full backups the backup location keeps (retentionPolicy.fullRetention.number), 1 or more |
 | `backupFullRetentionType` | `Enum` | day0, create-instance | count: backupFullRetention is a number of full backups; time: a number of days |
 | `postgresPatchFilePath` | `List (file paths)` | patch | One or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined into one stored file helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml; the objects a run does not send are carried over from the current file. Applied on top of the overlay of tpg-day0 and tpg-create-instance |
 | `postgresOverlayFilePath` | `List (file paths)` | create-instance, day0 | Round 22 (tpg-day0, tpg-create-instance; was postgresPatchFilePath): one or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/overlays/<file>. Combined into one stored file helm_artifacts/instance/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, recorded as overlays.postgres.current and applied at the initial deployment |
-| `postgresValuesPatchFilePath` | `String (file path)` | patch | A tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/patches/<file>, stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay |
-| `postgresValuesOverlayFilePath` | `String (file path)` | create-instance, day0 | Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/overlays/<file>, stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current |
+| `postgresValuesPatchFilePath` | `List (one file path)` | patch | A tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/patches/<file>, stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay |
+| `postgresValuesOverlayFilePath` | `List (one file path)` | create-instance, day0 | Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/overlays/<file>, stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current |
 | `patchMode` | `Enum` | patch | apply or clear, for the patch files of this instance |
 | `clearKinds` | `List (kinds)` | patch | patchMode=clear: the kinds whose current file or documents are removed: Postgres, PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB, postgresValues, or all |
 | `backupType` | `Enum` | backup | As the backupType input |
@@ -219,98 +219,98 @@ map that uses every key in `clustermap-<workflow>.example.yaml`:
 
 ```text
 <cluster>:
-  operatorVersion                    String (version)     required (this key, or the input operatorVersion)
-  maxReadReplicas                    Integer              optional (default: the input maxReadReplicas)
-  operatorValuesOverlayFilePath      String (file path)   optional (default: the input operatorValuesOverlayFilePath)
-  backupCaBundleFile                 String (file path)   optional (the instance key, else the cluster key, else the inputs)
-  backupCaBundleVaultSecret          String (name)        optional (the instance key, else the cluster key, else the inputs)
-  instances:                                              at least one
+  operatorVersion                    String (version)      required (this key, or the input operatorVersion)
+  maxReadReplicas                    Integer               optional (default: the input maxReadReplicas)
+  operatorValuesOverlayFilePath      List (one file path)  optional (default: the input operatorValuesOverlayFilePath)
+  backupCaBundleFile                 List (one file path)  optional (the instance key, else the cluster key, else the inputs)
+  backupCaBundleVaultSecret          String (name)         optional (the instance key, else the cluster key, else the inputs)
+  instances:                                               at least one
     <instance>:
-      postgresVersion                String (version)     required (this key, or the input postgresVersion)
-      highAvailability               Boolean              required (this key, or the input highAvailability)
-      readReplicas                   Integer              optional (default: the input readReplicas)
-      storageSize                    String (quantity)    optional (default: the input storageSize)
-      walStorageSize                 String (quantity)    optional (default: the input walStorageSize)
-      storageClass                   String (name)        optional (default: the input storageClass)
-      cpu                            String (quantity)    optional (default: the input cpu)
-      memory                         String (quantity)    optional (default: the input memory)
-      backupSchedule                 Enum                 optional (default: the input backupSchedule)
-      operatorFullSchedule           String (cron)        optional (default: the input operatorFullSchedule)
-      operatorIncrementalSchedule    String (cron)        optional (default: the input operatorIncrementalSchedule)
-      ferret                         Boolean              optional (default: the input ferret)
-      ferretReplicas                 Integer              optional (default: the input ferretReplicas)
-      ferretReadOnlyReplicas         Integer              optional (default: the input ferretReadOnlyReplicas)
-      ferretExposure                 Enum                 optional (default: the input ferretExposure)
-      ferretSecretName               String (name)        optional (default: the input ferretSecretName)
-      ferretReadOnlySecretName       String (name)        optional (default: the input ferretReadOnlySecretName)
-      backupEnableSSL                Boolean              optional (default: the input backupEnableSSL)
-      disableInitialBackup           Boolean              optional (default: the input disableInitialBackup)
-      backupCaBundleFile             String (file path)   optional (the instance key, else the cluster key, else the inputs)
-      backupCaBundleVaultSecret      String (name)        optional (the instance key, else the cluster key, else the inputs)
-      backupFullRetention            Integer              optional (default: the input backupFullRetention)
-      backupFullRetentionType        Enum                 optional (default: the input backupFullRetentionType)
-      postgresOverlayFilePath        List (file paths)    optional (default: the input postgresOverlayFilePath)
-      postgresValuesOverlayFilePath  String (file path)   optional (default: the input postgresValuesOverlayFilePath)
-      exposure                       Enum                 optional (default: the input exposure)
-      serviceAnnotations             Map                  optional (default: the input serviceAnnotations)
-      readOnlyExposure               Enum                 optional (default: the input readOnlyExposure)
-      readOnlyServiceAnnotations     Map                  optional (default: the input readOnlyServiceAnnotations)
-      allowedSourceRanges            List (CIDRs)         optional (default: the input allowedSourceRanges)
-      internalLoadBalancerSubnet     String (Azure name)  optional (default: the input internalLoadBalancerSubnet)
-      networkPolicy                  Enum                 optional (default: the input networkPolicy)
-      ingressFromNamespaces          List                 optional (default: the input ingressFromNamespaces)
-      ingressFromPodLabels           Map                  optional (default: the input ingressFromPodLabels)
-      ingressFromCidrs               List (CIDRs)         optional (default: the input ingressFromCidrs)
-      egressToCidrs                  List (CIDRs)         optional (default: the input egressToCidrs)
-      egressToFqdns                  List (host names)    optional (default: the input egressToFqdns)
+      postgresVersion                String (version)      required (this key, or the input postgresVersion)
+      highAvailability               Boolean               required (this key, or the input highAvailability)
+      readReplicas                   Integer               optional (default: the input readReplicas)
+      storageSize                    String (quantity)     optional (default: the input storageSize)
+      walStorageSize                 String (quantity)     optional (default: the input walStorageSize)
+      storageClass                   String (name)         optional (default: the input storageClass)
+      cpu                            String (quantity)     optional (default: the input cpu)
+      memory                         String (quantity)     optional (default: the input memory)
+      backupSchedule                 Enum                  optional (default: the input backupSchedule)
+      operatorFullSchedule           String (cron)         optional (default: the input operatorFullSchedule)
+      operatorIncrementalSchedule    String (cron)         optional (default: the input operatorIncrementalSchedule)
+      ferret                         Boolean               optional (default: the input ferret)
+      ferretReplicas                 Integer               optional (default: the input ferretReplicas)
+      ferretReadOnlyReplicas         Integer               optional (default: the input ferretReadOnlyReplicas)
+      ferretExposure                 Enum                  optional (default: the input ferretExposure)
+      ferretSecretName               String (name)         optional (default: the input ferretSecretName)
+      ferretReadOnlySecretName       String (name)         optional (default: the input ferretReadOnlySecretName)
+      backupEnableSSL                Boolean               optional (default: the input backupEnableSSL)
+      disableInitialBackup           Boolean               optional (default: the input disableInitialBackup)
+      backupCaBundleFile             List (one file path)  optional (the instance key, else the cluster key, else the inputs)
+      backupCaBundleVaultSecret      String (name)         optional (the instance key, else the cluster key, else the inputs)
+      backupFullRetention            Integer               optional (default: the input backupFullRetention)
+      backupFullRetentionType        Enum                  optional (default: the input backupFullRetentionType)
+      postgresOverlayFilePath        List (file paths)     optional (default: the input postgresOverlayFilePath)
+      postgresValuesOverlayFilePath  List (one file path)  optional (default: the input postgresValuesOverlayFilePath)
+      exposure                       Enum                  optional (default: the input exposure)
+      serviceAnnotations             Map                   optional (default: the input serviceAnnotations)
+      readOnlyExposure               Enum                  optional (default: the input readOnlyExposure)
+      readOnlyServiceAnnotations     Map                   optional (default: the input readOnlyServiceAnnotations)
+      allowedSourceRanges            List (CIDRs)          optional (default: the input allowedSourceRanges)
+      internalLoadBalancerSubnet     String (Azure name)   optional (default: the input internalLoadBalancerSubnet)
+      networkPolicy                  Enum                  optional (default: the input networkPolicy)
+      ingressFromNamespaces          List                  optional (default: the input ingressFromNamespaces)
+      ingressFromPodLabels           Map                   optional (default: the input ingressFromPodLabels)
+      ingressFromCidrs               List (CIDRs)          optional (default: the input ingressFromCidrs)
+      egressToCidrs                  List (CIDRs)          optional (default: the input egressToCidrs)
+      egressToFqdns                  List (host names)     optional (default: the input egressToFqdns)
 ```
 
 `tpg-create-instance` (`clustermap-create-instance.schema.json`):
 
 ```text
 <cluster>:
-  maxReadReplicas                    Integer              optional (default: the input maxReadReplicas)
-  backupCaBundleFile                 String (file path)   optional (the instance key, else the cluster key, else the inputs)
-  backupCaBundleVaultSecret          String (name)        optional (the instance key, else the cluster key, else the inputs)
-  instances:                                              at least one
+  maxReadReplicas                    Integer               optional (default: the input maxReadReplicas)
+  backupCaBundleFile                 List (one file path)  optional (the instance key, else the cluster key, else the inputs)
+  backupCaBundleVaultSecret          String (name)         optional (the instance key, else the cluster key, else the inputs)
+  instances:                                               at least one
     <instance>:
-      postgresVersion                String (version)     required (this key, or the input postgresVersion)
-      highAvailability               Boolean              required (this key, or the input highAvailability)
-      readReplicas                   Integer              optional (default: the input readReplicas)
-      storageSize                    String (quantity)    optional (default: the input storageSize)
-      walStorageSize                 String (quantity)    optional (default: the input walStorageSize)
-      storageClass                   String (name)        optional (default: the input storageClass)
-      cpu                            String (quantity)    optional (default: the input cpu)
-      memory                         String (quantity)    optional (default: the input memory)
-      backupSchedule                 Enum                 optional (default: the input backupSchedule)
-      operatorFullSchedule           String (cron)        optional (default: the input operatorFullSchedule)
-      operatorIncrementalSchedule    String (cron)        optional (default: the input operatorIncrementalSchedule)
-      ferret                         Boolean              optional (default: the input ferret)
-      ferretReplicas                 Integer              optional (default: the input ferretReplicas)
-      ferretReadOnlyReplicas         Integer              optional (default: the input ferretReadOnlyReplicas)
-      ferretExposure                 Enum                 optional (default: the input ferretExposure)
-      ferretSecretName               String (name)        optional (default: the input ferretSecretName)
-      ferretReadOnlySecretName       String (name)        optional (default: the input ferretReadOnlySecretName)
-      backupEnableSSL                Boolean              optional (default: the input backupEnableSSL)
-      disableInitialBackup           Boolean              optional (default: the input disableInitialBackup)
-      backupCaBundleFile             String (file path)   optional (the instance key, else the cluster key, else the inputs)
-      backupCaBundleVaultSecret      String (name)        optional (the instance key, else the cluster key, else the inputs)
-      backupFullRetention            Integer              optional (default: the input backupFullRetention)
-      backupFullRetentionType        Enum                 optional (default: the input backupFullRetentionType)
-      postgresOverlayFilePath        List (file paths)    optional (default: the input postgresOverlayFilePath)
-      postgresValuesOverlayFilePath  String (file path)   optional (default: the input postgresValuesOverlayFilePath)
-      exposure                       Enum                 optional (default: the input exposure)
-      serviceAnnotations             Map                  optional (default: the input serviceAnnotations)
-      readOnlyExposure               Enum                 optional (default: the input readOnlyExposure)
-      readOnlyServiceAnnotations     Map                  optional (default: the input readOnlyServiceAnnotations)
-      allowedSourceRanges            List (CIDRs)         optional (default: the input allowedSourceRanges)
-      internalLoadBalancerSubnet     String (Azure name)  optional (default: the input internalLoadBalancerSubnet)
-      networkPolicy                  Enum                 optional (default: the input networkPolicy)
-      ingressFromNamespaces          List                 optional (default: the input ingressFromNamespaces)
-      ingressFromPodLabels           Map                  optional (default: the input ingressFromPodLabels)
-      ingressFromCidrs               List (CIDRs)         optional (default: the input ingressFromCidrs)
-      egressToCidrs                  List (CIDRs)         optional (default: the input egressToCidrs)
-      egressToFqdns                  List (host names)    optional (default: the input egressToFqdns)
+      postgresVersion                String (version)      required (this key, or the input postgresVersion)
+      highAvailability               Boolean               required (this key, or the input highAvailability)
+      readReplicas                   Integer               optional (default: the input readReplicas)
+      storageSize                    String (quantity)     optional (default: the input storageSize)
+      walStorageSize                 String (quantity)     optional (default: the input walStorageSize)
+      storageClass                   String (name)         optional (default: the input storageClass)
+      cpu                            String (quantity)     optional (default: the input cpu)
+      memory                         String (quantity)     optional (default: the input memory)
+      backupSchedule                 Enum                  optional (default: the input backupSchedule)
+      operatorFullSchedule           String (cron)         optional (default: the input operatorFullSchedule)
+      operatorIncrementalSchedule    String (cron)         optional (default: the input operatorIncrementalSchedule)
+      ferret                         Boolean               optional (default: the input ferret)
+      ferretReplicas                 Integer               optional (default: the input ferretReplicas)
+      ferretReadOnlyReplicas         Integer               optional (default: the input ferretReadOnlyReplicas)
+      ferretExposure                 Enum                  optional (default: the input ferretExposure)
+      ferretSecretName               String (name)         optional (default: the input ferretSecretName)
+      ferretReadOnlySecretName       String (name)         optional (default: the input ferretReadOnlySecretName)
+      backupEnableSSL                Boolean               optional (default: the input backupEnableSSL)
+      disableInitialBackup           Boolean               optional (default: the input disableInitialBackup)
+      backupCaBundleFile             List (one file path)  optional (the instance key, else the cluster key, else the inputs)
+      backupCaBundleVaultSecret      String (name)         optional (the instance key, else the cluster key, else the inputs)
+      backupFullRetention            Integer               optional (default: the input backupFullRetention)
+      backupFullRetentionType        Enum                  optional (default: the input backupFullRetentionType)
+      postgresOverlayFilePath        List (file paths)     optional (default: the input postgresOverlayFilePath)
+      postgresValuesOverlayFilePath  List (one file path)  optional (default: the input postgresValuesOverlayFilePath)
+      exposure                       Enum                  optional (default: the input exposure)
+      serviceAnnotations             Map                   optional (default: the input serviceAnnotations)
+      readOnlyExposure               Enum                  optional (default: the input readOnlyExposure)
+      readOnlyServiceAnnotations     Map                   optional (default: the input readOnlyServiceAnnotations)
+      allowedSourceRanges            List (CIDRs)          optional (default: the input allowedSourceRanges)
+      internalLoadBalancerSubnet     String (Azure name)   optional (default: the input internalLoadBalancerSubnet)
+      networkPolicy                  Enum                  optional (default: the input networkPolicy)
+      ingressFromNamespaces          List                  optional (default: the input ingressFromNamespaces)
+      ingressFromPodLabels           Map                   optional (default: the input ingressFromPodLabels)
+      ingressFromCidrs               List (CIDRs)          optional (default: the input ingressFromCidrs)
+      egressToCidrs                  List (CIDRs)          optional (default: the input egressToCidrs)
+      egressToFqdns                  List (host names)     optional (default: the input egressToFqdns)
 ```
 
 `tpg-upgrade` (`clustermap-upgrade.schema.json`):
@@ -329,20 +329,20 @@ map that uses every key in `clustermap-<workflow>.example.yaml`:
 
 ```text
 <cluster>:
-  operatorValuesPatchFilePath      String (file path)  optional (default: the input operatorValuesPatchFilePath)
-  patchMode                        Enum                optional (default: the input patchMode)
-  backupCaBundleFile               String (file path)  optional (the instance key, else the cluster key, else the inputs)
-  backupCaBundleVaultSecret        String (name)       optional (the instance key, else the cluster key, else the inputs)
-  clearKinds                       List (kinds)        optional (default: the input clearKinds)
+  operatorValuesPatchFilePath      List (one file path)  optional (default: the input operatorValuesPatchFilePath)
+  patchMode                        Enum                  optional (default: the input patchMode)
+  backupCaBundleFile               List (one file path)  optional (the instance key, else the cluster key, else the inputs)
+  backupCaBundleVaultSecret        String (name)         optional (the instance key, else the cluster key, else the inputs)
+  clearKinds                       List (kinds)          optional (default: the input clearKinds)
   instances:
     <instance>:
-      postgresVersion              String (version)    guard (skip an instance that runs another version)
-      backupCaBundleFile           String (file path)  optional (the instance key, else the cluster key, else the inputs)
-      backupCaBundleVaultSecret    String (name)       optional (the instance key, else the cluster key, else the inputs)
-      postgresPatchFilePath        List (file paths)   optional (default: the input postgresPatchFilePath)
-      postgresValuesPatchFilePath  String (file path)  optional (default: the input postgresValuesPatchFilePath)
-      patchMode                    Enum                optional (default: the input patchMode)
-      clearKinds                   List (kinds)        optional (default: the input clearKinds)
+      postgresVersion              String (version)      guard (skip an instance that runs another version)
+      backupCaBundleFile           List (one file path)  optional (the instance key, else the cluster key, else the inputs)
+      backupCaBundleVaultSecret    String (name)         optional (the instance key, else the cluster key, else the inputs)
+      postgresPatchFilePath        List (file paths)     optional (default: the input postgresPatchFilePath)
+      postgresValuesPatchFilePath  List (one file path)  optional (default: the input postgresValuesPatchFilePath)
+      patchMode                    Enum                  optional (default: the input patchMode)
+      clearKinds                   List (kinds)          optional (default: the input clearKinds)
 ```
 
 `tpg-backup` (`clustermap-backup.schema.json`):
@@ -462,13 +462,13 @@ The operator step waits until the Postgres CRDs are Established and the operator
 | `monitoringOption` | `Enum` | no | `tpg-settings` | Override: `none`, `azure`, `standalone` |
 | `backupEnableSSL` | `Boolean` | no | `false` | `enableSSL` of the instances' `PostgresBackupLocation`: `false` uses HTTP to Azure Blob (the storage account must accept HTTP, Terraform `backup_storage_https_only = false`); `true` uses HTTPS and writes a CA bundle as `caBundle` (the two inputs below, else `tpg-settings` `backupCaBundle` from Terraform) |
 | `disableInitialBackup` | `Boolean` | no | `false` | `true` writes the annotation `sql.tanzu.vmware.com/skip-initial-backup: "true"` on the new Postgres objects, so the operator takes no initial backup at creation (Round 22; the first backup then comes from the schedule or tpg-backup). Only new instances: a running instance is not changed. The 4.5 CRDs and documentation do not list this annotation: confirm in the lab that the operator honours it (HANDOFF, lab items) |
-| `backupCaBundleFile` | `String (file path)` | no | | `backupEnableSSL=true`: the CA bundle, a PEM file (`.pem`, `.crt`, `.cer`) of the submitting machine (its contents in `patchFiles`) or `repo:ca-bundles/<file>` in the fleet repository. Not with `backupCaBundleVaultSecret`; a `clusterMap` key of the instance or its cluster wins (section 14) |
+| `backupCaBundleFile` | `List (one file path)` | no | | `backupEnableSSL=true`: the CA bundle, a PEM file (`.pem`, `.crt`, `.cer`) of the submitting machine (its contents in `patchFiles`) or `repo:ca-bundles/<file>` in the fleet repository. Not with `backupCaBundleVaultSecret`; a `clusterMap` key of the instance or its cluster wins (section 14) |
 | `backupCaBundleVaultSecret` | `String (name)` | no | | `backupEnableSSL=true`: the CA bundle from Vault `tpg/ca-bundles/<name>` (key `caBundle`; `tpg-aks-infra/scripts/vault-secret.sh ca put`). Not with `backupCaBundleFile` (section 14) |
 | `backupFullRetention` | `Integer` | no | template (`4`) | Full backups the backup location keeps (`retentionPolicy.fullRetention.number`, applied by the operator), 1 or more |
 | `backupFullRetentionType` | `Enum` | no | template (`count`) | `count`: `backupFullRetention` is a number of full backups; `time`: a number of days. A change restarts the instances that use the backup location (operator 4.5 documentation) |
 | `postgresOverlayFilePath` | `List (file paths)` | no | | New instances (Round 22; was `postgresPatchFilePath`): files of `Postgres`, `PostgresBackupLocation`, `PostgresBackupSchedule` and `PostgresFerretDocumentDB` documents (section 7), paths of the submitting machine (absolute, `~/` or relative, contents in `patchFiles`) or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>`. An instance that already runs with other overlay files is `BLOCKED` `OVERLAY_USE_TPG_PATCH` |
-| `postgresValuesOverlayFilePath` | `String (file path)` | no | | New instances (Round 22; was `postgresValuesPatchFilePath`): a tpg-instance chart values file (section 7), a local path or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>` |
-| `operatorValuesOverlayFilePath` | `String (file path)` | no | | The operator values overlay (Round 22; was `operatorValuesPatchFilePath`), applied when the run installs the operator (a local path or `repo:helm_artifacts/operator/overlays/<file>`). A running operator with another file is `BLOCKED` `OVERLAY_USE_TPG_PATCH` |
+| `postgresValuesOverlayFilePath` | `List (one file path)` | no | | New instances (Round 22; was `postgresValuesPatchFilePath`): a tpg-instance chart values file (section 7), a local path or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>` |
+| `operatorValuesOverlayFilePath` | `List (one file path)` | no | | The operator values overlay (Round 22; was `operatorValuesPatchFilePath`), applied when the run installs the operator (a local path or `repo:helm_artifacts/operator/overlays/<file>`). A running operator with another file is `BLOCKED` `OVERLAY_USE_TPG_PATCH` |
 | `patchFiles` | `Map (JSON)` | no | | The contents of the local files the path inputs and `clusterMap` name, `{"<path as given>": "<base64>"}`. Written by `scripts/submit/pack-patch-files.sh -o <parameter file>` (section 7), never typed |
 | `exposure` | `Enum` | no | `clusterIP` | Read-write Service of each instance: `clusterIP` (inside the cluster), `internalLoadBalancer` (Azure internal load balancer, an IP of the cluster VNet) or `loadBalancer` (public IP) |
 | `serviceAnnotations` | `Map` | no | | Extra annotations of the read-write Service, for example `{service.beta.kubernetes.io/azure-dns-label-name: orders}` |
@@ -539,64 +539,64 @@ A blocked cluster keeps its `fleet.yaml` entry as it was; the other clusters go 
 ```bash
 # 1. Dry run on every registered cluster: validation, fleet.yaml diff, pre-check
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 \
   -p pushMode=direct -p dryRun=true --watch
 
 # 2. Deploy orders-db with HA and 2 read replicas on all clusters, direct push
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true -p readReplicas=2 \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true -p readReplicas=2 \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct --watch
 
 # 3. Two single-node instances on one new cluster, sized, reviewed through a pull request
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=aks-tpg-poc-04 -p instances=billing-db,reporting-db -p highAvailability=false \
+  -p 'clusters=[aks-tpg-poc-04]' -p 'instances=[billing-db, reporting-db]' -p highAvailability=false \
   -p operatorVersion=4.5.0 -p postgresVersion=17.6 \
   -p storageSize=100Gi -p walStorageSize=20Gi -p cpu=2 -p memory=8Gi \
   -p pushMode=pr -p prTimeoutSeconds=7200 --watch
 
 # 4. Lab instance excluded from scheduled backups; cert-manager already installed
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=aks-tpg-poc-03 -p instances=scratch-db -p highAvailability=false \
+  -p 'clusters=[aks-tpg-poc-03]' -p 'instances=[scratch-db]' -p highAvailability=false \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
   -p backupSchedule=none -p installAddons=false --watch
 
 # 5. Three batches of 3 clusters after the canary, longer sync timeout
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
   -p maxParallel=3 -p syncTimeoutSeconds=3600 --watch
 
 # 6. Every cluster at once (no canary), backups over HTTPS (caBundle from tpg-settings)
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
   -p rolloutMode=all -p backupEnableSSL=true --watch
 
 # 7. Internal load balancer in a subnet of the cluster VNet, open to one client range
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=aks-tpg-poc-01 -p instances=orders-db -p highAvailability=true \
+  -p 'clusters=[aks-tpg-poc-01]' -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
   -p exposure=internalLoadBalancer -p internalLoadBalancerSubnet=apps-subnet \
-  -p allowedSourceRanges=10.20.0.0/16 --watch
+  -p 'allowedSourceRanges=[10.20.0.0/16]' --watch
 
 # 8. Default-deny network policy: only pods of namespace orders-app reach the database
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=aks-tpg-poc-01 -p instances=orders-db -p highAvailability=true \
+  -p 'clusters=[aks-tpg-poc-01]' -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
-  -p networkPolicy=baseline -p ingressFromNamespaces=orders-app --watch
+  -p networkPolicy=baseline -p 'ingressFromNamespaces=[orders-app]' --watch
 
 # 9. Backups by the operator (full on Sunday 01:00 UTC, no incrementals) and FerretDB
 #    with one read-only proxy on an HA instance, behind an internal load balancer
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=aks-tpg-poc-01 -p instances=docs-db -p highAvailability=true -p readReplicas=1 \
+  -p 'clusters=[aks-tpg-poc-01]' -p 'instances=[docs-db]' -p highAvailability=true -p readReplicas=1 \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
   -p backupSchedule=operator -p operatorFullSchedule='0 1 * * 0' -p operatorIncrementalSchedule= \
   -p ferret=true -p ferretReadOnlyReplicas=1 -p ferretExposure=internalLoadBalancer --watch
 
 # 10. HTTPS backups with a CA bundle kept in Vault, 14 days of full backups
 argo submit --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
   -p backupEnableSSL=true -p backupCaBundleVaultSecret=azure-storage \
   -p backupFullRetention=14 -p backupFullRetentionType=time --watch
@@ -606,8 +606,8 @@ With a parameter file:
 
 ```yaml
 # day0-orders.yaml
-clusters: aks-tpg-poc-01,aks-tpg-poc-02,aks-tpg-poc-03
-instances: orders-db
+clusters: '[aks-tpg-poc-01, aks-tpg-poc-02, aks-tpg-poc-03]'
+instances: '[orders-db]'
 highAvailability: "true"
 readReplicas: "1"
 operatorVersion: v4.5.0
@@ -659,20 +659,20 @@ backupEnableSSL: "true"
 backupCaBundleVaultSecret: azure-storage          # default of every cluster below
 clusterMap: |
   aks-tpg-poc-01:
-    operatorValuesOverlayFilePath: ./operator/resources.yaml
+    operatorValuesOverlayFilePath: [./operator/resources.yaml]
     instances:
       orders-db:
         postgresOverlayFilePath: [./orders/postgres.yaml, ./orders/backup-schedule.yaml]
-        postgresValuesOverlayFilePath: ./orders/values.yaml
+        postgresValuesOverlayFilePath: [./orders/values.yaml]
         backupSchedule: operator
   aks-tpg-poc-02:
-    backupCaBundleFile: repo:ca-bundles/azure-storage-2026.pem   # this cluster: a bundle from Git
+    backupCaBundleFile: [repo:ca-bundles/azure-storage-2026.pem]   # this cluster: a bundle from Git
     instances:
       orders-db:
-        postgresOverlayFilePath: repo:helm_artifacts/instance/tpg-instance/overlays/team-orders-postgres.yaml
+        postgresOverlayFilePath: [repo:helm_artifacts/instance/tpg-instance/overlays/team-orders-postgres.yaml]
       billing-db:
         highAvailability: false
-        postgresValuesOverlayFilePath: ~/overlays/billing-values.yaml
+        postgresValuesOverlayFilePath: [~/overlays/billing-values.yaml]
   aks-tpg-poc-03:
     instances:
       orders-db: {}
@@ -706,7 +706,7 @@ Adds Postgres instances to clusters that already run the fleet's operator (deplo
 | `operatorFullSchedule`, `operatorIncrementalSchedule` | `String (cron)` | no | `0 0 * * 0`, `0 0 * * 1-6` | As tpg-day0 |
 | `backupEnableSSL` | `Boolean` | no | `false` | As tpg-day0; `true` writes a CA bundle as `caBundle` |
 | `disableInitialBackup` | `Boolean` | no | `false` | As tpg-day0 |
-| `backupCaBundleFile` | `String (file path)` | no | | As tpg-day0: the CA bundle as a PEM file (section 14) |
+| `backupCaBundleFile` | `List (one file path)` | no | | As tpg-day0: the CA bundle as a PEM file (section 14) |
 | `backupCaBundleVaultSecret` | `String (name)` | no | | As tpg-day0: the CA bundle from Vault `tpg/ca-bundles/<name>` (section 14) |
 | `backupFullRetention` | `Integer` | no | template (`4`) | As tpg-day0 |
 | `backupFullRetentionType` | `Enum` | no | template (`count`) | As tpg-day0: `count` or `time` |
@@ -724,7 +724,7 @@ Adds Postgres instances to clusters that already run the fleet's operator (deplo
 | `ferretExposure` | `Enum` | no | `clusterIP` | As tpg-day0 |
 | `ferretSecretName`, `ferretReadOnlySecretName` | `String (name)` | no | | As tpg-day0 |
 | `postgresOverlayFilePath` | `List (file paths)` | no | | Files of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, merged into the new instance's objects (creation rules below; section 7). Renamed from `postgresPatchFilePath` in Round 22; local paths or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>` |
-| `postgresValuesOverlayFilePath` | `String (file path)` | no | | A tpg-instance chart values file. Renamed from `postgresValuesPatchFilePath` in Round 22; a local path or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>` |
+| `postgresValuesOverlayFilePath` | `List (one file path)` | no | | A tpg-instance chart values file. Renamed from `postgresValuesPatchFilePath` in Round 22; a local path or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>` |
 | `patchFiles` | `Map (JSON)` | with a local file | | The contents of the local files, `{"<path as given>": "<base64>"}`: `scripts/submit/pack-patch-files.sh -o <parameter file>` writes it into the parameter file, `scripts/submit/tpg-create-instance.sh` fills it |
 | `maxParallel` | `Integer` | no | `2` | Clusters per batch after the canary |
 | `rolloutMode` | `Enum` | no | `canary` | `canary`, `batches` or `all` (section 2) |
@@ -764,20 +764,20 @@ An instance that is declared in `fleet.yaml` but absent on the cluster (for exam
 ```bash
 # 1. Dry run: a single-node instance on two clusters
 argo submit --from workflowtemplate/tpg-create-instance \
-  -p clusters=aks-tpg-poc-01,aks-tpg-poc-02 -p instances=reports-db \
+  -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'instances=[reports-db]' \
   -p highAvailability=false -p postgresVersion=postgres-17.6 -p pushMode=direct -p dryRun=true --watch
 
 # 2. An HA instance behind an internal load balancer, with its own resources and
 #    backup location patches (run from the directory that holds the two files)
 cat > audit.yaml <<'YAML'
-clusters: aks-tpg-poc-01
-instances: audit-db
+clusters: '[aks-tpg-poc-01]'
+instances: '[audit-db]'
 highAvailability: "true"
 readReplicas: "1"
 postgresVersion: postgres-17.6
 exposure: internalLoadBalancer
-allowedSourceRanges: 10.20.0.0/16
-postgresOverlayFilePath: ./audit-resources.yaml, ./audit-backup-location.yaml
+allowedSourceRanges: '[10.20.0.0/16]'
+postgresOverlayFilePath: '[./audit-resources.yaml, ./audit-backup-location.yaml]'
 pushMode: pr
 YAML
 ~/src/tpg-fleet/scripts/submit/pack-patch-files.sh -o audit.yaml
@@ -822,11 +822,11 @@ clusterMap: |
       audit-db:
         postgresOverlayFilePath: [./audit/postgres.yaml, repo:helm_artifacts/instance/tpg-instance/overlays/team-backup-location.yaml]
         backupEnableSSL: true
-        backupCaBundleFile: ./certs/azure-storage.pem
+        backupCaBundleFile: [./certs/azure-storage.pem]
   aks-tpg-poc-02:
     instances:
       audit-db:
-        postgresValuesOverlayFilePath: ./audit/values-small.yaml
+        postgresValuesOverlayFilePath: [./audit/values-small.yaml]
         highAvailability: false
 ```
 
@@ -878,11 +878,11 @@ argo submit --from workflowtemplate/tpg-upgrade \
 
 # 2. Operator: canary cluster only, through a pull request
 argo submit --from workflowtemplate/tpg-upgrade \
-  -p component=operator -p targetVersion=v4.5.1 -p clusters=aks-tpg-poc-01 -p pushMode=pr --watch
+  -p component=operator -p targetVersion=v4.5.1 -p 'clusters=[aks-tpg-poc-01]' -p pushMode=pr --watch
 
 # 3. Operator: remaining clusters two at a time, without pre-upgrade backups
 argo submit --from workflowtemplate/tpg-upgrade \
-  -p component=operator -p targetVersion=v4.5.1 -p clusters=aks-tpg-poc-02,aks-tpg-poc-03 \
+  -p component=operator -p targetVersion=v4.5.1 -p 'clusters=[aks-tpg-poc-02, aks-tpg-poc-03]' \
   -p pushMode=direct -p maxParallel=2 -p preUpgradeBackup=false --watch
 
 # 4. Postgres minor upgrade of every instance on every cluster
@@ -892,14 +892,14 @@ argo submit --from workflowtemplate/tpg-upgrade \
 
 # 5. Postgres major upgrade of orders-db, with approval between batches
 argo submit --from workflowtemplate/tpg-upgrade \
-  -p component=postgres -p targetVersion=postgres-17.6 -p clusters=all -p instances=orders-db \
+  -p component=postgres -p targetVersion=postgres-17.6 -p clusters=all -p 'instances=[orders-db]' \
   -p allowMajor=true -p pushMode=pr -p timeoutSeconds=7200 --watch
 argo resume @latest          # approve the next batch after checking the canary
 
 # 6. Postgres minor upgrade of two instances on one cluster
 argo submit --from workflowtemplate/tpg-upgrade \
-  -p component=postgres -p targetVersion=17.7 -p clusters=aks-tpg-poc-02 \
-  -p instances='orders-db,billing-db' -p pushMode=direct --watch
+  -p component=postgres -p targetVersion=17.7 -p 'clusters=[aks-tpg-poc-02]' \
+  -p 'instances=[orders-db, billing-db]' -p pushMode=direct --watch
 ```
 
 Different versions per cluster and instance, with `clusterMap`:
@@ -990,9 +990,9 @@ Only `current` is applied, so a new values or operator file must hold every over
 | `instances` | `List` | with an instance patch file, CA bundle source or instance kind in `clearKinds`, without `clusterMap` | | Instances or `all`, on every selected cluster |
 | `clusterMap` | `Map` | no | | Targets, with the patch file keys, `patchMode`, `clearKinds` and the CA bundle keys per cluster and per instance (section 3) |
 | `postgresPatchFilePath` | `List (file paths)` | one patch file input, CA bundle source or map key (`patchMode=apply`) | | Postgres patch files for every selected instance: local paths or `repo:helm_artifacts/instance/tpg-instance/patches/<file>` |
-| `postgresValuesPatchFilePath` | `String (file path)` | as above | | A values patch file for every selected instance |
-| `operatorValuesPatchFilePath` | `String (file path)` | as above | | An operator values file for every selected cluster (local, or `repo:helm_artifacts/operator/patches/<file>`) |
-| `backupCaBundleFile` | `String (file path)` | no | | The CA bundle of the selected `enableSSL` instances: a PEM file of your machine or `repo:ca-bundles/<file>` (section 14) |
+| `postgresValuesPatchFilePath` | `List (one file path)` | as above | | A values patch file for every selected instance |
+| `operatorValuesPatchFilePath` | `List (one file path)` | as above | | An operator values file for every selected cluster (local, or `repo:helm_artifacts/operator/patches/<file>`) |
+| `backupCaBundleFile` | `List (one file path)` | no | | The CA bundle of the selected `enableSSL` instances: a PEM file of your machine or `repo:ca-bundles/<file>` (section 14) |
 | `backupCaBundleVaultSecret` | `String (name)` | no | | The CA bundle from Vault `tpg/ca-bundles/<name>`; not with `backupCaBundleFile` |
 | `patchFiles` | `Map (JSON)` | with a local file | | The contents of the local files: `{"<path as given>": "<base64>"}`, written by `pack-patch-files.sh -o` or the submit script |
 | `patchMode` | `Enum` | no | `apply` | `apply`: the files become the current patches. `clear`: `clearKinds` are removed |
@@ -1061,8 +1061,8 @@ PACK=~/src/tpg-fleet/scripts/submit/pack-patch-files.sh   # the helper of your t
 # 1. Dry run: the two documents above for orders-db on every cluster (prints the diff per cluster)
 cat > orders.yaml <<'YAML'
 clusters: all
-instances: orders-db
-postgresPatchFilePath: ./orders/postgres.yaml
+instances: '[orders-db]'
+postgresPatchFilePath: '[./orders/postgres.yaml]'
 pushMode: pr
 YAML
 $PACK -o orders.yaml
@@ -1074,14 +1074,14 @@ argo submit -n argo --from workflowtemplate/tpg-patch --parameter-file orders.ya
 
 # 3. A schedule patch kept in the fleet repository, for two instances (nothing to pack)
 argo submit -n argo --from workflowtemplate/tpg-patch \
-  -p clusters=aks-tpg-poc-02 -p instances=orders-db,billing-db \
-  -p postgresPatchFilePath=repo:helm_artifacts/instance/tpg-instance/patches/team-weekly-full-backup.yaml \
+  -p 'clusters=[aks-tpg-poc-02]' -p 'instances=[orders-db, billing-db]' \
+  -p 'postgresPatchFilePath=[repo:helm_artifacts/instance/tpg-instance/patches/team-weekly-full-backup.yaml]' \
   -p pushMode=direct --watch
 
 # 4. Operator resources on two clusters, from a file in your home directory
 cat > operator.yaml <<'YAML'
-clusters: aks-tpg-poc-01,aks-tpg-poc-02
-operatorValuesPatchFilePath: ~/patches/operator-resources.yaml
+clusters: '[aks-tpg-poc-01, aks-tpg-poc-02]'
+operatorValuesPatchFilePath: '[~/patches/operator-resources.yaml]'
 pushMode: pr
 YAML
 $PACK -o operator.yaml
@@ -1089,13 +1089,13 @@ argo submit -n argo --from workflowtemplate/tpg-patch --parameter-file operator.
 
 # 5. Remove the schedule documents and the values file of orders-db (no files, no patchFiles)
 argo submit -n argo --from workflowtemplate/tpg-patch \
-  -p clusters=aks-tpg-poc-02 -p instances=orders-db -p patchMode=clear \
-  -p clearKinds=PostgresBackupSchedule,postgresValues -p pushMode=direct --watch
+  -p 'clusters=[aks-tpg-poc-02]' -p 'instances=[orders-db]' -p patchMode=clear \
+  -p 'clearKinds=[PostgresBackupSchedule, postgresValues]' -p pushMode=direct --watch
 
 # 6. A new CA bundle for the HTTPS instance orders-db, read from Vault (section 14);
 #    an instance without backup.enableSSL true is refused, so name the HTTPS instances
 argo submit -n argo --from workflowtemplate/tpg-patch \
-  -p clusters=all -p instances=orders-db -p backupCaBundleVaultSecret=azure-storage-2027 \
+  -p clusters=all -p 'instances=[orders-db]' -p backupCaBundleVaultSecret=azure-storage-2027 \
   -p pushMode=pr --watch
 ```
 
@@ -1114,7 +1114,7 @@ Different files per cluster and instance, with `clusterMap`, for several cluster
 pushMode: pr
 clusterMap: |
   aks-tpg-poc-01:
-    operatorValuesPatchFilePath: ./operator-resources.yaml
+    operatorValuesPatchFilePath: [./operator-resources.yaml]
     instances:
       orders-db:
         postgresPatchFilePath: [./orders/postgres.yaml, ../shared/backup-schedule.yaml]
@@ -1122,9 +1122,9 @@ clusterMap: |
   aks-tpg-poc-02:
     instances:
       orders-db:
-        postgresValuesPatchFilePath: ~/patches/backup-retention.yaml
+        postgresValuesPatchFilePath: [~/patches/backup-retention.yaml]
       billing-db:
-        postgresPatchFilePath: repo:helm_artifacts/instance/tpg-instance/patches/team-billing-postgres.yaml
+        postgresPatchFilePath: [repo:helm_artifacts/instance/tpg-instance/patches/team-billing-postgres.yaml]
   aks-tpg-poc-03:
     patchMode: clear
     clearKinds: [operatorValues]                # this cluster: remove the operator file
@@ -1165,30 +1165,30 @@ Then the rollout: the clusters with an instance to sync are put into batches by 
 ```bash
 # 1. Scale out to 2 read replicas
 argo submit --from workflowtemplate/tpg-scale-instance \
-  -p clusters=aks-tpg-poc-02 -p instances=orders-db -p replicas=2 -p pushMode=direct --watch
+  -p 'clusters=[aks-tpg-poc-02]' -p 'instances=[orders-db]' -p replicas=2 -p pushMode=direct --watch
 
 # 2. Dry run of scaling two instances on two clusters to 3
 argo submit --from workflowtemplate/tpg-scale-instance \
-  -p clusters=aks-tpg-poc-01,aks-tpg-poc-02 -p instances=orders-db,billing-db \
+  -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'instances=[orders-db, billing-db]' \
   -p replicas=3 -p pushMode=direct -p dryRun=true --watch
 
 # 3. Scale down to a single node (high availability off) through a pull request
 argo submit --from workflowtemplate/tpg-scale-instance \
-  -p clusters=aks-tpg-poc-01 -p instances=orders-db -p replicas=0 -p pushMode=pr --watch
+  -p 'clusters=[aks-tpg-poc-01]' -p 'instances=[orders-db]' -p replicas=0 -p pushMode=pr --watch
 
 # 4. Refuse to turn HA on for a single-node instance
 argo submit --from workflowtemplate/tpg-scale-instance \
-  -p clusters=aks-tpg-poc-04 -p instances=reporting-db -p replicas=1 \
+  -p 'clusters=[aks-tpg-poc-04]' -p 'instances=[reporting-db]' -p replicas=1 \
   -p enableHAIfNeeded=false -p pushMode=direct --watch
 
 # 5. Raise the cap to 5 on two clusters and scale orders-db to 4, canary first
 argo submit --from workflowtemplate/tpg-scale-instance \
-  -p clusters=aks-tpg-poc-01,aks-tpg-poc-02 -p instances=orders-db -p replicas=4 \
+  -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'instances=[orders-db]' -p replicas=4 \
   -p maxReadReplicas=5 -p rolloutMode=canary -p maxParallel=1 -p pushMode=direct --watch
 
 # 6. Only the cap (no instances, nothing synced)
 argo submit --from workflowtemplate/tpg-scale-instance \
-  -p clusters=aks-tpg-poc-03 -p maxReadReplicas=2 -p pushMode=direct --watch
+  -p 'clusters=[aks-tpg-poc-03]' -p maxReadReplicas=2 -p pushMode=direct --watch
 ```
 
 Different counts per cluster and instance, with `clusterMap`:
@@ -1270,22 +1270,22 @@ Clients outside the cluster reach the database through a load balancer and are m
 ```bash
 # 1. Dry run: baseline policy for orders-db, clients from namespace orders-app
 argo submit --from workflowtemplate/tpg-network-policy \
-  -p clusters=aks-tpg-poc-01 -p instances=orders-db -p mode=apply \
-  -p ingressFromNamespaces=orders-app -p pushMode=direct -p dryRun=true --watch
+  -p 'clusters=[aks-tpg-poc-01]' -p 'instances=[orders-db]' -p mode=apply \
+  -p 'ingressFromNamespaces=[orders-app]' -p pushMode=direct -p dryRun=true --watch
 
 # 2. Apply it on every listed cluster, canary first
 argo submit --from workflowtemplate/tpg-network-policy \
-  -p clusters=aks-tpg-poc-01,aks-tpg-poc-02 -p instances=orders-db -p mode=apply \
-  -p ingressFromNamespaces=orders-app -p ingressFromPodLabels='{app: orders-api}' -p pushMode=direct --watch
+  -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'instances=[orders-db]' -p mode=apply \
+  -p 'ingressFromNamespaces=[orders-app]' -p ingressFromPodLabels='{app: orders-api}' -p pushMode=direct --watch
 
 # 3. Add a client range, keep the other rules
 argo submit --from workflowtemplate/tpg-network-policy \
-  -p clusters=aks-tpg-poc-01 -p instances=orders-db -p mode=update \
-  -p ingressFromCidrs=10.20.0.0/16 -p pushMode=pr --watch
+  -p 'clusters=[aks-tpg-poc-01]' -p 'instances=[orders-db]' -p mode=update \
+  -p 'ingressFromCidrs=[10.20.0.0/16]' -p pushMode=pr --watch
 
 # 4. Remove the policy
 argo submit --from workflowtemplate/tpg-network-policy \
-  -p clusters=aks-tpg-poc-01 -p instances=orders-db -p mode=remove -p pushMode=direct --watch
+  -p 'clusters=[aks-tpg-poc-01]' -p 'instances=[orders-db]' -p mode=remove -p pushMode=direct --watch
 ```
 
 Different rules per instance, with `clusterMap`:
@@ -1316,7 +1316,7 @@ The applications per cluster come from `apps` (JSON) or from `clusterMap`: the i
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
 | `clusters` | `List` | yes, without `clusterMap` | | Registered clusters to clean up |
-| `apps` | `Map (JSON)` | yes, without `clusterMap` | | Cluster to list of `tpg-instances`, `tpg-instances:<i>[,<i>]`, `tpg-operator`. Every cluster in `clusters` needs an entry |
+| `apps` | `Map (JSON)` | yes, without `clusterMap` | | Cluster to list of `tpg-instances`, `tpg-instances:<i>` (one element per instance: `"tpg-instances:orders-db", "tpg-instances:billing-db"`, never `tpg-instances:orders-db,billing-db`), `tpg-operator`. Every cluster in `clusters` needs an entry |
 | `clusterMap` | `Map` | no | | Instances per cluster, `deleteOperator` and `force` per cluster, `finalBackup`, `purgePvcs` and `purgeNamespace` per instance (section 3) |
 | `confirm` | `List` | yes | | Repeat the cluster names (`clusters`, or the clusters of `clusterMap`) |
 | `dryRun` | `Boolean` | no | `true` | `true` records the plan; `false` deletes (set `false` explicitly to delete) |
@@ -1333,28 +1333,28 @@ Order per cluster: instances (final backup, `fleet.yaml` removal, Application re
 ```bash
 # 1. Plan (dry run) a full clean-up of two clusters
 argo submit --from workflowtemplate/tpg-delete-apps \
-  -p clusters=aks-tpg-poc-03,aks-tpg-poc-04 \
+  -p 'clusters=[aks-tpg-poc-03, aks-tpg-poc-04]' \
   -p apps='{"aks-tpg-poc-03":["tpg-instances","tpg-operator"],"aks-tpg-poc-04":["tpg-instances","tpg-operator"]}' \
-  -p confirm=aks-tpg-poc-03,aks-tpg-poc-04 \
+  -p 'confirm=[aks-tpg-poc-03, aks-tpg-poc-04]' \
   -p dryRun=true -p purgePvcs=false -p purgeNamespace=false -p pushMode=direct --watch
 
 # 2. Run it: remove everything, including volumes and namespaces
 argo submit --from workflowtemplate/tpg-delete-apps \
-  -p clusters=aks-tpg-poc-03,aks-tpg-poc-04 \
+  -p 'clusters=[aks-tpg-poc-03, aks-tpg-poc-04]' \
   -p apps='{"aks-tpg-poc-03":["tpg-instances","tpg-operator"],"aks-tpg-poc-04":["tpg-instances","tpg-operator"]}' \
-  -p confirm=aks-tpg-poc-03,aks-tpg-poc-04 \
+  -p 'confirm=[aks-tpg-poc-03, aks-tpg-poc-04]' \
   -p dryRun=false -p purgePvcs=true -p purgeNamespace=true -p pushMode=direct --watch
 
 # 3. Different applications per cluster: one instance on 01, all instances on 02 (keep volumes)
 argo submit --from workflowtemplate/tpg-delete-apps \
-  -p clusters=aks-tpg-poc-01,aks-tpg-poc-02 \
+  -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' \
   -p apps='{"aks-tpg-poc-01":["tpg-instances:billing-db"],"aks-tpg-poc-02":["tpg-instances"]}' \
-  -p confirm=aks-tpg-poc-01,aks-tpg-poc-02 \
+  -p 'confirm=[aks-tpg-poc-01, aks-tpg-poc-02]' \
   -p dryRun=false -p purgePvcs=false -p purgeNamespace=false -p pushMode=pr --watch
 
 # 4. Operator only, forcing removal of instances created outside Git, no final backups
 argo submit --from workflowtemplate/tpg-delete-apps \
-  -p clusters=aks-tpg-poc-04 -p apps='{"aks-tpg-poc-04":["tpg-operator"]}' -p confirm=aks-tpg-poc-04 \
+  -p 'clusters=[aks-tpg-poc-04]' -p apps='{"aks-tpg-poc-04":["tpg-operator"]}' -p 'confirm=[aks-tpg-poc-04]' \
   -p dryRun=false -p purgePvcs=true -p purgeNamespace=true -p pushMode=direct \
   -p force=true -p finalBackup=false --watch
 ```
@@ -1363,9 +1363,9 @@ With a parameter file (easier for JSON):
 
 ```yaml
 # delete-lab.yaml
-clusters: aks-tpg-poc-03
-apps: '{"aks-tpg-poc-03": ["tpg-instances:scratch-db,test-db", "tpg-operator"]}'
-confirm: aks-tpg-poc-03
+clusters: '[aks-tpg-poc-03]'
+apps: '{"aks-tpg-poc-03": ["tpg-instances:scratch-db", "tpg-instances:test-db", "tpg-operator"]}'
+confirm: '[aks-tpg-poc-03]'
 dryRun: "false"
 purgePvcs: "true"
 purgeNamespace: "true"
@@ -1380,7 +1380,7 @@ With `clusterMap`, settings per instance:
 
 ```yaml
 # delete-map.yaml
-confirm: aks-tpg-poc-03,aks-tpg-poc-04
+confirm: '[aks-tpg-poc-03, aks-tpg-poc-04]'
 dryRun: "false"
 pushMode: direct
 purgePvcs: "false"            # default of every instance
@@ -1425,20 +1425,20 @@ An instance that is not declared on one of the listed clusters fails the run wit
 ```bash
 # 1. Delete billing-db, keep volumes and namespace
 argo submit --from workflowtemplate/tpg-delete-instance \
-  -p clusters=aks-tpg-poc-01 -p instances=billing-db -p confirm=billing-db --watch
+  -p 'clusters=[aks-tpg-poc-01]' -p 'instances=[billing-db]' -p 'confirm=[billing-db]' --watch
 
 # 2. Require a final backup, purge volumes and namespace, through a pull request
 argo submit --from workflowtemplate/tpg-delete-instance \
-  -p clusters=aks-tpg-poc-02 -p instances=orders-db -p confirm=orders-db \
+  -p 'clusters=[aks-tpg-poc-02]' -p 'instances=[orders-db]' -p 'confirm=[orders-db]' \
   -p finalBackup=required -p purgePvcs=true -p purgeNamespace=true -p pushMode=pr --watch
 
 # 3. Two lab instances on two clusters
 argo submit --from workflowtemplate/tpg-delete-instance \
-  -p clusters=aks-tpg-poc-03,aks-tpg-poc-04 -p instances=scratch-db,test-db \
-  -p confirm=scratch-db,test-db -p finalBackup=false --watch
+  -p 'clusters=[aks-tpg-poc-03, aks-tpg-poc-04]' -p 'instances=[scratch-db, test-db]' \
+  -p 'confirm=[scratch-db, test-db]' -p finalBackup=false --watch
 
 # 4. Per instance settings, with clusterMap
-argo submit --from workflowtemplate/tpg-delete-instance -p confirm=aks-tpg-poc-01,aks-tpg-poc-02 \
+argo submit --from workflowtemplate/tpg-delete-instance -p 'confirm=[aks-tpg-poc-01, aks-tpg-poc-02]' \
   -p clusterMap='{"aks-tpg-poc-01":{"instances":{"billing-db":{}}},"aks-tpg-poc-02":{"instances":{"scratch-db":{"purgePvcs":true,"purgeNamespace":true}}}}' --watch
 ```
 
@@ -1485,11 +1485,11 @@ With standalone monitoring, the target's `kps` writes to the hub gateway over ht
 argo submit --from workflowtemplate/tpg-helm-addons -p clusters=all --watch
 
 # 2. cert-manager only on a new cluster
-argo submit --from workflowtemplate/tpg-helm-addons -p clusters=aks-tpg-poc-04 -p components=cert-manager --watch
+argo submit --from workflowtemplate/tpg-helm-addons -p 'clusters=[aks-tpg-poc-04]' -p 'components=[cert-manager]' --watch
 
 # 3. Dry run of the monitoring agent upgrade on two clusters
 argo submit --from workflowtemplate/tpg-helm-addons \
-  -p clusters=aks-tpg-poc-01,aks-tpg-poc-02 -p components=monitoring -p dryRun=true --watch
+  -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'components=[monitoring]' -p dryRun=true --watch
 
 # 4. Bring existing releases up to the pinned chart versions and values
 argo submit --from workflowtemplate/tpg-helm-addons -p clusters=all -p existingAddons=upgrade --watch
@@ -1532,13 +1532,13 @@ kubectl --context aks-tpg-poc-01 -n pg-docs-db get postgresbackup -o custom-colu
 argo submit --from workflowtemplate/tpg-backup -p backupType=full -p clusters=all --watch
 
 # 2. Incremental backup on one cluster
-argo submit --from workflowtemplate/tpg-backup -p backupType=incremental -p clusters=aks-tpg-poc-01 --watch
+argo submit --from workflowtemplate/tpg-backup -p backupType=incremental -p 'clusters=[aks-tpg-poc-01]' --watch
 
 # 3. Same selection as the CronWorkflows (skips backup.scheduled=false instances)
 argo submit --from workflowtemplate/tpg-backup -p backupType=full -p clusters=all -p scheduledOnly=true --watch
 
 # 4. Two instances, wherever they are declared
-argo submit --from workflowtemplate/tpg-backup -p instances=orders-db,billing-db --watch
+argo submit --from workflowtemplate/tpg-backup -p 'instances=[orders-db, billing-db]' --watch
 
 # 5. Different instances and types per cluster
 argo submit --from workflowtemplate/tpg-backup \
@@ -1689,7 +1689,7 @@ The new value comes from a wrapping token (section 14), or for a CA bundle from 
 | `secretType` | `Enum` | no | `broadcom-registry` | `broadcom-registry`, `backup-storage`, `git-push`, `git-read`, `monitoring-remote-write`, `ca-bundle` or `custom` (table below) |
 | `secretName` | `String (name)` | with `ca-bundle` or `custom` | | The name under `tpg/ca-bundles/` or `tpg/custom/`; the other types have a fixed path |
 | `wrappingToken` | `String (Vault token)` | no (`custom`: yes) | | The wrapping token of the new value (`tpg-aks-infra/scripts/vault-secret.sh wrap`); single use, 10 minutes |
-| `caBundleFile` | `String (file path)` | no | | `ca-bundle` only, instead of `wrappingToken`: a PEM file of the submitting machine (packed into `patchFiles`). A `repo:` file is refused: a bundle kept in the fleet repository needs no copy in Vault, runs name it with `backupCaBundleFile=repo:ca-bundles/<file>` |
+| `caBundleFile` | `List (one file path)` | no | | `ca-bundle` only, instead of `wrappingToken`: a PEM file of the submitting machine (packed into `patchFiles`). A `repo:` file is refused: a bundle kept in the fleet repository needs no copy in Vault, runs name it with `backupCaBundleFile=repo:ca-bundles/<file>` |
 | `patchFiles` | `Map (JSON)` | with a local `caBundleFile` | | The contents of the file, written by `scripts/submit/pack-patch-files.sh -o` |
 | `clusters` | `List` | no | `all` | Registered clusters to verify, or `all` |
 | `maxParallel` | `Integer` | no | `5` | Clusters verified at the same time |
@@ -1723,7 +1723,7 @@ unset BACKUP_STORAGE_KEY T
 cat > ca.yaml <<'YAML'
 secretType: ca-bundle
 secretName: azure-storage-2027
-caBundleFile: ~/certs/azure-storage-2027.pem
+caBundleFile: '[~/certs/azure-storage-2027.pem]'
 YAML
 ~/src/tpg-fleet/scripts/submit/pack-patch-files.sh -o ca.yaml
 argo submit -n argo --from workflowtemplate/tpg-rotate-credential --parameter-file ca.yaml --watch
@@ -1756,7 +1756,7 @@ argo submit -n argo --from workflowtemplate/tpg-rotate-credential -p secretType=
 `scripts/submit/tpg-<workflow>.sh` starts a workflow without composing the `argo submit` line by hand: one script per WorkflowTemplate (12). Each script reads the inputs, defaults, allowed values and descriptions from `workflows/templates/<template>.yaml` and the types from `workflows/params/types.yaml`, so it stays in step with the template.
 
 1. The targets first: `clusterMap` or the lists, where the workflow takes both. `clusterMap` can be built step by step (the registered clusters are listed from the hub, then the instances declared in your `clusters/fleet.yaml`, then the keys the workflow accepts, with their types), loaded from a file, or pasted. It is checked with the same `clustermap.py` as the `validate` step.
-2. The mandatory inputs, each with its type and an example. A value that does not match its type is refused with the reason and asked again.
+2. The mandatory inputs, each with its type and an example. A value that does not match its type is refused with the reason and asked again. A list input takes plain names (`aks-tpg-poc-01, aks-tpg-poc-02`) and a single-file input one path: the script sends them in brackets (`[aks-tpg-poc-01, aks-tpg-poc-02]`, `[./ca.pem]`), the form the hub requires; `all` and `auto` stay bare.
 3. A menu of the optional inputs with their current values or defaults (arrow keys and Enter, or numbers). After each one the script asks whether to set another.
 4. A summary, the equivalent `argo submit` command, then Submit, Change optional inputs, or Cancel.
 5. The submit: `argo submit` when the argo CLI is installed, otherwise `kubectl create` of a Workflow object (the hub admission policy checks it the same way). The script can then follow the run and print its report.
@@ -1785,7 +1785,7 @@ TPG_FLEET_DIR=~/src/tpg-fleet bash /opt/tools/tpg-patch.sh
 
 Some inputs depend on an earlier answer: `tpg-upgrade.sh` asks `instances` for `component=postgres`, `tpg-restore.sh` asks the recovery point of the chosen `mode`, `tpg-scale-instance.sh` asks whether the run scales instances (`instances` and `replicas`), changes only the cap (`maxReadReplicas`), or both, and `tpg-patch.sh` does not submit before a patch file input is set (and `instances` for instance patch files).
 
-**Local files (Round 14, Round 15).** `tpg-patch.sh`, `tpg-create-instance.sh`, `tpg-day0.sh` and `tpg-rotate-credential.sh` read every local file the path inputs and `clusterMap` name (absolute, `~/` or relative to the current directory; `repo:` files are left to the workflow; nothing with `patchMode=clear`) through `pack-patch-files.sh -o`, so a file that is missing or does not fit its input is refused before anything is submitted, and send their contents as `patchFiles`; you never type that input. The equivalent commands they print are the parameter-file form of section 7:
+**Local files (Round 14, Round 15).** `tpg-patch.sh`, `tpg-create-instance.sh`, `tpg-day0.sh` and `tpg-rotate-credential.sh` read every local file the path inputs and `clusterMap` name (absolute, `~/` or relative to the current directory; `repo:` files are left to the workflow; nothing with `patchMode=clear`) through `pack-patch-files.sh -o`; the prompts take plain names or one path and send the bracketed form (`[orders-db, billing-db]`, `[./ca.pem]`), so a file that is missing or does not fit its input is refused before anything is submitted, and send their contents as `patchFiles`; you never type that input. The equivalent commands they print are the parameter-file form of section 7:
 
 ```bash
 <tpg-fleet clone>/scripts/submit/pack-patch-files.sh -o <parameter file>

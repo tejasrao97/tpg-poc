@@ -61,6 +61,9 @@
 # bundles are recorded as ca.<hash>), so the parameters stay under the 128 KiB
 # limit of one container argument.
 # Notes (FLEET_OVERRIDDEN, blocked clusters) are recorded as plan.git.
+# The list inputs (P_INSTANCES, P_ALLOWED_SOURCE_RANGES, P_INGRESS_FROM_*, P_EGRESS_TO_*, the overlay
+# file paths) are bracketed, [a, b]; lib.sh list_items turns them into the JSON arrays the
+# clusterMap rules check. A single-file input is [path].
 # Inputs (environment): P_CLUSTER_MAP P_INSTANCES P_HA P_OPERATOR_VERSION
 #   P_POSTGRES_VERSION P_READ_REPLICAS P_STORAGE_SIZE P_WAL_STORAGE_SIZE
 #   P_STORAGE_CLASS P_CPU P_MEMORY P_BACKUP_SCHEDULE P_BACKUP_ENABLE_SSL
@@ -92,7 +95,7 @@ if cmap_set; then
   cmap_load
   cp "$WORK/cmap.json" "$WORK/targets.json"
 else
-  jq -cn --argjson cl "$CLUSTERS_JSON" --arg inst "$(split_list "${P_INSTANCES:-}" | paste -sd,)" '
+  jq -cn --argjson cl "$CLUSTERS_JSON" --arg inst "$(list_csv instances "${P_INSTANCES:-}")" '
     ($inst | split(",") | map(select(length > 0))) as $il
     | reduce $cl[] as $c ({}; .[$c] = {instances: (reduce $il[] as $i ({}; .[$i] = {}))})' > "$WORK/targets.json"
 fi
@@ -102,6 +105,14 @@ map_flag() {  # map_flag TEXT -> the YAML or JSON mapping as compact JSON ("" wh
   [[ -n "$(tr -d '[:space:]' <<<"${1:-}")" ]] || { printf ''; return; }
   printf '%s\n' "$1" | yq -o=json -I=0 '.' 2>/dev/null || printf '%s' "$1"
 }
+f_asr="$(list_flag allowedSourceRanges "${P_ALLOWED_SOURCE_RANGES:-}")" || exit 1
+f_ifn="$(list_flag ingressFromNamespaces "${P_INGRESS_FROM_NAMESPACES:-}")" || exit 1
+f_ifc="$(list_flag ingressFromCidrs "${P_INGRESS_FROM_CIDRS:-}")" || exit 1
+f_etc="$(list_flag egressToCidrs "${P_EGRESS_TO_CIDRS:-}")" || exit 1
+f_etf="$(list_flag egressToFqdns "${P_EGRESS_TO_FQDNS:-}")" || exit 1
+f_pof="$(list_flag postgresOverlayFilePath "${P_POSTGRES_OVERLAY_FILES:-}" --files)" || exit 1
+f_pvo="$(list_flag postgresValuesOverlayFilePath "${P_VALUES_OVERLAY_FILES:-}" --files --one)" || exit 1
+f_ovo="$(list_flag operatorValuesOverlayFilePath "${P_OPERATOR_VALUES_OVERLAY_FILE:-}" --files --one)" || exit 1
 jq -cn --arg operatorVersion "$opv_flag" --arg postgresVersion "$pgv_flag" --arg highAvailability "${P_HA:-}" \
   --arg readReplicas "${P_READ_REPLICAS:-}" --arg storageSize "${P_STORAGE_SIZE:-}" \
   --arg walStorageSize "${P_WAL_STORAGE_SIZE:-}" --arg storageClass "${P_STORAGE_CLASS:-}" \
@@ -112,13 +123,15 @@ jq -cn --arg operatorVersion "$opv_flag" --arg postgresVersion "$pgv_flag" --arg
   --arg exposure "${P_EXPOSURE:-}" --arg serviceAnnotations "$(map_flag "${P_SERVICE_ANNOTATIONS:-}")" \
   --arg readOnlyExposure "${P_READ_ONLY_EXPOSURE:-}" \
   --arg readOnlyServiceAnnotations "$(map_flag "${P_READ_ONLY_SERVICE_ANNOTATIONS:-}")" \
-  --arg allowedSourceRanges "${P_ALLOWED_SOURCE_RANGES:-}" --arg internalLoadBalancerSubnet "${P_INTERNAL_LB_SUBNET:-}" \
-  --arg networkPolicy "${P_NETWORK_POLICY:-}" --arg ingressFromNamespaces "${P_INGRESS_FROM_NAMESPACES:-}" \
+  --argjson allowedSourceRanges "$f_asr" --arg internalLoadBalancerSubnet "${P_INTERNAL_LB_SUBNET:-}" \
+  --arg networkPolicy "${P_NETWORK_POLICY:-}" --argjson ingressFromNamespaces "$f_ifn" \
   --arg ingressFromPodLabels "$(map_flag "${P_INGRESS_FROM_POD_LABELS:-}")" \
-  --arg ingressFromCidrs "${P_INGRESS_FROM_CIDRS:-}" --arg egressToCidrs "${P_EGRESS_TO_CIDRS:-}" \
-  --arg egressToFqdns "${P_EGRESS_TO_FQDNS:-}" \
-  --arg postgresOverlayFilePath "${P_POSTGRES_OVERLAY_FILES:-}" --arg postgresValuesOverlayFilePath "${P_VALUES_OVERLAY_FILES:-}" \
-  --arg operatorValuesOverlayFilePath "${P_OPERATOR_VALUES_OVERLAY_FILE:-}" \
+  --argjson ingressFromCidrs "$f_ifc" \
+  --argjson egressToCidrs "$f_etc" \
+  --argjson egressToFqdns "$f_etf" \
+  --argjson postgresOverlayFilePath "$f_pof" \
+  --argjson postgresValuesOverlayFilePath "$f_pvo" \
+  --argjson operatorValuesOverlayFilePath "$f_ovo" \
   --arg operatorFullSchedule "${P_OPERATOR_FULL_SCHEDULE-0 0 * * 0}" \
   --arg operatorIncrementalSchedule "${P_OPERATOR_INCR_SCHEDULE-0 0 * * 1-6}" \
   --arg ferret "${P_FERRET:-}" --arg ferretReplicas "${P_FERRET_REPLICAS:-1}" \

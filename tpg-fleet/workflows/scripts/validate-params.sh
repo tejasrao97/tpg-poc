@@ -8,10 +8,14 @@
 # step checks what a type cannot: mandatory inputs, combinations, registered
 # clusters, and the clusterMap input (P_CLUSTER_MAP) against
 # workflows/params/cluster-map-keys.yaml (clustermap.py).
+# List inputs are strict (Round 23): bracketed even with one value, [tpg-poc-01] or
+# [a, b] (YAML flow) or ["a","b"] (JSON); only all (and auto for components) stays
+# bare. lib.sh list_items (clustermap.py as_list) parses them; a bad list is reported
+# with the syntax. A comma in a value is never a separator here.
 # Outputs:
 #   /tmp/clusters.json   normalized cluster list (JSON array) for withParam loops
 #   /tmp/selection       the cluster selection for the discover step: the clusterMap
-#                        clusters (comma-separated), else the clusters input
+#                        clusters (comma-separated, an internal value), else the clusters input
 #   /tmp/approval        tpg-upgrade: true when a batch approval pause is needed
 MODE="$1"
 # shellcheck source=workflows/scripts/lib.sh
@@ -47,40 +51,67 @@ quantity() {    # quantity NAME VALUE (empty allowed)
 dnsname() {     # dnsname NAME VALUE
   [[ "$2" =~ ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$ ]] || err "$1 '${2}' must be a lowercase DNS label (letters, digits, '-', at most 40 characters)"
 }
+list_get() {    # list_get NAME VALUE [list_items options]: the items of a bracketed list input in LIST;
+  # a bad list (a comma string, [], [a, , b], repo: with a space) is recorded as an error, status 1
+  local out
+  LIST=()
+  [[ -n "$2" ]] || return 0
+  if ! out="$(list_items "$@" 2>&1)"; then err "$out"; return 1; fi
+  [[ -z "$out" ]] || mapfile -t LIST <<<"$out"
+}
+file_get() {    # file_get NAME VALUE: the one file of a single-file input, [./a.yaml], in FILE ("" when empty)
+  local out
+  FILE=""
+  [[ -n "$2" ]] || return 0
+  if ! out="$(file_item "$1" "$2" 2>&1)"; then err "$out"; return 0; fi   # (lib.sh runs with set -e: never fail here)
+  FILE="$out"
+}
+no_all_item() { # no_all_item NAME: all is a bare word, not a name inside brackets (LIST from list_get)
+  local x
+  for x in ${LIST[@]+"${LIST[@]}"}; do
+    [[ "$x" != all ]] || { err "$1: all stands alone, without brackets: $1=all"; return 1; }
+  done
+}
 clusters_in() {  # clusters_in NAME VALUE ALLOW_ALL -> validates and writes /tmp/clusters.json
   local n="$1" v="$2" allow_all="$3" c out="[]"
   if [[ -z "$v" ]]; then
-    err "$n is mandatory: comma-separated cluster names${allow_all:+ or all} (or clusterMap). Registered clusters: ${REG_LIST:-none}"
+    err "$n is mandatory: a list of cluster names in brackets, for example [aks-tpg-poc-01]${allow_all:+ or all} (or clusterMap). Registered clusters: ${REG_LIST:-none}"
     return
   fi
   if [[ "$v" == "all" ]]; then
-    if [[ -z "$allow_all" ]]; then err "$n does not accept all: list the clusters. Registered clusters: ${REG_LIST:-none}"; return; fi
+    if [[ -z "$allow_all" ]]; then err "$n does not accept all: list the clusters in brackets, [aks-tpg-poc-01]. Registered clusters: ${REG_LIST:-none}"; return; fi
     printf '%s' "$(jq -cn --arg r "$REGISTERED" '$r | split("\n") | map(select(length > 0))')" > /tmp/clusters.json
     return
   fi
-  for c in $(split_list "$v"); do
+  list_get "$n" "$v" || return 0       # (lib.sh runs with set -e: a failed list is already an error)
+  no_all_item "$n" || return 0
+  for c in ${LIST[@]+"${LIST[@]}"}; do
     grep -qx "$c" <<<"$REGISTERED" || err "$n: cluster '${c}' is not registered. Registered clusters: ${REG_LIST:-none}"
     out="$(jq -c --arg c "$c" 'if index($c) then . else . + [$c] end' <<<"$out")"
   done
   printf '%s' "$out" > /tmp/clusters.json
 }
+cluster_one() {  # cluster_one NAME VALUE: one registered cluster (a single-name input, not a list; empty allowed)
+  [[ -n "$2" ]] || return 0
+  grep -qx "$2" <<<"$REGISTERED" || err "$1: cluster '${2}' is not registered. Registered clusters: ${REG_LIST:-none}"
+}
 instances_in() { # instances_in NAME VALUE ALLOW_ALL
   local i
-  if [[ -z "$2" ]]; then err "$1 is mandatory: comma-separated instance names${3:+ or all} (or clusterMap)"; return; fi
+  if [[ -z "$2" ]]; then err "$1 is mandatory: a list of instance names in brackets, for example [orders-db]${3:+ or all} (or clusterMap)"; return; fi
   [[ "$2" == "all" && -n "$3" ]] && return
-  for i in $(split_list "$2"); do dnsname "$1" "$i"; done
+  list_get "$1" "$2" || return 0
+  no_all_item "$1" || return 0
+  for i in ${LIST[@]+"${LIST[@]}"}; do dnsname "$1" "$i"; done
 }
 opver() { [[ "$2" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ ]] || err "$1 must be an operator chart version such as v4.5.0 (got '${2}')"; }
 pgver() { [[ "$2" =~ ^(postgres-)?[0-9]+(\.[0-9]+)?$ ]] || err "$1 must be a Postgres version such as postgres-17.6 or 17.6 (got '${2}')"; }
 PATCH_LOCAL_RE='^(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml$'
-# kinds_check NAME VALUE: a comma-separated kindList (clearKinds): known kinds, all alone, no repeats
+# kinds_check NAME VALUE: a kindList (clearKinds), [Postgres, postgresValues] or all: known kinds, all alone, no repeats
 PATCH_KIND_NAMES="Postgres PostgresBackupLocation PostgresBackupSchedule PostgresFerretDocumentDB postgresValues operatorValues"
 kinds_check() {
   local k kseen=" " n=0
-  local -a _kinds
-  IFS=',' read -r -a _kinds <<<"${2// /}"
-  for k in "${_kinds[@]}"; do
-    [[ -n "$k" ]] || continue
+  list_get "$1" "$2" --bare all || return 0
+  for k in ${LIST[@]+"${LIST[@]}"}; do
     n=$((n + 1))
     if [[ "$k" != all && " ${PATCH_KIND_NAMES} " != *" ${k} "* ]]; then
       err "$1: '${k}' must be one of ${PATCH_KIND_NAMES// /, }, or all"
@@ -97,11 +128,12 @@ ca_inputs_check() {
   # ca_inputs_check WORKFLOW: the CA bundle sources (Round 15, D86): one PEM file or
   # one Vault secret per level (inputs; clusterMap cluster and instance keys), and
   # for tpg-day0 and tpg-create-instance only on instances with backupEnableSSL=true
-  local f="${P_BACKUP_CA_FILE:-}" v="${P_BACKUP_CA_VAULT:-}" bad
+  local f="" v="${P_BACKUP_CA_VAULT:-}" bad
+  file_get backupCaBundleFile "${P_BACKUP_CA_FILE:-}"; f="$FILE"
   if [[ -n "$f" ]]; then
     if [[ "$f" == repo:* ]]; then [[ "$f" =~ $PATCH_REPO_CA_RE && "/${f#repo:}/" != */../* ]] \
       || err "backupCaBundleFile: '${f}' must be repo:ca-bundles/<file>.pem (.crt, .cer) of the fleet repository"
-    else [[ "$f" =~ $PATCH_LOCAL_CA_RE ]] || err "backupCaBundleFile: '${f}' must be the path of one PEM file (.pem, .crt or .cer) on the submitting machine, or repo:ca-bundles/<file>"; fi
+    else [[ "$f" =~ $PATCH_LOCAL_CA_RE ]] || err "backupCaBundleFile: '${f}' must be the path of one PEM file (.pem, .crt or .cer) on the submitting machine, or repo:ca-bundles/<file>, in brackets: [path]"; fi
   fi
   [[ -z "$v" || "$v" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] || err "backupCaBundleVaultSecret: '${v}' must be a secret name under tpg/ca-bundles/ (lowercase letters, digits, '-' and '.')"
   [[ -z "$f" || -z "$v" ]] || err "backupCaBundleFile and backupCaBundleVaultSecret cannot be used together: name one source of the CA bundle"
@@ -121,11 +153,16 @@ ca_inputs_check() {
     err "backupCaBundleFile and backupCaBundleVaultSecret need backupEnableSSL=true (the CA bundle is written for HTTPS backup locations only)"
   fi
 }
-patch_path() {  # patch_path NAME VALUE REPO_DIR [list]: one .yaml/.yml file (a list with "list"), local or repo:<REPO_DIR>...
+patch_path() {  # patch_path NAME VALUE REPO_DIR [list]: one .yaml/.yml file in brackets, [./a.yaml] (several with "list"), local or repo:<REPO_DIR>...
   local n="$1" v="$2" d="$3" p
   [[ -z "$v" ]] && return 0
-  if [[ "${4:-}" != list && "$v" == *,* ]]; then err "$n: '${v}' must be one file (one current file of this kind)"; return; fi
-  for p in $(split_list "$v"); do
+  if [[ "${4:-}" == list ]]; then list_get "$n" "$v" --files || return 0
+  else
+    file_get "$n" "$v"
+    [[ -n "$FILE" ]] || return 0
+    LIST=("$FILE")
+  fi
+  for p in ${LIST[@]+"${LIST[@]}"}; do
     if [[ "$p" == repo:* ]]; then
       if [[ ! "$p" =~ $PATCH_REPO_RE || "/${p#repo:}/" == */../* ]]; then
         err "$n: '${p}' must be repo:<path of a .yaml or .yml file in the fleet repository> (relative to its root, no ..)"
@@ -161,12 +198,12 @@ patch_files_check() {
   n="$(jq -c . <<<"$files" | wc -c)"
   (( n <= PATCH_FILES_MAX )) || err "patchFiles is ${n} bytes; at most ${PATCH_FILES_MAX} bytes in one run (split the patch into several runs)"
   have="$(jq -r 'keys | if length == 0 then "patchFiles is empty" else "patchFiles holds " + join(", ") end' <<<"$files")"
-  # one row per group of files checked together: kind <TAB> comma-separated paths <TAB> where
+  # one row per group of files checked together: kind <TAB> comma-separated paths (internal form) <TAB> where
   rows="$(
-    [[ -z "${P_POSTGRES_PATCH:-}" ]] || printf 'postgres\t%s\tpostgres%sFilePath\n' "$(split_list "$P_POSTGRES_PATCH" | paste -sd, -)" "$PW"
-    [[ -z "${P_VALUES_PATCH:-}" ]] || printf 'values\t%s\tpostgresValues%sFilePath\n' "$P_VALUES_PATCH" "$PW"
-    [[ -z "${P_OPERATOR_VALUES_PATCH:-}" ]] || printf 'operator\t%s\toperatorValues%sFilePath\n' "$P_OPERATOR_VALUES_PATCH" "$PW"
-    [[ -z "${P_BACKUP_CA_FILE:-}" ]] || printf 'ca\t%s\tbackupCaBundleFile\n' "$P_BACKUP_CA_FILE"
+    [[ -z "${P_POSTGRES_PATCH:-}" ]] || printf 'postgres\t%s\tpostgres%sFilePath\n' "$(list_csv "postgres${PW}FilePath" "$P_POSTGRES_PATCH" --files)" "$PW"
+    [[ -z "${P_VALUES_PATCH:-}" ]] || printf 'values\t%s\tpostgresValues%sFilePath\n' "$(file_item "postgresValues${PW}FilePath" "$P_VALUES_PATCH")" "$PW"
+    [[ -z "${P_OPERATOR_VALUES_PATCH:-}" ]] || printf 'operator\t%s\toperatorValues%sFilePath\n' "$(file_item "operatorValues${PW}FilePath" "$P_OPERATOR_VALUES_PATCH")" "$PW"
+    [[ -z "${P_BACKUP_CA_FILE:-}" ]] || printf 'ca\t%s\tbackupCaBundleFile\n' "$(file_item backupCaBundleFile "$P_BACKUP_CA_FILE")"
     if cmap_set && [[ -s "$WORK/cmap.json" ]]; then
       jq -r --arg w "$PW" 'to_entries[] | .key as $c
         | (if .value["operatorValues" + $w + "FilePath"] then ["operator", .value["operatorValues" + $w + "FilePath"], ($c + ".operatorValues" + $w + "FilePath")] else empty end),
@@ -221,7 +258,7 @@ patch_inputs_check() {
   patch_path "postgres${PW}FilePath" "${P_POSTGRES_PATCH:-}" "helm_artifacts/instance/tpg-instance/${PG}/" list
   patch_path "postgresValues${PW}FilePath" "${P_VALUES_PATCH:-}" "helm_artifacts/instance/tpg-instance/${PG}/"
   [[ "$1" == create-instance ]] || patch_path "operatorValues${PW}FilePath" "${P_OPERATOR_VALUES_PATCH:-}" "helm_artifacts/operator/${PG}/"
-  [[ -z "${P_POSTGRES_PATCH:-}" ]] || [[ "$(split_list "$P_POSTGRES_PATCH" | sort | uniq -d)" == "" ]] \
+  [[ -z "${P_POSTGRES_PATCH:-}" ]] || [[ "$(list_items "postgres${PW}FilePath" "$P_POSTGRES_PATCH" --files 2>/dev/null | sort | uniq -d)" == "" ]] \
     || err "postgres${PW}FilePath lists a file twice"
 }
 instance_inputs() {  # instance_inputs: the exposure and network policy inputs of tpg-day0 and tpg-create-instance
@@ -235,10 +272,19 @@ instance_inputs() {  # instance_inputs: the exposure and network policy inputs o
     || err "internalLoadBalancerSubnet '${P_INTERNAL_LB_SUBNET}' must be an Azure subnet name (letters, digits, '-', '_', '.', at most 80 characters)"
   j="$(jq -cn \
     --arg serviceAnnotations "${P_SERVICE_ANNOTATIONS:-}" --arg readOnlyServiceAnnotations "${P_READ_ONLY_SERVICE_ANNOTATIONS:-}" \
-    --arg allowedSourceRanges "${P_ALLOWED_SOURCE_RANGES:-}" --arg ingressFromNamespaces "${P_INGRESS_FROM_NAMESPACES:-}" \
-    --arg ingressFromPodLabels "${P_INGRESS_FROM_POD_LABELS:-}" --arg ingressFromCidrs "${P_INGRESS_FROM_CIDRS:-}" \
-    --arg egressToCidrs "${P_EGRESS_TO_CIDRS:-}" --arg egressToFqdns "${P_EGRESS_TO_FQDNS:-}" \
+    --arg ingressFromPodLabels "${P_INGRESS_FROM_POD_LABELS:-}" \
     '$ARGS.named | with_entries(select(.value | test("\\S")))')"
+  # the list inputs are bracketed ([a, b]): list_get parses them (the message names the input), the
+  # clusterMap rules below then check the items as they do for a map sequence
+  for k in allowedSourceRanges ingressFromNamespaces ingressFromCidrs egressToCidrs egressToFqdns; do
+    case "$k" in
+      allowedSourceRanges) v="${P_ALLOWED_SOURCE_RANGES:-}" ;; ingressFromNamespaces) v="${P_INGRESS_FROM_NAMESPACES:-}" ;;
+      ingressFromCidrs) v="${P_INGRESS_FROM_CIDRS:-}" ;; egressToCidrs) v="${P_EGRESS_TO_CIDRS:-}" ;; *) v="${P_EGRESS_TO_FQDNS:-}" ;;
+    esac
+    [[ -n "${v//[[:space:]]/}" ]] || continue
+    list_get "$k" "$v" || continue
+    j="$(jq -c --arg k "$k" --argjson l "$(printf '%s\n' "${LIST[@]}" | jq -Rc '[., inputs]')" '.[$k] = $l' <<<"$j")"
+  done
   [[ "$j" != "{}" ]] || return 0
   # maps may be written as YAML: turn them into JSON first
   for k in serviceAnnotations readOnlyServiceAnnotations ingressFromPodLabels; do
@@ -323,7 +369,7 @@ scale_ha_check() {  # tpg-scale-instance (Round 13 addendum): replicas above 0 w
       | [$c, .key, (if .value.replicas != null then (.value.replicas | tostring) else $r end),
          (if .value.enableHAIfNeeded != null then (.value.enableHAIfNeeded | tostring) else $e end)] | @tsv' "$WORK/cmap.json")"
   else
-    pairs="$(for c in $(split_list "${P_CLUSTERS:-}"); do for i in $(split_list "${P_INSTANCES:-}"); do
+    pairs="$(for c in $(list_items clusters "${P_CLUSTERS:-}"); do for i in $(list_items instances "${P_INSTANCES:-}"); do
       printf '%s\t%s\t%s\t%s\n' "$c" "$i" "${P_REPLICAS:-}" "${P_ENABLE_HA:-true}"; done; done)"
   fi
   local need=0
@@ -355,7 +401,7 @@ scale_cap_check() {  # tpg-scale-instance (Round 14): a new maxReadReplicas must
       | select(.[1] != "") | @tsv' "$WORK/cmap.json")"
   else
     [[ -n "${P_MAX_READ_REPLICAS:-}" ]] || return 0
-    caps="$(for c in $(split_list "${P_CLUSTERS:-}"); do printf '%s\t%s\n' "$c" "$P_MAX_READ_REPLICAS"; done)"
+    caps="$(for c in $(list_items clusters "${P_CLUSTERS:-}"); do printf '%s\t%s\n' "$c" "$P_MAX_READ_REPLICAS"; done)"
   fi
   [[ -n "$caps" ]] || return 0
   if [[ ! -d "$WORK/repo/.git" ]] && ! git_clone "$WORK/repo" >/dev/null 2>&1; then
@@ -374,7 +420,7 @@ scale_cap_check() {  # tpg-scale-instance (Round 14): a new maxReadReplicas must
       if cmap_set; then
         n="$(jq -r --arg c "$c" --arg i "$i" --arg r "${P_REPLICAS:-}" '.[$c].instances[$i] // null
           | if . == null then "" elif .replicas != null then (.replicas | tostring) else $r end' "$WORK/cmap.json")"
-      elif [[ ",$(split_list "${P_INSTANCES:-}" | paste -sd,)," == *",${i},"* ]]; then
+      elif [[ ",$(list_csv instances "${P_INSTANCES:-}")," == *",${i},"* ]]; then
         n="${P_REPLICAS:-}"
       fi
       if [[ -z "$n" ]]; then
@@ -391,8 +437,15 @@ scale_cap_check() {  # tpg-scale-instance (Round 14): a new maxReadReplicas must
   done <<<"$caps"
 }
 
-same_set() {    # same_set LIST1 LIST2 -> 0 when both comma lists hold the same names
-  [[ "$(split_list "$1" | sort -u | paste -sd,)" == "$(split_list "$2" | sort -u | paste -sd,)" ]]
+same_set() {    # same_set NAME1 LIST1 NAME2 LIST2 -> 0 when both bracketed lists hold the same names (any order)
+  # (a bad list is reported by list_get; here it counts as different)
+  local a b
+  a="$(list_items "$1" "$2" 2>/dev/null | sort -u | paste -sd,)" || return 1
+  b="$(list_items "$3" "$4" 2>/dev/null | sort -u | paste -sd,)" || return 1
+  [[ "$a" == "$b" ]]
+}
+bracket_keys() { # bracket_keys FILE -> the cluster names of a normalized clusterMap as a list: [a, b]
+  jq -r 'keys | "[" + join(", ") + "]"' "$1"
 }
 
 # ---- clusterMap
@@ -627,9 +680,9 @@ case "$MODE" in
         need clearKinds "${P_CLEAR_KINDS:-}" "the kinds to clear: Postgres, PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB, postgresValues, operatorValues, or all"
         if [[ -n "${P_CLEAR_KINDS:-}" ]]; then
           kinds_check clearKinds "$P_CLEAR_KINDS"
-          ck=",${P_CLEAR_KINDS// /},"
+          ck=",$(list_csv clearKinds "$P_CLEAR_KINDS" --bare all 2>/dev/null || true),"
           if [[ "$ck" =~ ,(all|Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues), && -z "${P_INSTANCES:-}" ]]; then
-            err "clearKinds ${P_CLEAR_KINDS} clears instance patches: set instances (a list, or all)"
+            err "clearKinds ${P_CLEAR_KINDS} clears instance patches: set instances (a list in brackets, or all)"
           fi
           if [[ -n "${P_INSTANCES:-}" && ! "$ck" =~ ,(all|Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues), ]]; then
             err "instances is set but clearKinds names no instance kind"
@@ -639,7 +692,7 @@ case "$MODE" in
         [[ -n "$any_file$any_ca" ]] \
           || err "no patch file: set postgresPatchFilePath, postgresValuesPatchFilePath, operatorValuesPatchFilePath or a CA bundle source (or clusterMap)"
         [[ -z "${P_POSTGRES_PATCH:-}${P_VALUES_PATCH:-}${any_ca}" || -n "${P_INSTANCES:-}" ]] \
-          || err "postgresPatchFilePath, postgresValuesPatchFilePath and the CA bundle sources need instances (a list, or all)"
+          || err "postgresPatchFilePath, postgresValuesPatchFilePath and the CA bundle sources need instances (a list in brackets, or all)"
         [[ -z "${P_INSTANCES:-}" || -n "${P_POSTGRES_PATCH:-}${P_VALUES_PATCH:-}${any_ca}" ]] \
           || err "instances is set but no instance patch file or CA bundle source"
       fi
@@ -690,7 +743,7 @@ case "$MODE" in
     ;;
   restore)
     need sourceCluster "${P_SOURCE_CLUSTER:-}" "one registered cluster. Registered clusters: ${REG_LIST:-none}"
-    [[ -z "${P_SOURCE_CLUSTER:-}" ]] || clusters_in sourceCluster "$P_SOURCE_CLUSTER" ""
+    cluster_one sourceCluster "${P_SOURCE_CLUSTER:-}"
     need instance "${P_INSTANCE:-}" "the Postgres instance to restore from"; [[ -z "${P_INSTANCE:-}" ]] || dnsname instance "$P_INSTANCE"
     need mode "${P_MODE:-}" "time, latest, backup, lsn or xid"
     [[ -z "${P_MODE:-}" ]] || oneof mode "$P_MODE" time latest backup lsn xid
@@ -715,7 +768,7 @@ case "$MODE" in
     esac
     [[ "${P_MODE:-}" != "latest" || -z "$given" ]] || err "mode=latest takes no recovery point (given: ${given})"
     if [[ -n "${P_TARGET_CLUSTER:-}" ]]; then
-      clusters_in targetCluster "$P_TARGET_CLUSTER" ""
+      cluster_one targetCluster "$P_TARGET_CLUSTER"
       [[ "${P_MODE:-}" != "backup" || "$P_TARGET_CLUSTER" == "${P_SOURCE_CLUSTER:-}" ]] \
         || err "mode=backup restores only inside the source namespace; use time, latest, lsn or xid for another cluster"
     fi
@@ -739,19 +792,21 @@ case "$MODE" in
     if cmap_set; then
       map_exclusive "clusters=${P_CLUSTERS:-}" "instances=${P_INSTANCES:-}"
       map_validate delete-instance "{}"
-      need confirm "${P_CONFIRM:-}" "repeat the cluster names of clusterMap"
+      need confirm "${P_CONFIRM:-}" "repeat the cluster names of clusterMap, in brackets"
       if [[ -n "${P_CONFIRM:-}" && -s "$WORK/cmap.json" ]]; then
-        same_set "$P_CONFIRM" "$(jq -r 'keys | join(",")' "$WORK/cmap.json")" \
-          || err "confirm must repeat the cluster names of clusterMap ($(jq -r 'keys | join(",")' "$WORK/cmap.json"))"
+        list_get confirm "$P_CONFIRM" \
+          && { same_set confirm "$P_CONFIRM" clusterMap "$(bracket_keys "$WORK/cmap.json")" \
+               || err "confirm must repeat the cluster names of clusterMap ($(bracket_keys "$WORK/cmap.json"))"; }
       fi
       map_each_instance "((.v.purgeNamespace // \"${P_PURGE_NS:-false}\") != \"true\") or ((.v.purgePvcs // \"${P_PURGE_PVCS:-false}\") == \"true\")" \
         "purgeNamespace=true needs purgePvcs=true"
     else
       clusters_in clusters "${P_CLUSTERS:-}" ""
       instances_in instances "${P_INSTANCES:-}" ""
-      need confirm "${P_CONFIRM:-}" "repeat the instances value"
+      need confirm "${P_CONFIRM:-}" "repeat the instances value, in brackets"
       if [[ -n "${P_CONFIRM:-}" && -n "${P_INSTANCES:-}" ]]; then
-        same_set "$P_CONFIRM" "$P_INSTANCES" || err "confirm must repeat the instances value (${P_INSTANCES})"
+        list_get confirm "$P_CONFIRM" \
+          && { same_set confirm "$P_CONFIRM" instances "$P_INSTANCES" || err "confirm must repeat the instances value (${P_INSTANCES})"; }
       fi
       [[ "${P_PURGE_NS:-false}" != "true" || "${P_PURGE_PVCS:-false}" == "true" ]] || err "purgeNamespace=true needs purgePvcs=true"
     fi
@@ -762,10 +817,11 @@ case "$MODE" in
     if cmap_set; then
       map_exclusive "clusters=${P_CLUSTERS:-}" "apps=${P_APPS:-}"
       map_validate delete-apps "{}"
-      need confirm "${P_CONFIRM:-}" "repeat the cluster names of clusterMap"
+      need confirm "${P_CONFIRM:-}" "repeat the cluster names of clusterMap, in brackets"
       if [[ -n "${P_CONFIRM:-}" && -s "$WORK/cmap.json" ]]; then
-        same_set "$P_CONFIRM" "$(jq -r 'keys | join(",")' "$WORK/cmap.json")" \
-          || err "confirm must repeat the cluster names of clusterMap ($(jq -r 'keys | join(",")' "$WORK/cmap.json"))"
+        list_get confirm "$P_CONFIRM" \
+          && { same_set confirm "$P_CONFIRM" clusterMap "$(bracket_keys "$WORK/cmap.json")" \
+               || err "confirm must repeat the cluster names of clusterMap ($(bracket_keys "$WORK/cmap.json"))"; }
       fi
       # purgePvcs and purgeNamespace have no default: the map key or the input for every instance
       map_each_instance "(.v.purgePvcs // \"${P_PURGE_PVCS:-}\") != \"\"" "purgePvcs is required (map key or workflow input: true deletes PVCs and Azure disks, false keeps them)"
@@ -774,7 +830,7 @@ case "$MODE" in
         "purgeNamespace=true needs purgePvcs=true"
     else
       clusters_in clusters "${P_CLUSTERS:-}" ""
-      need apps "${P_APPS:-}" 'JSON map, for example {"aks-tpg-poc-01":["tpg-instances:orders-db","tpg-operator"]} (or clusterMap)'
+      need apps "${P_APPS:-}" 'JSON map, for example {"aks-tpg-poc-01":["tpg-instances:orders-db","tpg-instances:billing-db","tpg-operator"]} (or clusterMap)'
       if [[ -n "${P_APPS:-}" ]]; then
         if ! jq -e 'type == "object"' <<<"$P_APPS" >/dev/null 2>&1; then
           err "apps must be a JSON object that maps each cluster to a list of applications"
@@ -790,15 +846,17 @@ case "$MODE" in
             [[ -z "$a" ]] && continue
             case "$a" in
               tpg-operator|tpg-instances|tpg-instances:all) ;;
-              tpg-instances:*) for i in $(split_list "${a#tpg-instances:}"); do dnsname "apps instance" "$i"; done ;;
-              *) err "apps: unknown application '${a}'; use tpg-instances, tpg-instances:<instance>[,<instance>] or tpg-operator" ;;
+              tpg-instances:*,*) err "apps: '${a}' names several instances in one element; write one element per instance: \"tpg-instances:${a#tpg-instances:}\" becomes $(split_list "${a#tpg-instances:}" | sed 's/.*/"tpg-instances:&"/' | paste -sd, - | sed 's/,/, /g')" ;;
+              tpg-instances:*) dnsname "apps instance" "${a#tpg-instances:}" ;;
+              *) err "apps: unknown application '${a}'; use tpg-instances, tpg-instances:<instance> (one element per instance) or tpg-operator" ;;
             esac
           done < <(jq -r '.[] | .[]? | tostring' <<<"$P_APPS")
         fi
       fi
-      need confirm "${P_CONFIRM:-}" "repeat the clusters value"
+      need confirm "${P_CONFIRM:-}" "repeat the clusters value, in brackets"
       if [[ -n "${P_CONFIRM:-}" ]]; then
-        same_set "$P_CONFIRM" "${P_CLUSTERS:-}" || err "confirm must repeat the clusters value (${P_CLUSTERS:-})"
+        list_get confirm "$P_CONFIRM" \
+          && { same_set confirm "$P_CONFIRM" clusters "${P_CLUSTERS:-}" || err "confirm must repeat the clusters value (${P_CLUSTERS:-})"; }
       fi
       need purgePvcs "${P_PURGE_PVCS:-}" "true deletes PVCs and Azure disks, false keeps them"
       need purgeNamespace "${P_PURGE_NS:-}" "true deletes the pg-<instance> namespaces, false keeps them"
@@ -813,8 +871,14 @@ case "$MODE" in
     ;;
   helm-addons)
     clusters_in clusters "${P_CLUSTERS:-}" allow
-    for comp in $(split_list "${P_COMPONENTS:-auto}"); do oneof components "$comp" auto cert-manager vso monitoring; done
-    [[ "${P_COMPONENTS:-auto}" != *auto* || "${P_COMPONENTS:-auto}" == "auto" ]] || err "components: auto cannot be combined with other components"
+    # auto stays bare; the others are a bracketed list, [cert-manager, vso]
+    if [[ "${P_COMPONENTS:-auto}" != auto ]]; then
+      list_get components "${P_COMPONENTS:-auto}" --bare auto \
+        && for comp in ${LIST[@]+"${LIST[@]}"}; do
+          if [[ "$comp" == auto ]]; then err "components: auto stands alone, without brackets: components=auto"
+          else oneof components "$comp" cert-manager vso monitoring; fi
+        done
+    fi
     bool dryRun "${P_DRY_RUN:-false}"
     oneof existingAddons "${P_EXISTING:-skip}" skip upgrade
     ;;
@@ -834,16 +898,18 @@ case "$MODE" in
     # the length apart from the pattern: a POSIX regex repeat count is limited to 255 (musl in the
     # tools image refuses {16,512}: "Invalid contents of {}")
     [[ -z "$tokenv" || ( ${#tokenv} -ge 16 && ${#tokenv} -le 512 && "$tokenv" =~ ^[A-Za-z0-9._-]+$ ) ]] || err "wrappingToken is not a Vault token (16 to 512 letters, digits, '.', '_', '-')"
-    if [[ -n "${P_CA_FILE:-}" ]]; then
+    file_get caBundleFile "${P_CA_FILE:-}"
+    if [[ -n "$FILE" ]]; then
+      ca_path="$FILE"
       [[ "${P_SECRET_TYPE:-}" == ca-bundle ]] || err "caBundleFile applies to secretType ca-bundle only"
       [[ -z "$tokenv" ]] || err "caBundleFile and wrappingToken cannot be used together: the CA bundle comes from one of them"
       # a file of the submitting machine only: the write step runs without the Git
       # credential, and a bundle kept in the fleet repository needs no copy in Vault
-      # (tpg-day0, tpg-create-instance and tpg-patch read backupCaBundleFile=repo:... directly)
-      if [[ "$P_CA_FILE" == repo:* ]]; then
-        err "caBundleFile: '${P_CA_FILE}': tpg-rotate-credential takes a PEM file of the submitting machine, not a repo: file; use backupCaBundleFile=${P_CA_FILE} in tpg-day0, tpg-create-instance or tpg-patch instead"
+      # (tpg-day0, tpg-create-instance and tpg-patch read backupCaBundleFile=[repo:...] directly)
+      if [[ "$ca_path" == repo:* ]]; then
+        err "caBundleFile: '${ca_path}': tpg-rotate-credential takes a PEM file of the submitting machine, not a repo: file; use backupCaBundleFile=[${ca_path}] in tpg-day0, tpg-create-instance or tpg-patch instead"
       else
-        [[ "$P_CA_FILE" =~ $PATCH_LOCAL_CA_RE ]] || err "caBundleFile: '${P_CA_FILE}' must be the path of one PEM file (.pem, .crt or .cer)"
+        [[ "$ca_path" =~ $PATCH_LOCAL_CA_RE ]] || err "caBundleFile: '${ca_path}' must be the path of one PEM file (.pem, .crt or .cer), in brackets: [path]"
         [[ "${#ERRORS[@]}" -gt 0 ]] || P_BACKUP_CA_FILE="$P_CA_FILE" patch_files_check
       fi
     fi

@@ -23,5 +23,6 @@ An all-namespaces listing is `helm list -A`, and a cascading delete is
 kubectl --context aks-tpg-poc-01 get storageclass tpg-data-retain -o jsonpath='{.parameters.skuName}'
 kubectl rollout status deploy/argocd-server -n argocd --timeout=10s
 argo submit --from workflowtemplate/tpg-day0 -p clusters=all -p dryRun=true --watch
+argo submit --from workflowtemplate/tpg-scale-instance -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'instances=[orders-db]' -p replicas=2 --watch
 argocd app sync tpg-aks-tpg-poc-01-platform --grpc-web
 ```

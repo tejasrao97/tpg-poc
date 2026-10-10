@@ -4,7 +4,7 @@
 # (P_CLUSTER_MAP: deleteOperator and force per cluster, the instances listed, and
 # finalBackup, purgePvcs and purgeNamespace per instance), or from P_APPS (JSON map):
 #   tpg-instances                     every Postgres instance on the cluster
-#   tpg-instances:<i>[,<i>...]        selected instances
+#   tpg-instances:<i>                 one selected instance (one element per instance, Round 23)
 #   tpg-operator                      the Tanzu Postgres operator and its CRDs:
 #     postgres, postgresbackups, postgresbackuplocations, postgresbackupschedules,
 #     postgresferretdocumentdbs, postgresmigrations, postgresrestores, postgresversions,
@@ -34,7 +34,7 @@ result_guard "result.${C}"
 if cmap_set; then
   # the same application list, built from the map entry of the cluster
   apps="$(jq -cn --arg op "$(cmap_cval "$C" deleteOperator false)" --arg inst "$(cmap_instances "$C" | paste -sd,)" \
-    '(if $inst != "" then ["tpg-instances:" + $inst] else [] end) + (if $op == "true" then ["tpg-operator"] else [] end)')"
+    '($inst | split(",") | map(select(length > 0) | "tpg-instances:" + .)) + (if $op == "true" then ["tpg-operator"] else [] end)')"
   FORCE="$(cmap_cval "$C" force "$FORCE")"
   export DELETE_FROM_MAP=true
 else
@@ -45,7 +45,7 @@ while read -r a; do
   case "$a" in
     tpg-operator) DELETE_OPERATOR=true ;;
     tpg-instances|tpg-instances:all) ALL_INSTANCES=true ;;
-    tpg-instances:*) SELECTED="$(printf '%s\n%s' "$SELECTED" "$(split_list "${a#tpg-instances:}")")" ;;
+    tpg-instances:*) SELECTED="$(printf '%s\n%s' "$SELECTED" "${a#tpg-instances:}")" ;;
   esac
 done < <(jq -r '.[]' <<<"$apps")
 

@@ -108,7 +108,7 @@ run S_TOKEN=hvs.good-token-0000 S_UNWRAP='{"username": "tpg-remote-write", "pass
 echo "== 6 a CA bundle from caBundleFile"
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=ok-ca -keyout "$TMP/k1" -out "$TMP/ok.pem" 2>/dev/null
 pf="$(jq -cn --arg b "$(base64 < "$TMP/ok.pem" | tr -d '\n')" '{"./ca.pem": $b}')"
-run S_TOKEN= S_PATCH_FILES="$pf" P_SECRET_TYPE=ca-bundle P_SECRET_NAME=storage-ca P_CA_FILE=./ca.pem
+run S_TOKEN= S_PATCH_FILES="$pf" P_SECRET_TYPE=ca-bundle P_SECRET_NAME=storage-ca P_CA_FILE='[./ca.pem]'
 [[ -n "$(rec "result.vault|WRITTEN")" && "$(jq -r .data.caBundle "$TMP/state/write.json")" == "$(cat "$TMP/ok.pem")" ]] \
   && ok "6 written to tpg/ca-bundles/storage-ca" || bad "6 ca" "$OUT $(cat "$TMP/records")"
 python3 - "$TMP/old.pem" "$TMP/k2" <<'PY' 2>/dev/null || openssl req -x509 -newkey rsa:2048 -nodes -days 0 -subj /CN=old -keyout "$TMP/k2" -out "$TMP/old.pem" 2>/dev/null
@@ -125,7 +125,7 @@ c = (x509.CertificateBuilder().subject_name(n).issuer_name(n).public_key(k.publi
 open(sys.argv[1], "wb").write(c.public_bytes(serialization.Encoding.PEM))
 PY
 pf="$(jq -cn --arg b "$(base64 < "$TMP/old.pem" | tr -d '\n')" '{"./old.pem": $b}')"
-run S_TOKEN= S_PATCH_FILES="$pf" P_SECRET_TYPE=ca-bundle P_SECRET_NAME=storage-ca P_CA_FILE=./old.pem
+run S_TOKEN= S_PATCH_FILES="$pf" P_SECRET_TYPE=ca-bundle P_SECRET_NAME=storage-ca P_CA_FILE='[./old.pem]'
 [[ -n "$(rec "result.vault|FAILED|VALUE_REJECTED")" && ! -f "$TMP/state/write.json" ]] \
   && ok "6 an expired certificate is refused" || bad "6 expired" "$OUT $(cat "$TMP/records")"
 

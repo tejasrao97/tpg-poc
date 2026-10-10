@@ -2,8 +2,9 @@
 # discover.sh WORKFLOW_NAME CLUSTERS [FLEET_JSON]
 # Build the run inventory from the registered clusters (Secret argo/kubeconfig-<cluster>,
 # wave from its tpg.fleet/wave label) and clusters/fleet.yaml in tpg-fleet.
-# CLUSTERS is "all" (registered clusters that have an entry in fleet.yaml) or a
-# comma-separated list. FLEET_JSON, when set, replaces fleet.yaml (tpg-day0 dry runs).
+# CLUSTERS is "all" (registered clusters that have an entry in fleet.yaml) or the
+# comma-separated cluster names the validate step wrote to /tmp/selection (an internal
+# value; the clusters input itself is a bracketed list, parsed by validate-params.sh). FLEET_JSON, when set, replaces fleet.yaml (tpg-day0 dry runs).
 # Instance selection (environment), for the workflows that act on chosen instances:
 #   P_FILTER       none (default): every declared instance of the selected clusters
 #                  off:   the same, also with clusterMap (tpg-day0)
@@ -15,7 +16,8 @@
 #                  any:   only the selected instances, each declared on at least one
 #                         selected cluster (tpg-backup)
 #   P_CLUSTER_MAP  clusterMap: the instances of each cluster (always checked as pairs)
-#   P_INSTANCES    otherwise: comma-separated instances, or all / empty for every one
+#   P_INSTANCES    otherwise: the instances input, a bracketed list [a, b] (lib.sh list_items),
+#                  or all / empty for every one
 # A selected instance that is not declared fails the run here, before anything
 # changes, with UNKNOWN_INSTANCE and the instances that are declared.
 # Outputs:
@@ -149,7 +151,7 @@ for c in $wanted; do
 done
 
 if [[ "$FILTER" == "any" ]]; then
-  for i in $(split_list "${P_INSTANCES:-}"); do
+  for i in $(list_items instances "${P_INSTANCES:-}"); do
     [[ -n "${seen_anywhere[$i]:-}" ]] && continue
     record "result.${i}" FAILED UNKNOWN_INSTANCE "${i} is not declared on any selected cluster in ${FLEET_REL}"
     unknown=1

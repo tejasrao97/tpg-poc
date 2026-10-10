@@ -32,17 +32,17 @@ spec:
     parameters:
     # ---- targets: clusters and instances, or clusterMap (one of the two)
     - name: clusters
-      description: "List: comma-separated registered clusters (without clusterMap)"
+      description: "List: registered clusters in brackets, [aks-tpg-poc-01] (also with one value) (without clusterMap)"
       value: ""
     - name: instances
-      description: "List: instances to delete on every listed cluster; each must be declared there (without clusterMap)"
+      description: "List: instances to delete, in brackets, [orders-db], on every listed cluster; each must be declared there (without clusterMap)"
       value: ""
     - name: clusterMap
       description: "Map (YAML or JSON): cluster -> {instances: {instance -> {purgePvcs, purgeNamespace, finalBackup}}}; the inputs below are the defaults"
       value: ""
     # ---- mandatory
     - name: confirm
-      description: "List: repeat the instances value (without clusterMap) or the cluster names of clusterMap"
+      description: "List in brackets: repeat the instances value (without clusterMap) or the cluster names of clusterMap, for example [orders-db]"
       value: ""
     # ---- optional (defaults of every instance; clusterMap keys override them)
     - name: forceDeleteStuckApps

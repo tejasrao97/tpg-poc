@@ -30,13 +30,13 @@ spec:
     parameters:
     # ---- targets: clusters and apps, or clusterMap (one of the two)
     - name: clusters
-      description: "List: comma-separated registered clusters to clean up (without clusterMap)"
+      description: "List: registered clusters to clean up, in brackets, [aks-tpg-poc-01] (also with one value) (without clusterMap)"
       value: ""
     - name: apps
       description: >-
         Map (JSON) of cluster to applications (without clusterMap). Applications: tpg-instances (all
-        instances), tpg-instances:<instance>[,<instance>], tpg-operator (operator and CRDs).
-        Example: {"aks-tpg-poc-01":["tpg-instances","tpg-operator"],"aks-tpg-poc-02":["tpg-instances:orders-db"]}
+        instances), tpg-instances:<instance> (one element per instance), tpg-operator (operator and CRDs).
+        Example: {"aks-tpg-poc-01":["tpg-instances","tpg-operator"],"aks-tpg-poc-02":["tpg-instances:orders-db","tpg-instances:billing-db"]}
       value: ""
     - name: clusterMap
       description: >-
@@ -45,7 +45,7 @@ spec:
       value: ""
     # ---- mandatory (no default unless shown; the validate step lists the valid choices)
     - name: confirm
-      description: "List: repeat the clusters value, or the cluster names of clusterMap"
+      description: "List in brackets: repeat the clusters value, or the cluster names of clusterMap, for example [aks-tpg-poc-01]"
       value: ""
     - name: dryRun
       description: "true: record what would be deleted; false: delete"

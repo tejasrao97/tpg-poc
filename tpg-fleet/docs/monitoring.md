@@ -361,9 +361,9 @@ The workflows do the same for one or more registered clusters, followed by the f
 check of step 10 (`MONITORING_NOT_FLOWING` when it fails):
 
 ```bash
-argo submit -n argo --from workflowtemplate/tpg-helm-addons -p clusters=aks-tpg-poc-04 --watch
-argo submit -n argo --from workflowtemplate/tpg-helm-addons -p clusters=aks-tpg-poc-04 \
-  -p components=monitoring -p existingAddons=upgrade --watch        # re-apply changed values
+argo submit -n argo --from workflowtemplate/tpg-helm-addons -p 'clusters=[aks-tpg-poc-04]' --watch
+argo submit -n argo --from workflowtemplate/tpg-helm-addons -p 'clusters=[aks-tpg-poc-04]' \
+  -p 'components=[monitoring]' -p existingAddons=upgrade --watch        # re-apply changed values
 ```
 
 `tpg-day0` runs the same installation (`installAddons=true`, the default) before it
@@ -423,7 +423,7 @@ login that can read `tpg/shared/monitoring-remote-write`.
      (every target's egress plus `monitoring.extraSourceCidrs`), installs the new
      target's add-ons and checks that its metrics arrive.
 2. When the cluster is registered already and only its monitoring is missing,
-   `tpg-helm-addons -p clusters=<cluster>` (or `tpg-day0`) is enough, but the
+   `tpg-helm-addons -p 'clusters=[<cluster>]'` (or `tpg-day0`) is enough, but the
    workflows do not change any load balancer: with public exposure the new egress CIDR
    must already be in both source range lists (`--only register` and `--only addons`
    put it there). Check:
@@ -573,7 +573,7 @@ helm --kube-context aks-tpg-poc-01 -n monitoring get values kps -o json | jq '.p
 ```
 
 Fix: `argo submit -n argo --from workflowtemplate/tpg-helm-addons -p
-clusters=aks-tpg-poc-01 -p components=monitoring -p existingAddons=upgrade --watch`, or
+'clusters=[aks-tpg-poc-01]' -p 'components=[monitoring]' -p existingAddons=upgrade --watch`, or
 `scripts/run.sh ... --only addons --yes`. The series written without the label stay
 in the hub Prometheus until its retention (15 days) removes them.
 

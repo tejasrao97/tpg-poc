@@ -49,11 +49,16 @@ if [[ "$CMD" == "plan" ]]; then
   # the rule values of every target: clusterMap keys over the inputs, checked
   # and normalized with the clusterMap rules
   map_flag() { [[ -n "$(tr -d '[:space:]' <<<"${1:-}")" ]] || { printf ''; return; }; printf '%s\n' "$1" | yq -o=json -I=0 '.' 2>/dev/null || printf '%s' "$1"; }
-  jq -cn --arg ingressFromNamespaces "${P_INGRESS_FROM_NAMESPACES:-}" \
+  # (the list inputs are bracketed, [a, b]: list_flag turns them into JSON arrays)
+  f_ifn="$(list_flag ingressFromNamespaces "${P_INGRESS_FROM_NAMESPACES:-}")" || exit 1
+  f_ifc="$(list_flag ingressFromCidrs "${P_INGRESS_FROM_CIDRS:-}")" || exit 1
+  f_etc="$(list_flag egressToCidrs "${P_EGRESS_TO_CIDRS:-}")" || exit 1
+  f_etf="$(list_flag egressToFqdns "${P_EGRESS_TO_FQDNS:-}")" || exit 1
+  jq -cn --argjson ingressFromNamespaces "$f_ifn" \
     --arg ingressFromPodLabels "$(map_flag "${P_INGRESS_FROM_POD_LABELS:-}")" \
-    --arg ingressFromCidrs "${P_INGRESS_FROM_CIDRS:-}" --arg egressToCidrs "${P_EGRESS_TO_CIDRS:-}" \
-    --arg egressToFqdns "${P_EGRESS_TO_FQDNS:-}" \
-    '$ARGS.named | with_entries(select(.value != "")) | with_entries(.value |= (fromjson? // .))' > "$WORK/flags.json"
+    --argjson ingressFromCidrs "$f_ifc" --argjson egressToCidrs "$f_etc" \
+    --argjson egressToFqdns "$f_etf" \
+    '$ARGS.named | with_entries(select(.value != "")) | with_entries(.value |= (if type == "string" then (fromjson? // .) else . end))' > "$WORK/flags.json"
   cmap_load
   jq -c --slurpfile f "$WORK/flags.json" --slurpfile m "$WORK/cmap.json" '
     [.[] | .name as $c | .instances[] | .name as $i

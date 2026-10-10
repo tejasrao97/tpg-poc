@@ -67,9 +67,11 @@ if [[ -n "$token" ]]; then
 elif [[ "$TYPE" == ca-bundle && -n "${P_CA_FILE:-}" ]]; then
   # a CA bundle is public; the validate step refuses a repo: file for this workflow
   pem="$WORK/ca.pem"
-  patch_file_write "$P_CA_FILE" "$pem" "$WORK/repo" || fail FILE_NOT_RECEIVED "${P_CA_FILE}: ${PATCH_FILES_ERROR:-its contents are not in patchFiles}"
+  mkdir -p "$WORK"
+  ca_file="$(file_item caBundleFile "$P_CA_FILE" 2>"$WORK/list.err")" || fail INVALID_INPUT "$(tr '\n' ' ' < "$WORK/list.err")"
+  patch_file_write "$ca_file" "$pem" "$WORK/repo" || fail FILE_NOT_RECEIVED "${ca_file}: ${PATCH_FILES_ERROR:-its contents are not in patchFiles}"
   DATA="$(jq -cn --rawfile v "$pem" '{caBundle: $v}')"
-  source_note="${P_CA_FILE}"
+  source_note="${ca_file}"
 else
   fail NOTHING_TO_WRITE "neither wrappingToken nor caBundleFile is set"
 fi

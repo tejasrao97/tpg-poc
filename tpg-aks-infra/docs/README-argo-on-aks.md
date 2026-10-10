@@ -448,7 +448,7 @@ cd tpg-aks-infra
 # pre-created clusters:
 # ./scripts/run.sh --hub install --targets precreated --inventory inventory/clusters.yaml --from vault
 argo submit -n argo --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct -p dryRun=true --watch
 ```
 

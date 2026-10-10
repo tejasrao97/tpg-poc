@@ -19,11 +19,11 @@
 # Adding a key is one entry here:
 #   type       string | name | boolean | integer | posint | quantity | enum |
 #              operatorVersion | postgresVersion |
-#              patchFile (one .yaml/.yml file: a path of the submitting machine,
-#                absolute or relative, whose contents come in patchFiles, or
-#                repo:<path> in the fleet repository) |
-#              patchFileList (a list of such files) |
-#              caFile (one PEM file: a path of the submitting machine or
+#              patchFile (one .yaml/.yml file, in brackets: [./a.yaml]; a path of the
+#                submitting machine, absolute or relative, whose contents come in
+#                patchFiles, or repo:<path> in the fleet repository) |
+#              patchFileList (a list of such files: [./a.yaml, repo:<path>]) |
+#              caFile (one PEM file, in brackets: a path of the submitting machine or
 #                repo:<path>, .pem, .crt or .cer) |
 #              kindList (Postgres, PostgresBackupLocation, PostgresBackupSchedule,
 #                PostgresFerretDocumentDB, postgresValues, operatorValues, or all) |
@@ -32,10 +32,15 @@
 #              stringMap (annotation or label keys to string values) |
 #              cron (5 fields; allowNone: true also takes none or an empty value) |
 #              k8sName (a Kubernetes object name)
-#              A list is a YAML/JSON list or a comma-separated string; a
-#              stringMap is a YAML/JSON mapping. Neither may be empty: a key
-#              that should no longer apply is removed, not set to [] or {}
-#              (an empty value cannot clear a value set at a lower level).
+#              A list is a YAML/JSON sequence, also with one value ([tpg-poc-01]);
+#              a comma-separated string is refused with the list syntax (Round 23).
+#              patchFile and caFile are a sequence of exactly one path. kindList
+#              also takes the bare word all. A file entry with whitespace ("repo: x.yaml",
+#              which YAML reads as a mapping) fails with
+#              repo:<file path> "check for white spaces in between". A stringMap is a
+#              YAML/JSON mapping. Neither may be empty: a key that should no longer
+#              apply is removed, not set to [] or {} (an empty value cannot clear a
+#              value set at a lower level).
 #   values     enum only: the accepted values
 #   repoDir    patchFile, patchFileList: the folder a repo:<path> must be in
 #   workflows  workflow -> required | optional | guard

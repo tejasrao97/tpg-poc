@@ -44,7 +44,7 @@ DISPLAY = {
     "string": "String", "name": "String (name)", "azureName": "String (Azure name)", "k8sName": "String (name)",
     "boolean": "Boolean", "integer": "Integer", "posint": "Integer", "quantity": "String (quantity)",
     "enum": "Enum", "operatorVersion": "String (version)", "postgresVersion": "String (version)",
-    "patchFile": "String (file path)", "patchFileList": "List (file paths)", "caFile": "String (file path)",
+    "patchFile": "List (one file path)", "patchFileList": "List (file paths)", "caFile": "List (one file path)",
     "kindList": "List (kinds)", "nameList": "List", "cidrList": "List (CIDRs)", "fqdnList": "List (host names)",
     "stringMap": "Map", "cron": "String (cron)",
 }
@@ -55,7 +55,7 @@ DISPLAY = {
 EXAMPLE = {
     "cluster": {
         "operatorVersion": "v4.5.0", "maxReadReplicas": 3,
-        "operatorValuesPatchFilePath": "./operator-resources.yaml", "operatorValuesOverlayFilePath": "./operator-resources.yaml",
+        "operatorValuesPatchFilePath": ["./operator-resources.yaml"], "operatorValuesOverlayFilePath": ["./operator-resources.yaml"],
         "patchMode": "apply",
         "backupCaBundleVaultSecret": "azure-storage", "deleteOperator": True, "force": False,
     },
@@ -65,13 +65,13 @@ EXAMPLE = {
         "backupSchedule": "operator", "operatorFullSchedule": "0 1 * * 0", "operatorIncrementalSchedule": "0 1 * * 1-6",
         "ferret": True, "ferretReplicas": 2, "ferretReadOnlyReplicas": 1, "ferretExposure": "clusterIP",
         "ferretSecretName": "orders-db-app-user-db-secret", "ferretReadOnlySecretName": "orders-db-read-only-user-db-secret",
-        "backupEnableSSL": True, "backupCaBundleFile": "repo:ca-bundles/azure-storage.pem",
+        "backupEnableSSL": True, "backupCaBundleFile": ["repo:ca-bundles/azure-storage.pem"],
         "disableInitialBackup": False,
         "backupFullRetention": 4, "backupFullRetentionType": "count",
         "postgresPatchFilePath": ["./orders-resources.yaml", "repo:helm_artifacts/instance/tpg-instance/patches/team-backup-schedule.yaml"],
-        "postgresValuesPatchFilePath": "~/patches/orders-values.yaml",
+        "postgresValuesPatchFilePath": ["~/patches/orders-values.yaml"],
         "postgresOverlayFilePath": ["./orders-resources.yaml", "repo:helm_artifacts/instance/tpg-instance/overlays/team-backup-schedule.yaml"],
-        "postgresValuesOverlayFilePath": "~/overlays/orders-values.yaml", "patchMode": "apply",
+        "postgresValuesOverlayFilePath": ["~/overlays/orders-values.yaml"], "patchMode": "apply",
         "backupType": "full", "backupTimeoutSeconds": 3600, "replicas": 2, "enableHAIfNeeded": True,
         "preUpgradeBackup": True, "allowMajor": False, "purgePvcs": True, "purgeNamespace": True, "finalBackup": "required",
         "exposure": "internalLoadBalancer", "serviceAnnotations": {"service.beta.kubernetes.io/azure-dns-label-name": "orders"},
@@ -82,7 +82,7 @@ EXAMPLE = {
     },
 }
 COMMENTED = {
-    "cluster": {"backupCaBundleFile": "backupCaBundleFile: ./azure-ca.pem   # or this instead of backupCaBundleVaultSecret (one source per level)",
+    "cluster": {"backupCaBundleFile": "backupCaBundleFile: [./azure-ca.pem]   # or this instead of backupCaBundleVaultSecret (one source per level)",
                 "clearKinds": "clearKinds: [operatorValues]   # with patchMode: clear"},
     "instance": {"backupCaBundleVaultSecret": "backupCaBundleVaultSecret: azure-storage   # or this instead of backupCaBundleFile (one source per level)",
                  "clearKinds": "clearKinds: [PostgresBackupSchedule, postgresValues]   # with patchMode: clear"},
@@ -129,31 +129,24 @@ def value_schema(spec):
         s = {"type": "string", "pattern": _p(cm.CRON)}
         return {"anyOf": [s, {"enum": ["", "none"]}]} if spec.get("allowNone") else s
     if t in ("patchFile", "caFile"):
+        # one file, but still a list (Round 23): [./a.yaml]
         local, repo = _file_alternatives(spec)
-        s = {"type": "string", "pattern": f"^({local}|{repo})$"}
+        item = {"type": "string", "pattern": f"^({local}|{repo})$"}
         if t == "patchFile":
-            s["not"] = {"pattern": _p(cm.OPERATOR_COPY)}
-        return s
+            item["not"] = {"pattern": _p(cm.OPERATOR_COPY)}
+        return {"type": "array", "minItems": 1, "maxItems": 1, "items": item}
     if t == "patchFileList":
         local, repo = _file_alternatives(spec)
-        one = f"({local}|{repo})"
-        return {"anyOf": [
-            {"type": "array", "minItems": 1, "uniqueItems": True,
-             "items": {"type": "string", "pattern": f"^{one}$"}},
-            {"type": "string", "pattern": rf"^\s*{one}(\s*,\s*{one})*\s*$"}]}
+        return {"type": "array", "minItems": 1, "uniqueItems": True,
+                "items": {"type": "string", "pattern": f"^({local}|{repo})$"}}
     if t == "kindList":
-        kinds = "|".join(cm.PATCH_KINDS)
         return {"anyOf": [
             {"const": "all"}, {"const": ["all"]},
-            {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"enum": list(cm.PATCH_KINDS)}},
-            {"type": "string", "pattern": rf"^\s*({kinds})(\s*,\s*({kinds}))*\s*$"}]}
+            {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"enum": list(cm.PATCH_KINDS)}}]}
     if t in ("nameList", "cidrList", "fqdnList"):
         item = {"nameList": _p(cm.NAME), "fqdnList": _p(cm.FQDN),
                 "cidrList": r"^[0-9A-Fa-f:.]+/[0-9]{1,3}$"}[t]
-        inner = item[1:-1]
-        return {"anyOf": [
-            {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"type": "string", "pattern": item}},
-            {"type": "string", "pattern": rf"^\s*{inner}(\s*,\s*{inner})*\s*$"}]}
+        return {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"type": "string", "pattern": item}}
     if t == "stringMap":
         return {"type": "object", "minProperties": 1, "propertyNames": {"pattern": _p(cm.MAP_KEY)},
                 "additionalProperties": {"type": ["string", "number", "boolean"]}}

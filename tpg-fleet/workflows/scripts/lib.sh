@@ -186,7 +186,7 @@ ca_bundle_resolve() {
   # or returns 1 with CA_ERR (Round 15, D86). The source of the backup CA bundle of
   # an enableSSL instance: backupCaBundleFile or backupCaBundleVaultSecret of the
   # instance (ENTRY_JSON, its clusterMap keys), else of its cluster (clusterMap), else
-  # the inputs (P_BACKUP_CA_FILE, P_BACKUP_CA_VAULT), else ConfigMap tpg-settings
+  # the inputs (P_BACKUP_CA_FILE, bracketed: [path]; P_BACKUP_CA_VAULT), else ConfigMap tpg-settings
   # backupCaBundle. A file and a Vault secret on one level are refused.
   local c="$1" i="$2" e="$3" repo="${4:-${REPO:-}}" f v lvl tmp out
   CA_PEM=""; CA_SOURCE=""; CA_ERR=""
@@ -195,7 +195,7 @@ ca_bundle_resolve() {
     case "$lvl" in
       instance) f="$(jq -r '.backupCaBundleFile // ""' <<<"$e")"; v="$(jq -r '.backupCaBundleVaultSecret // ""' <<<"$e")" ;;
       cluster)  f="$(cmap_cval "$c" backupCaBundleFile)"; v="$(cmap_cval "$c" backupCaBundleVaultSecret)" ;;
-      input)    f="${P_BACKUP_CA_FILE:-}"; v="${P_BACKUP_CA_VAULT:-}" ;;
+      input)    f="$(file_item backupCaBundleFile "${P_BACKUP_CA_FILE:-}")"; v="${P_BACKUP_CA_VAULT:-}" ;;   # [path] -> path
     esac
     if [[ -n "$f" && -n "$v" ]]; then
       CA_ERR="${c}/${i}: backupCaBundleFile and backupCaBundleVaultSecret are both set (${lvl}): name one source"; return 1
@@ -1448,8 +1448,34 @@ norm_postgres_version() {
 }
 
 split_list() {
-  # split_list "a, b,,c" -> one trimmed item per line
+  # split_list "a, b,,c" -> one trimmed item per line. For INTERNAL values only: the
+  # comma-joined lists the steps pass to each other (the cluster selection, plan
+  # records, a clusterMap list joined by cmap_cval). A workflow INPUT is parsed by
+  # list_items below, which is strict.
   tr ',' '\n' <<<"$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true
+}
+
+# The list inputs of the workflows are strict (Round 23): bracketed even with one value,
+# [tpg-poc-01] or [a, b] (YAML flow) or ["a","b"] (JSON); only all (and auto for
+# components) stays bare. One parser, workflows/scripts/clustermap.py as_list, behind
+# these functions. A bad value prints the message (it names the input and shows the
+# syntax) on stderr and returns 1; an empty value is an unset input (no output, 0).
+#   list_items NAME VALUE [--bare WORD]... [--files] [--one]   one item per line
+#   list_csv   NAME VALUE ...                                  items joined with commas (the internal form)
+#   file_item  NAME VALUE                                      the one file of a single-file input: [./a.yaml]
+# --bare WORD: a value that is exactly WORD (all) is returned as that single item;
+# --files: the items are paths (repo: with whitespace gets its own message).
+list_items() { python3 "$TPG_LIB_DIR/clustermap.py" list "$@"; }
+list_csv() { list_items "$@" --csv; }
+file_item() { list_items "$1" "$2" --files --one; }
+list_flag() {
+  # list_flag NAME VALUE [OPTS] -> the list input as a JSON array, or "" (a JSON string) when the
+  # input is empty, the form the clusterMap rules take (--files --one: a single-file input as
+  # ["path"]). A bad value is recorded as INVALID_INPUT on result.git (LIST_FLAG_KEY) and
+  # returns 1: call it as  x="$(list_flag ...)" || exit 1
+  local out
+  out="$(list_items "$@" --json 2>&1)" || { record "${LIST_FLAG_KEY:-result.git}" FAILED INVALID_INPUT "$out"; return 1; }
+  if [[ "$out" == "[]" ]]; then printf '""'; else printf '%s' "$out"; fi
 }
 
 # ----------------------------------------------------------------- clusterMap
@@ -1511,11 +1537,11 @@ cmap_ival() {
 
 selected_instances() {
   # selected_instances REPO CLUSTER -> instances this run acts on, one per line:
-  # the clusterMap entries of the cluster, else the instances input (a list, or
+  # the clusterMap entries of the cluster, else the instances input (a bracketed list, or
   # all/empty for every instance declared for the cluster in clusters/fleet.yaml)
   if cmap_set; then cmap_instances "$2"; return; fi
   if [[ -z "${P_INSTANCES:-}" || "${P_INSTANCES}" == "all" ]]; then fleet_instances "$1" "$2"; return; fi
-  split_list "$P_INSTANCES"
+  list_items instances "$P_INSTANCES"
 }
 
 cmap_guard() {

@@ -21,6 +21,12 @@
 #   FILE...: packs exactly these files (with -o into the parameter file, without it
 #       the JSON is printed, for -p on the command line; Linux limits one
 #       command-line argument to 128 KiB, about 90 KiB of files).
+# Lists are strict (Round 23): an input is a quoted string that holds a bracketed list,
+# postgresPatchFilePath: '[./a.yaml, ./b.yaml]', and a single-file input is a list of one,
+# backupCaBundleFile: '[./ca.pem]'; in the clusterMap they are YAML sequences. "repo: x.yaml"
+# (a space after the colon) fails with repo:<file path> "check for white spaces in between".
+# The bracketed lists are read with workflows/scripts/clustermap.py of the tpg-fleet clone
+# (TPG_FLEET_DIR, else the clone this script sits in) and python3.
 # Paths may be absolute, start with ~/ or be relative to the current directory
 # (the directory argo submit runs in: the same path is the key). Each file is
 # checked before it is packed: it exists, has at most 256 KiB, a patch file is
@@ -67,42 +73,50 @@ if [[ $# -eq 0 ]]; then
   if [[ "$(yq -r '.patchMode // "apply"' "$out_file")" == clear ]]; then
     echo "patchMode=clear takes no files: nothing to pack" >&2
   fi
-  for k in postgresPatchFilePath postgresValuesPatchFilePath operatorValuesPatchFilePath \
-           postgresOverlayFilePath postgresValuesOverlayFilePath operatorValuesOverlayFilePath backupCaBundleFile caBundleFile; do
+  if [[ -z "$FLEET" || ! -f "$FLEET/workflows/scripts/clustermap.py" ]] || ! command -v python3 >/dev/null; then
+    echo "reading the bracketed lists of ${out_file} needs python3 and a tpg-fleet clone (TPG_FLEET_DIR=<clone>)" >&2; exit 1
+  fi
+  # input -> kind; list: several files; one: exactly one file
+  for kk in postgres:postgresPatchFilePath:list values:postgresValuesPatchFilePath:one operator:operatorValuesPatchFilePath:one \
+            postgres:postgresOverlayFilePath:list values:postgresValuesOverlayFilePath:one operator:operatorValuesOverlayFilePath:one \
+            ca:backupCaBundleFile:one ca:caBundleFile:one; do
+    kind="${kk%%:*}"; k="${kk#*:}"; shape="${k#*:}"; k="${k%%:*}"
     t="$(K="$k" yq -r '.[strenv(K)] | tag' "$out_file" 2>/dev/null || true)"
     case "$t" in
-      ""|"!!null"|"!!str") ;;
-      "!!seq") echo "${out_file}: ${k} is a YAML list; a workflow input is one string: write the paths comma-separated (${k}: a.yaml,b.yaml). YAML lists belong in clusterMap." >&2; exit 1 ;;
-      *) echo "${out_file}: ${k} must be a string (the path), not ${t#!!}" >&2; exit 1 ;;
+      ""|"!!null") continue ;;
+      "!!str") ;;
+      "!!seq") echo "${out_file}: ${k} is a YAML list; a workflow input is one string: write the list as a quoted string, ${k}: '[a.yaml, b.yaml]'. YAML lists belong in clusterMap." >&2; exit 1 ;;
+      *) echo "${out_file}: ${k} must be a string (a bracketed list), not ${t#!!}" >&2; exit 1 ;;
     esac
+    v="$(K="$k" yq -r '.[strenv(K)]' "$out_file")"
+    [[ -n "$(tr -d '[:space:]' <<<"$v")" ]] || continue
+    lopts=(--files); [[ "$shape" != one ]] || lopts+=(--one)
+    if ! items="$(python3 "$FLEET/workflows/scripts/clustermap.py" list "$k" "$v" "${lopts[@]}" 2>&1)"; then
+      echo "${out_file}: ${items}" >&2; exit 1
+    fi
+    while IFS= read -r p; do
+      [[ -z "$p" ]] || rows="${rows}${kind}"$'\t'"${p}"$'\t'"${k}"$'\n'
+    done <<<"$items"
   done
-  # shellcheck disable=SC2016  # yq programs
-  rows="$(yq -r '
-      ((.postgresPatchFilePath // "") | split(",") | .[] | sub("^ +| +$"; "") | select(. != "") | ["postgres", ., "postgresPatchFilePath"] | @tsv),
-      ((.postgresValuesPatchFilePath // "") | select(. != "") | ["values", ., "postgresValuesPatchFilePath"] | @tsv),
-      ((.operatorValuesPatchFilePath // "") | select(. != "") | ["operator", ., "operatorValuesPatchFilePath"] | @tsv),
-      ((.postgresOverlayFilePath // "") | split(",") | .[] | sub("^ +| +$"; "") | select(. != "") | ["postgres", ., "postgresOverlayFilePath"] | @tsv),
-      ((.postgresValuesOverlayFilePath // "") | select(. != "") | ["values", ., "postgresValuesOverlayFilePath"] | @tsv),
-      ((.operatorValuesOverlayFilePath // "") | select(. != "") | ["operator", ., "operatorValuesOverlayFilePath"] | @tsv),
-      ((.backupCaBundleFile // "") | select(. != "") | ["ca", ., "backupCaBundleFile"] | @tsv),
-      ((.caBundleFile // "") | select(. != "") | ["ca", ., "caBundleFile"] | @tsv)' "$out_file")"
   map="$(yq -r '.clusterMap // ""' "$out_file")"
-  # (in yq a comma binds looser than a pipe: the alternatives after a pipe are parenthesized)
   if [[ -n "$(tr -d '[:space:]' <<<"$map")" ]]; then
-    # shellcheck disable=SC2016  # yq program
-    if ! crows="$(printf '%s\n' "$map" | yq -r '
+    # the clusterMap lists are YAML sequences (Round 23), a single file is a sequence of one; a string is a
+    # mistake (kind "bad"), a mapping or an entry with whitespace is "repo: x.yaml" (kind "ws")
+    # shellcheck disable=SC2016  # jq program
+    if ! crows="$(printf '%s\n' "$map" | yq -o=json -I=0 '.' 2>&1 | jq -r '
+      def rows($o; $pairs; $w):
+        $pairs[] as $p | ($o[$p[0]]) as $v | select($v != null)
+        | ($w + "." + $p[0]) as $where
+        | if ($v | type) == "array" then
+            $v[] | if type == "object" or (type == "string" and test("\\s")) then ["ws", "-", $where]
+                   elif type == "string" then [$p[1], ., $where] else ["bad", tostring, $where] end
+          else ["bad", ($v | tostring), $where] end
+        | @tsv;
       to_entries[] | .key as $c | .value as $cv
-      | ((($cv.operatorValuesPatchFilePath // "") | select(. != "") | ["operator", ., $c + ".operatorValuesPatchFilePath"] | @tsv),
-        (($cv.operatorValuesOverlayFilePath // "") | select(. != "") | ["operator", ., $c + ".operatorValuesOverlayFilePath"] | @tsv),
-        (($cv.backupCaBundleFile // "") | select(. != "") | ["ca", ., $c + ".backupCaBundleFile"] | @tsv),
+      | rows($cv; [["operatorValuesPatchFilePath","operator"], ["operatorValuesOverlayFilePath","operator"], ["backupCaBundleFile","ca"]]; $c),
         (($cv.instances // {}) | to_entries[] | .key as $i | .value as $iv
-         | ((($iv.postgresPatchFilePath // []) | (select(tag == "!!str") | split(",")) // . | .[] | sub("^ +| +$"; "") | select(. != "")
-              | ["postgres", ., $c + ".instances." + $i + ".postgresPatchFilePath"] | @tsv),
-           (($iv.postgresValuesPatchFilePath // "") | select(. != "") | ["values", ., $c + ".instances." + $i + ".postgresValuesPatchFilePath"] | @tsv),
-           (($iv.postgresOverlayFilePath // []) | (select(tag == "!!str") | split(",")) // . | .[] | sub("^ +| +$"; "") | select(. != "")
-              | ["postgres", ., $c + ".instances." + $i + ".postgresOverlayFilePath"] | @tsv),
-           (($iv.postgresValuesOverlayFilePath // "") | select(. != "") | ["values", ., $c + ".instances." + $i + ".postgresValuesOverlayFilePath"] | @tsv),
-           (($iv.backupCaBundleFile // "") | select(. != "") | ["ca", ., $c + ".instances." + $i + ".backupCaBundleFile"] | @tsv))))' 2>&1)"; then
+         | rows($iv; [["postgresPatchFilePath","postgres"], ["postgresOverlayFilePath","postgres"], ["postgresValuesPatchFilePath","values"],
+                      ["postgresValuesOverlayFilePath","values"], ["backupCaBundleFile","ca"]]; $c + ".instances." + $i))' 2>&1)"; then
       echo "${out_file}: clusterMap is not valid YAML or JSON: ${crows}" >&2; exit 1
     fi
     rows="${rows}"$'\n'"${crows}"
@@ -120,6 +134,8 @@ declare_seen=" "
 n=0
 : > "$tmp/list"
 while IFS=$'\t' read -r kind p where; do
+  if [[ "$kind" == ws ]]; then echo "${where}: repo:<file path> \"check for white spaces in between\"" >&2; errors=1; continue; fi
+  if [[ "$kind" == bad ]]; then echo "${where}: '${p}' is not a list; write it as a YAML sequence, [path] (a single file too)" >&2; errors=1; continue; fi
   [[ -n "$p" ]] || continue
   case "$p" in repo:*) continue ;; esac   # read by the workflow from the fleet branch
   f="$(local_file "$p")"

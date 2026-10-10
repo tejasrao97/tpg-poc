@@ -3,17 +3,17 @@
 # into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
 # yaml-language-server: $schema=clustermap-patch.schema.json
 aks-tpg-poc-01:
-  operatorValuesPatchFilePath: ./operator-resources.yaml
+  operatorValuesPatchFilePath: [./operator-resources.yaml]
   patchMode: apply
-  # backupCaBundleFile: ./azure-ca.pem   # or this instead of backupCaBundleVaultSecret (one source per level)
+  # backupCaBundleFile: [./azure-ca.pem]   # or this instead of backupCaBundleVaultSecret (one source per level)
   backupCaBundleVaultSecret: azure-storage
   # clearKinds: [operatorValues]   # with patchMode: clear
   instances:
     orders-db:
       postgresVersion: postgres-17.6
-      backupCaBundleFile: repo:ca-bundles/azure-storage.pem
+      backupCaBundleFile: ['repo:ca-bundles/azure-storage.pem']
       # backupCaBundleVaultSecret: azure-storage   # or this instead of backupCaBundleFile (one source per level)
       postgresPatchFilePath: [./orders-resources.yaml, 'repo:helm_artifacts/instance/tpg-instance/patches/team-backup-schedule.yaml']
-      postgresValuesPatchFilePath: ~/patches/orders-values.yaml
+      postgresValuesPatchFilePath: [~/patches/orders-values.yaml]
       patchMode: apply
       # clearKinds: [PostgresBackupSchedule, postgresValues]   # with patchMode: clear

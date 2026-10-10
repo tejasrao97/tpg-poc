@@ -91,13 +91,13 @@ n
   && ok "day0: a wrong operatorVersion is refused with its type and asked again" || bad "day0 retry" "$OUT"
 grep -q "Type:    enum (one of direct, pr)" <<<"$OUT" && grep -q "Example: internalLoadBalancer" <<<"$OUT" \
   && ok "day0: each prompt shows the type and an example" || bad "day0 prompt text" "$OUT"
-argo_has "workflowtemplate/tpg-day0" && argo_has "clusters=aks-tpg-poc-01,aks-tpg-poc-02" && argo_has "instances=orders-db" \
+argo_has "workflowtemplate/tpg-day0" && argo_has "clusters=[aks-tpg-poc-01, aks-tpg-poc-02]" && argo_has "instances=[orders-db]" \
   && argo_has "pushMode=direct" && argo_has "highAvailability=true" && argo_has "operatorVersion=v4.5.0" && argo_has "postgresVersion=17.6" \
   && argo_has "exposure=internalLoadBalancer" \
   && argo_has 'serviceAnnotations={"service.beta.kubernetes.io/azure-load-balancer-internal-subnet":"apps-subnet"}' \
   && ! grep -q '^clusterMap=' "$TMP/argo-args" \
   && ok "day0: argo submit with the mandatory inputs, the enum and the map (as JSON), nothing else" || bad "day0 argo args" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
-grep -qF "argo submit -n argo --from workflowtemplate/tpg-day0 -p clusters=aks-tpg-poc-01,aks-tpg-poc-02 -p instances=orders-db" <<<"$OUT" \
+grep -qF "argo submit -n argo --from workflowtemplate/tpg-day0 -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'instances=[orders-db]'" <<<"$OUT" \
   && grep -qF -- "-p 'serviceAnnotations={\"service.beta.kubernetes.io/azure-load-balancer-internal-subnet\":\"apps-subnet\"}'" <<<"$OUT" \
   && ok "day0: the equivalent argo command is printed, single-quoted where the shell needs it" || bad "day0 command" "$OUT"
 
@@ -136,8 +136,33 @@ orders-db
 1"
 grep -q "clusterMap is not valid for tpg-network-policy" <<<"$OUT" && grep -q "aks-tpg-poc-09" <<<"$OUT" && grep -q "ingressFromNamespaces" <<<"$OUT" \
   && ok "network-policy: an invalid clusterMap lists the reasons (unregistered cluster, misspelt key)" || bad "np invalid map" "$OUT"
-argo_has "clusters=aks-tpg-poc-01" && argo_has "instances=orders-db" && argo_has "mode=apply" && ! grep -q '^clusterMap=' "$TMP/argo-args" \
+argo_has "clusters=[aks-tpg-poc-01]" && argo_has "instances=[orders-db]" && argo_has "mode=apply" && ! grep -q '^clusterMap=' "$TMP/argo-args" \
   && ok "network-policy: clusterMap left unset, the lists select the targets" || bad "np lists" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
+
+# Round 23: lists are bracketed; the prompts accept plain names and send the bracketed form
+ASKED_NP=(clusterMap clusters instances mode pushMode)
+n_ns="$(optnum tpg-network-policy ingressFromNamespaces "${ASKED_NP[@]}")"
+n_cd="$(optnum tpg-network-policy ingressFromCidrs "${ASKED_NP[@]}")"
+sub tpg-network-policy yes "2
+aks-tpg-poc-01 , aks-tpg-poc-02
+all
+[orders-db]
+1
+1
+${n_ns}
+app,  batch
+y
+${n_cd}
+10.1.0.0/16
+n
+1"
+argo_has "clusters=[aks-tpg-poc-01, aks-tpg-poc-02]" && argo_has "instances=[orders-db]" && argo_has "ingressFromNamespaces=[app, batch]" \
+  && argo_has "ingressFromCidrs=[10.1.0.0/16]" && ! grep -q '^clusters=aks' "$TMP/argo-args" \
+  && ok "R23 np: plain names get their brackets (a comma list, one value), a typed [orders-db] stays" || bad "R23 np brackets" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
+grep -q "'all' is not a List in brackets" <<<"$OUT" \
+  && ok "R23 np: all is refused for a list input that does not take it, and asked again" || bad "R23 np all" "$OUT"
+grep -q "Lists are written in brackets" <<<"$OUT" && grep -q "Example: \[aks-tpg-poc-01, aks-tpg-poc-02\]" <<<"$OUT" \
+  && ok "R23 np: the prompt shows the bracketed example and says that plain names are accepted" || bad "R23 np prompt" "$OUT"
 
 # tpg-scale-instance (Round 14): a run that only changes the cap asks for neither
 # instances nor replicas; scaling asks for both
@@ -148,7 +173,7 @@ aks-tpg-poc-01
 4
 1
 1"
-argo_has "workflowtemplate/tpg-scale-instance" && argo_has "clusters=aks-tpg-poc-01" && argo_has "maxReadReplicas=4" \
+argo_has "workflowtemplate/tpg-scale-instance" && argo_has "clusters=[aks-tpg-poc-01]" && argo_has "maxReadReplicas=4" \
   && argo_has "pushMode=direct" && ! grep -qE '^(instances|replicas)=' "$TMP/argo-args" \
   && ok "scale: only maxReadReplicas, without instances or replicas" || bad "scale cap only" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
 sub tpg-scale-instance yes "2
@@ -159,7 +184,7 @@ orders-db
 2
 1
 1"
-argo_has "instances=orders-db" && argo_has "replicas=2" && ! grep -q '^maxReadReplicas=' "$TMP/argo-args" \
+argo_has "instances=[orders-db]" && argo_has "replicas=2" && ! grep -q '^maxReadReplicas=' "$TMP/argo-args" \
   && ok "scale: instances and replicas, the cap untouched" || bad "scale instances" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
 
 # ---- Round 15 (1f): the scripts run from any directory, through a link, or with TPG_FLEET_DIR
@@ -193,8 +218,8 @@ clusterMap: |
     instances:
       orders-db:
         postgresPatchFilePath: [pg.yaml, ../up/sched.yaml, repo:helm_artifacts/instance/tpg-instance/patches/team.yaml]
-        postgresValuesPatchFilePath: ~/p/vals.yaml
-        backupCaBundleFile: ./ca.pem
+        postgresValuesPatchFilePath: [~/p/vals.yaml]
+        backupCaBundleFile: [./ca.pem]
 YAML
 pack_o() { RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o patch-map.yaml 2>&1)" || RC=$?; }
 pack_o
@@ -215,25 +240,69 @@ yq -i '.clusterMap |= sub("pg-as-values.yaml"; "missing.yaml")' "$W/run/patch-ma
 pack_o
 [[ "$RC" -ne 0 ]] && grep -q "missing.yaml: no such file (relative paths start at $W/run)" <<<"$OUT" \
   && ok "2ii: a missing file names the directory relative paths start from" || bad "pack missing" "$OUT"
-printf 'pushMode: direct\npostgresPatchFilePath: repo:helm_artifacts/instance/tpg-instance/patches/team.yaml\n' > "$W/run/repo-only.yaml"
+printf "pushMode: direct\npostgresPatchFilePath: '[repo:helm_artifacts/instance/tpg-instance/patches/team.yaml]'\n" > "$W/run/repo-only.yaml"
 RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o repo-only.yaml 2>&1)" || RC=$?
 [[ "$RC" -eq 0 ]] && ! grep -q '^patchFiles:' "$W/run/repo-only.yaml" && grep -q "no local file named" <<<"$OUT" \
   && ok "2iii: only repo: files: nothing to pack, patchFiles not written" || bad "pack repo only" "$OUT"
 printf 'pushMode: direct\npostgresPatchFilePath: [pg.yaml]\n' > "$W/run/list.yaml"
 RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o list.yaml 2>&1)" || RC=$?
-[[ "$RC" -ne 0 ]] && grep -q "postgresPatchFilePath is a YAML list; a workflow input is one string" <<<"$OUT" \
-  && ok "2ii: a YAML list as a top-level input is refused with the comma-separated form" || bad "pack list input" "$OUT"
+[[ "$RC" -ne 0 ]] && grep -q "postgresPatchFilePath is a YAML list; a workflow input is one string" <<<"$OUT" && grep -q "'\[a.yaml, b.yaml\]'" <<<"$OUT" \
+  && ok "2ii: a YAML list as a top-level input is refused with the quoted bracketed form" || bad "pack list input" "$OUT"
+# Round 23: the input is a quoted string that holds a bracketed list; a single file is a list of one
+cat > "$W/run/inputs.yaml" <<'YAML'
+pushMode: direct
+postgresPatchFilePath: '[pg.yaml, ../up/sched.yaml, repo:helm_artifacts/instance/tpg-instance/patches/team.yaml]'
+postgresValuesPatchFilePath: '[~/p/vals.yaml]'
+backupCaBundleFile: '["./ca.pem"]'
+YAML
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o inputs.yaml 2>&1)" || RC=$?
+[[ "$RC" -eq 0 && "$(yq -r '.patchFiles' "$W/run/inputs.yaml" | jq -c 'keys')" == '["../up/sched.yaml","./ca.pem","pg.yaml","~/p/vals.yaml"]' ]] \
+  && ok "R23: -o reads the bracketed list inputs (YAML flow and JSON), single files as lists of one, skips repo:" || bad "pack bracketed inputs" "$OUT $(cat "$W/run/inputs.yaml")"
+printf "pushMode: direct\npostgresPatchFilePath: 'pg.yaml,../up/sched.yaml'\n" > "$W/run/comma.yaml"
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o comma.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q "postgresPatchFilePath: 'pg.yaml,../up/sched.yaml' is not a list" <<<"$OUT" && grep -q "Did you mean \[pg.yaml, ../up/sched.yaml\]?" <<<"$OUT" \
+  && ok "R23: a comma-separated input is refused with the bracketed form" || bad "pack comma input" "$OUT"
+printf "pushMode: direct\npostgresValuesPatchFilePath: '[pg.yaml, ../up/sched.yaml]'\n" > "$W/run/two.yaml"
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o two.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q "postgresValuesPatchFilePath: exactly one file is expected" <<<"$OUT" \
+  && ok "R23: a single-file input with two files is refused" || bad "pack two files" "$OUT"
+printf "pushMode: direct\npostgresPatchFilePath: '[repo: helm_artifacts/instance/tpg-instance/patches/team.yaml]'\n" > "$W/run/space.yaml"
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o space.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q 'postgresPatchFilePath: repo:<file path> "check for white spaces in between"' <<<"$OUT" \
+  && ok "R23: [repo: x.yaml] in an input fails with the whitespace message" || bad "pack repo space" "$OUT"
+cat > "$W/run/space-map.yaml" <<'YAML'
+pushMode: direct
+clusterMap: |
+  aks-tpg-poc-01:
+    instances:
+      orders-db:
+        postgresPatchFilePath: [repo: helm_artifacts/instance/tpg-instance/patches/team.yaml]
+YAML
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o space-map.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q 'aks-tpg-poc-01.instances.orders-db.postgresPatchFilePath: repo:<file path> "check for white spaces in between"' <<<"$OUT" \
+  && ok "R23: [repo: x.yaml] in the clusterMap (a YAML mapping) fails with the whitespace message" || bad "pack map repo space" "$OUT"
+cat > "$W/run/string-map.yaml" <<'YAML'
+pushMode: direct
+clusterMap: |
+  aks-tpg-poc-01:
+    instances:
+      orders-db:
+        postgresValuesPatchFilePath: vals.yaml
+YAML
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o string-map.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q "aks-tpg-poc-01.instances.orders-db.postgresValuesPatchFilePath: 'vals.yaml' is not a list" <<<"$OUT" \
+  && ok "R23: a clusterMap file key written as a string is refused" || bad "pack map string" "$OUT"
 # Round 22: tpg-day0 and tpg-create-instance name overlay files; packed like patch files
 printf 'resources:\n  limits: {cpu: 500m}\n' > "$W/run/ov-op.yaml"
 cat > "$W/run/overlay-map.yaml" <<'YAML'
 pushMode: direct
 clusterMap: |
   aks-tpg-poc-01:
-    operatorValuesOverlayFilePath: ./ov-op.yaml
+    operatorValuesOverlayFilePath: [./ov-op.yaml]
     instances:
       orders-db:
         postgresOverlayFilePath: [pg.yaml, repo:helm_artifacts/instance/tpg-instance/overlays/team.yaml]
-        postgresValuesOverlayFilePath: ~/p/vals.yaml
+        postgresValuesOverlayFilePath: [~/p/vals.yaml]
 YAML
 RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o overlay-map.yaml 2>&1)" || RC=$?
 [[ "$RC" -eq 0 && "$(yq -r '.patchFiles' "$W/run/overlay-map.yaml" | jq -c 'keys')" == '["./ov-op.yaml","pg.yaml","~/p/vals.yaml"]' ]] \

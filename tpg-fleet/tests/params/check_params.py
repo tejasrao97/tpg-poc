@@ -61,7 +61,10 @@ def type_ok(spec, value):
     # CEL uses RE2; these patterns are also valid Python regular expressions
     if not re.search(pat, value):
         return False
-    if types[t].get("excludeAll") and any(x.strip() == "all" for x in value.split(",")):
+    # excludeAll: all is a keyword, not a name, inside the brackets ([a, all]); a bare all is valid
+    # where the type has bare: all (the CEL of generate.py does the same)
+    if types[t].get("excludeAll") and not (types[t].get("bare") == "all" and value.strip() == "all") \
+            and any(re.match(r'^[\[\s"\x27]*all[\]\s"\x27]*$', x) for x in value.split(",")):
         return False
     return True
 
@@ -249,39 +252,52 @@ for w in keys["workflows"]:
         "an instance name with _": {"aks-tpg-poc-01": {"instances": {"orders_db": {}}}},
         "a key set to null": {"aks-tpg-poc-01": {"instances": {"orders-db": {"postgresVersion": None}}}},
     }
+    if w in ("day0", "create-instance", "network-policy"):
+        # Round 23: a list is a sequence, also with one value; a string is refused
+        bad["a comma-separated string for a list"] = {"c1": {"instances": {"i1": {"ingressFromNamespaces": "app,batch"}}}}
+        bad["one bare name for a list"] = {"c1": {"instances": {"i1": {"ingressFromCidrs": "10.1.0.0/16"}}}}
+        bad["a bracketed string for a list (a string, not a sequence)"] = {"c1": {"instances": {"i1": {"egressToFqdns": "[api.example.com]"}}}}
+        bad["an empty list"] = {"c1": {"instances": {"i1": {"egressToCidrs": []}}}}
     if w == "patch":
         bad.update({
-            "the renamed valuesPatchFilePath": {"c1": {"instances": {"i1": {"valuesPatchFilePath": "v.yaml"}}}},
+            "the renamed valuesPatchFilePath": {"c1": {"instances": {"i1": {"valuesPatchFilePath": ["v.yaml"]}}}},
             "two postgresValues files": {"c1": {"instances": {"i1": {"postgresValuesPatchFilePath": ["a.yaml", "b.yaml"]}}}},
             "clearKinds all with a kind": {"c1": {"instances": {"i1": {"clearKinds": ["all", "Postgres"]}}}},
             "a repo: file outside helm_artifacts/instance/tpg-instance/patches": {"c1": {"instances": {"i1": {"postgresPatchFilePath": ["repo:clusters/fleet.yaml"]}}}},
-            "an operator file under helm_artifacts/operator/patches/clusters": {"c1": {"operatorValuesPatchFilePath": "repo:helm_artifacts/operator/patches/clusters/c1.yaml"}},
-            "an operator patch file under helm_artifacts/operator/overlays/clusters": {"c1": {"operatorValuesPatchFilePath": "repo:helm_artifacts/operator/overlays/clusters/c1.yaml"}},
+            "an operator file under helm_artifacts/operator/patches/clusters": {"c1": {"operatorValuesPatchFilePath": ["repo:helm_artifacts/operator/patches/clusters/c1.yaml"]}},
+            "an operator patch file under helm_artifacts/operator/overlays/clusters": {"c1": {"operatorValuesPatchFilePath": ["repo:helm_artifacts/operator/overlays/clusters/c1.yaml"]}},
             "an empty postgres file list": {"c1": {"instances": {"i1": {"postgresPatchFilePath": []}}}},
+            "a comma-separated string of postgres files": {"c1": {"instances": {"i1": {"postgresPatchFilePath": "a.yaml,b.yaml"}}}},
+            "a single file that is a string": {"c1": {"instances": {"i1": {"postgresValuesPatchFilePath": "v.yaml"}}}},
+            "a repo: entry YAML reads as a mapping ([repo: x.yaml])": {"c1": {"instances": {"i1": {"postgresPatchFilePath": [{"repo": "helm_artifacts/instance/tpg-instance/patches/x.yaml"}]}}}},
+            "clearKinds as a comma-separated string": {"c1": {"clearKinds": "Postgres,postgresValues"}},
         })
     if w == "day0":
         bad["the renamed enableSSL"] = {"c1": {"instances": {"i1": {"enableSSL": True}}}}
-        bad["a CA bundle that is not a PEM file"] = {"c1": {"instances": {"i1": {"backupCaBundleFile": "ca.txt"}}}}
+        bad["a CA bundle that is not a PEM file"] = {"c1": {"instances": {"i1": {"backupCaBundleFile": ["ca.txt"]}}}}
         bad["a cluster without instances"] = {"c1": {"operatorVersion": "v4.5.0"}}
-        bad["the old postgresPatchFilePath (Round 22: postgresOverlayFilePath)"] = {"c1": {"operatorVersion": "v4.5.0", "instances": {"i1": {"postgresPatchFilePath": "a.yaml"}}}}
-        bad["an operator overlay file under helm_artifacts/operator/overlays/clusters"] = {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": "repo:helm_artifacts/operator/overlays/clusters/c1.yaml", "instances": {"i1": {}}}}
-        bad["an operator overlay file under helm_artifacts/operator/patches/clusters"] = {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": "repo:helm_artifacts/operator/patches/clusters/c1.yaml", "instances": {"i1": {}}}}
-        bad["the old operatorValuesPatchFilePath (Round 22: operatorValuesOverlayFilePath)"] = {"c1": {"operatorVersion": "v4.5.0", "operatorValuesPatchFilePath": "o.yaml", "instances": {"i1": {}}}}
+        bad["the old postgresPatchFilePath (Round 22: postgresOverlayFilePath)"] = {"c1": {"operatorVersion": "v4.5.0", "instances": {"i1": {"postgresPatchFilePath": ["a.yaml"]}}}}
+        bad["an operator overlay file under helm_artifacts/operator/overlays/clusters"] = {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": ["repo:helm_artifacts/operator/overlays/clusters/c1.yaml"], "instances": {"i1": {}}}}
+        bad["an operator overlay file under helm_artifacts/operator/patches/clusters"] = {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": ["repo:helm_artifacts/operator/patches/clusters/c1.yaml"], "instances": {"i1": {}}}}
+        bad["the old operatorValuesPatchFilePath (Round 22: operatorValuesOverlayFilePath)"] = {"c1": {"operatorVersion": "v4.5.0", "operatorValuesPatchFilePath": ["o.yaml"], "instances": {"i1": {}}}}
     for what, m in bad.items():
         if v.is_valid(m):
             problems.append(f"clustermap-{w}.schema.json accepts {what}")
     good = {}
     if w == "patch":
-        good = {"string lists and every path form": {"c1": {"clearKinds": "operatorValues", "instances": {"i1": {
-            "postgresPatchFilePath": "/tmp/a.yaml, ~/b.yml, ../c.yaml, repo:helm_artifacts/instance/tpg-instance/patches/d.yaml",
-            "postgresValuesPatchFilePath": "repo:helm_artifacts/instance/tpg-instance/patches/v.yaml", "backupCaBundleFile": "../ca.crt"}}}}}
+        good = {"lists and every path form": {"c1": {"clearKinds": ["operatorValues"], "instances": {"i1": {
+            "postgresPatchFilePath": ["/tmp/a.yaml", "~/b.yml", "../c.yaml", "repo:helm_artifacts/instance/tpg-instance/patches/d.yaml"],
+            "postgresValuesPatchFilePath": ["repo:helm_artifacts/instance/tpg-instance/patches/v.yaml"], "backupCaBundleFile": ["../ca.crt"]}}}},
+            "clearKinds all stays bare": {"c1": {"clearKinds": "all", "instances": {"i1": {"clearKinds": ["all"]}}}},
+            "one value in a list": {"c1": {"instances": {"i1": {"postgresPatchFilePath": ["a.yaml"]}}}}}
     if w == "day0":
         good = {"YAML numbers and booleans as strings": {"c1": {"operatorVersion": "4.5.0", "instances": {"i1": {
             "postgresVersion": 16.10, "highAvailability": "true", "readReplicas": "2", "cpu": 2,
             "operatorIncrementalSchedule": "none"}}}},
-            "every overlay form": {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": "repo:helm_artifacts/operator/overlays/t.yaml", "instances": {"i1": {
-                "postgresOverlayFilePath": "/tmp/a.yaml, ~/b.yml, repo:helm_artifacts/instance/tpg-instance/overlays/d.yaml",
-                "postgresValuesOverlayFilePath": "repo:helm_artifacts/instance/tpg-instance/overlays/v.yaml"}}}}}
+            "every overlay form": {"c1": {"operatorVersion": "v4.5.0", "operatorValuesOverlayFilePath": ["repo:helm_artifacts/operator/overlays/t.yaml"], "instances": {"i1": {
+                "postgresOverlayFilePath": ["/tmp/a.yaml", "~/b.yml", "repo:helm_artifacts/instance/tpg-instance/overlays/d.yaml"],
+                "postgresValuesOverlayFilePath": ["repo:helm_artifacts/instance/tpg-instance/overlays/v.yaml"],
+                "ingressFromNamespaces": ["app"], "allowedSourceRanges": ["10.0.0.0/8"], "egressToFqdns": ["api.example.com", "*.example.org"]}}}}}
     for what, m in good.items():
         for e in v.iter_errors(m):
             problems.append(f"clustermap-{w}.schema.json refuses {what}: {e.message}")

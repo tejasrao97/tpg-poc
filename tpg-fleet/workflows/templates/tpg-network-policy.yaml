@@ -38,10 +38,10 @@ spec:
     parameters:
     # ---- targets: clusters and instances, or clusterMap (one of the two)
     - name: clusters
-      description: "List: comma-separated registered clusters (without clusterMap)"
+      description: "List: registered clusters in brackets, [aks-tpg-poc-01] (also with one value) (without clusterMap)"
       value: ""
     - name: instances
-      description: "List: instances on every listed cluster; each must be declared there (without clusterMap)"
+      description: "List: instances in brackets, [orders-db], on every listed cluster; each must be declared there (without clusterMap)"
       value: ""
     - name: clusterMap
       description: "Map (YAML or JSON): cluster -> {instances: {instance -> {ingressFromNamespaces, ingressFromPodLabels, ingressFromCidrs, egressToCidrs, egressToFqdns, postgresVersion (guard)}}}; the inputs below are the defaults"
@@ -57,19 +57,19 @@ spec:
       enum: ["", "direct", "pr"]
     # ---- optional: the rules
     - name: ingressFromNamespaces
-      description: "List: namespaces whose pods may connect on 5432"
+      description: "List in brackets, [orders-app]: namespaces whose pods may connect on 5432"
       value: ""
     - name: ingressFromPodLabels
       description: "Map (YAML or JSON): pod labels allowed to connect on 5432 (in ingressFromNamespaces, or any namespace)"
       value: ""
     - name: ingressFromCidrs
-      description: "List: CIDRs allowed to connect on 5432 (clients outside the cluster, through a load balancer)"
+      description: "List of CIDRs in brackets, [10.30.0.0/24]: allowed to connect on 5432 (clients outside the cluster, through a load balancer)"
       value: ""
     - name: egressToCidrs
-      description: "List: extra CIDRs the instance pods may reach"
+      description: "List of CIDRs in brackets, [10.40.0.0/24]: extra CIDRs the instance pods may reach"
       value: ""
     - name: egressToFqdns
-      description: "List: host names the instance pods may reach (CiliumNetworkPolicy toFQDNs; needs ACNS)"
+      description: "List in brackets, [api.example.com, *.example.org]: host names the instance pods may reach (CiliumNetworkPolicy toFQDNs; needs ACNS)"
       value: ""
     - name: connectivityCheck
       description: "true: after the sync, check WAL archiving and run probe pods (an allowed namespace, and default)"

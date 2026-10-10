@@ -47,26 +47,26 @@ spec:
       description: "Map (YAML or JSON): cluster -> {operatorValuesPatchFilePath, patchMode, clearKinds, instances: {instance -> {postgresPatchFilePath (a list), postgresValuesPatchFilePath, patchMode, clearKinds}}}; each path a local file whose contents patchFiles carries, or repo:<path>. Schema: workflows/params/schemas/clustermap-patch.schema.json. Example: {aks-tpg-poc-01: {operatorValuesPatchFilePath: ./operator-resources.yaml, instances: {orders-db: {postgresPatchFilePath: [./orders-memory.yaml, ./orders-backup-location.yaml], postgresValuesPatchFilePath: ./orders-backup.yaml}}}}"
       value: ""
     - name: clusters
-      description: "List: comma-separated registered clusters, or all (without clusterMap)"
+      description: "List: registered clusters in brackets, [aks-tpg-poc-01, aks-tpg-poc-02] (also with one value), or all (without clusterMap)"
       value: ""
     - name: instances
-      description: "List: comma-separated instances, or all (without clusterMap; needed for instance patch files)"
+      description: "List: instances in brackets, [orders-db], or all (without clusterMap; needed for instance patch files)"
       value: ""
     # ---- patch files (defaults of every target; clusterMap keys override them)
     - name: postgresPatchFilePath
-      description: "List (comma-separated) of .yaml or .yml files: partial manifests, one document per kind (Postgres, PostgresBackupLocation, PostgresBackupSchedule with metadata.name <instance>-backup-full or -incremental, PostgresFerretDocumentDB; apiVersion, kind, spec), each a local file (absolute or relative; contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined with the kinds the instance's current postgres file carries into helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml, its new current file"
+      description: "List in brackets, [./a.yaml, repo:<path>], of .yaml or .yml files: partial manifests, one document per kind (Postgres, PostgresBackupLocation, PostgresBackupSchedule with metadata.name <instance>-backup-full or -incremental, PostgresFerretDocumentDB; apiVersion, kind, spec), each a local file (absolute or relative; contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined with the kinds the instance's current postgres file carries into helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml, its new current file"
       value: ""
     - name: postgresValuesPatchFilePath
-      description: "One .yaml or .yml file (local, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/patches/<file>): tpg-instance chart values; stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml and made the current postgresValues patch of each instance"
+      description: "One .yaml or .yml file in brackets, [./values.yaml] (local, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/patches/<file>): tpg-instance chart values; stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml and made the current postgresValues patch of each instance"
       value: ""
     - name: operatorValuesPatchFilePath
-      description: "One .yaml or .yml file (local, absolute or relative, or repo:helm_artifacts/operator/patches/<file>): operator chart values, only operatorImage (same tag as the cluster's operator version), instanceRegistryRepo, ferretDBImageRepo, dockerRegistrySecretName, certManagerClusterIssuerName, certManagerNamespace, resources (limits, requests: cpu, memory), enableSecurityContext; stored as helm_artifacts/operator/patches/<name>-<uid>.yaml"
+      description: "One .yaml or .yml file in brackets, [./operator.yaml] (local, absolute or relative, or repo:helm_artifacts/operator/patches/<file>): operator chart values, only operatorImage (same tag as the cluster's operator version), instanceRegistryRepo, ferretDBImageRepo, dockerRegistrySecretName, certManagerClusterIssuerName, certManagerNamespace, resources (limits, requests: cpu, memory), enableSecurityContext; stored as helm_artifacts/operator/patches/<name>-<uid>.yaml"
       value: ""
     - name: patchFiles
       description: "JSON map: the contents of the local patch files, {\"<path as given above>\": \"<base64>\"}; filled by scripts/submit/tpg-patch.sh, or written into a parameter file by scripts/submit/pack-patch-files.sh -o FILE. Empty with patchMode=clear and for repo: files"
       value: ""
     - name: backupCaBundleFile
-      description: "One PEM file (.pem, .crt, .cer; local, absolute or relative, or repo:ca-bundles/<file>): the new CA bundle of the backup location of every selected instance with enableSSL true (contents in patchFiles); a map key of the instance or its cluster wins. Changing the backup location restarts the instance"
+      description: "One PEM file in brackets, [./ca.pem] (.pem, .crt, .cer; local, absolute or relative, or repo:ca-bundles/<file>): the new CA bundle of the backup location of every selected instance with enableSSL true (contents in patchFiles); a map key of the instance or its cluster wins. Changing the backup location restarts the instance"
       value: ""
     - name: backupCaBundleVaultSecret
       description: "The name of a CA bundle in Vault (tpg/ca-bundles/<name>, key caBundle; tpg-aks-infra scripts/vault-secret.sh ca put writes it): the new CA bundle of every selected enableSSL instance. Not with backupCaBundleFile"
@@ -76,7 +76,7 @@ spec:
       value: apply
       enum: ["apply", "clear"]
     - name: clearKinds
-      description: "patchMode=clear: the kinds whose current patch is removed, comma-separated: Postgres, PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB (documents of the postgres file), postgresValues, operatorValues, or all"
+      description: "patchMode=clear: the kinds whose current patch is removed, a list in brackets or all, [Postgres, postgresValues]: Postgres, PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB (documents of the postgres file), postgresValues, operatorValues, or all"
       value: ""
     # ---- mandatory
     - name: pushMode

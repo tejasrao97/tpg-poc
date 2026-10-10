@@ -37,7 +37,7 @@ for c in $(target_names); do
 
   if [[ -n "${FLEET_LOCAL_DIR:-}" && -f "${FLEET_LOCAL_DIR}/clusters/fleet.yaml" ]]; then
     C="$c" yq -e '.clusters | has(strenv(C))' "${FLEET_LOCAL_DIR}/clusters/fleet.yaml" >/dev/null 2>&1 \
-      || log "$c has no entry in tpg-fleet clusters/fleet.yaml yet: tpg-day0 -p clusters=$c adds it"
+      || log "$c has no entry in tpg-fleet clusters/fleet.yaml yet: tpg-day0 -p \"clusters=[$c]\" adds it"
   fi
 
   # the token reaches jq through the environment and kubectl on stdin, never as an argument

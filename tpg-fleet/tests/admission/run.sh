@@ -70,17 +70,17 @@ rejected() {  # rejected LABEL TEXT...: refused, and the message has every TEXT
   ok "$1"
 }
 
-wf tpg-day0 "$(params clusters=all instances=orders-db,billing-db highAvailability=true operatorVersion=v4.5.0 \
+wf tpg-day0 "$(params clusters=all 'instances=[orders-db, billing-db]' highAvailability=true operatorVersion=v4.5.0 \
   postgresVersion=postgres-17.6 pushMode=direct maxParallel=2 storageSize=50Gi rolloutMode=batches)"
 accepted "tpg-day0: a correct run is accepted"
 wf tpg-day0 "$(params clusters=all maxParallel=abc)"
 rejected "tpg-day0: maxParallel=abc is refused as an Integer" 'maxParallel="abc" must be an Integer (1 or more)'
 wf tpg-day0 "$(params highAvailability=yes)"
 rejected "tpg-day0: highAvailability=yes is refused as a Boolean" 'highAvailability="yes" must be a Boolean (true or false)'
-wf tpg-day0 "$(params clusters=Aks_01)"
-rejected "tpg-day0: clusters=Aks_01 is refused as a List" 'clusters="Aks_01" must be a List'
-wf tpg-day0 "$(params clusters=all instances=orders_db)"
-rejected "tpg-day0: instances=orders_db is refused" 'instances="orders_db" must be a List'
+wf tpg-day0 "$(params 'clusters=[Aks_01]')"
+rejected "tpg-day0: clusters=Aks_01 is refused as a List" 'clusters="[Aks_01]" must be a List'
+wf tpg-day0 "$(params clusters=all 'instances=[orders_db]')"
+rejected "tpg-day0: instances=orders_db is refused" 'instances="[orders_db]" must be a List'
 wf tpg-day0 "$(params clusters=all fooBar=1)"
 rejected "tpg-day0: an unknown input is refused" 'fooBar is not an input of tpg-day0'
 wf tpg-day0 "$(params 'clusterMap=aks-tpg-poc-01:
@@ -95,19 +95,19 @@ rejected "tpg-day0: clusterMap that is not a map is refused" 'clusterMap="just s
 wf tpg-day0 "$(params clusters=all pushMode=)"
 accepted "tpg-day0: an empty mandatory input passes the type check (the validate step reports it)"
 # Round 13 (D69 to D71): combination rules, cron and FerretDB types
-wf tpg-day0 "$(params clusters=all instances=orders-db highAvailability=true readReplicas=0)"
+wf tpg-day0 "$(params clusters=all 'instances=[orders-db]' highAvailability=true readReplicas=0)"
 rejected "tpg-day0: highAvailability=true with readReplicas=0 is refused" 'highAvailability=true needs readReplicas 1 or more'
-wf tpg-day0 "$(params clusters=all instances=orders-db highAvailability=false readReplicas=0)"
+wf tpg-day0 "$(params clusters=all 'instances=[orders-db]' highAvailability=false readReplicas=0)"
 accepted "tpg-day0: highAvailability=false with readReplicas=0 (a single node) is accepted"
-wf tpg-day0 "$(params clusters=all instances=orders-db highAvailability=false readReplicas=2)"
+wf tpg-day0 "$(params clusters=all 'instances=[orders-db]' highAvailability=false readReplicas=2)"
 rejected "tpg-day0: readReplicas=2 with highAvailability=false is refused" 'readReplicas above 0 needs highAvailability=true'
-wf tpg-create-instance "$(params clusters=aks-tpg-poc-01 instances=docs-db highAvailability=false readReplicas=1)"
+wf tpg-create-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[docs-db]' highAvailability=false readReplicas=1)"
 rejected "tpg-create-instance: readReplicas=1 with highAvailability=false is refused" 'readReplicas above 0 needs highAvailability=true'
-wf tpg-day0 "$(params clusters=all instances=orders-db highAvailability=true)"
+wf tpg-day0 "$(params clusters=all 'instances=[orders-db]' highAvailability=true)"
 accepted "tpg-day0: highAvailability=true without readReplicas (1) is accepted"
-wf tpg-create-instance "$(params clusters=aks-tpg-poc-01 instances=docs-db highAvailability=false ferret=true ferretReadOnlyReplicas=2)"
+wf tpg-create-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[docs-db]' highAvailability=false ferret=true ferretReadOnlyReplicas=2)"
 rejected "tpg-create-instance: read-only FerretDB proxies without highAvailability are refused" 'ferretReadOnlyReplicas above 0 needs highAvailability=true'
-wf tpg-create-instance "$(params clusters=aks-tpg-poc-01 instances=docs-db highAvailability=true ferret=true ferretReadOnlyReplicas=1 ferretExposure=internalLoadBalancer ferretSecretName=docs-db-app-user-db-secret)"
+wf tpg-create-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[docs-db]' highAvailability=true ferret=true ferretReadOnlyReplicas=1 ferretExposure=internalLoadBalancer ferretSecretName=docs-db-app-user-db-secret)"
 accepted "tpg-create-instance: FerretDB inputs of an HA instance are accepted"
 wf tpg-day0 "$(params clusters=all backupSchedule=operator 'operatorFullSchedule=0 1 * * 0' operatorIncrementalSchedule=)"
 accepted "tpg-day0: backupSchedule=operator with a full schedule and no incremental one"
@@ -115,47 +115,47 @@ wf tpg-day0 "$(params clusters=all backupSchedule=operator 'operatorFullSchedule
 rejected "tpg-day0: a schedule that is not cron and ferretReplicas=0 are refused" 'operatorFullSchedule="every sunday" must be a cron schedule of 5 fields' 'ferretReplicas="0" must be an Integer (1 or more)'
 wf tpg-scale-instance "$(params cluster=aks-tpg-poc-01 instance=orders-db replicas=2 pushMode=direct)"
 rejected "tpg-scale-instance: the old single cluster/instance inputs are refused" 'cluster is not an input of tpg-scale-instance' 'instance is not an input'
-wf tpg-scale-instance "$(params clusters=aks-tpg-poc-01,aks-tpg-poc-02 instances=orders-db replicas=2 pushMode=direct)"
+wf tpg-scale-instance "$(params 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' 'instances=[orders-db]' replicas=2 pushMode=direct)"
 accepted "tpg-scale-instance: clusters and instances lists are accepted"
-wf tpg-scale-instance "$(params clusters=all instances=orders-db replicas=2)"
-rejected "tpg-scale-instance: clusters=all is refused (a list of names only)" 'clusters="all" must be a List (comma-separated names)'
-wf tpg-patch "$(params clusters=aks-tpg-poc-01 instances=orders-db postgresPatchFilePath=./patches/mem.yaml 'patchFiles={"./patches/mem.yaml":"YQ=="}' pushMode=direct)"
+wf tpg-scale-instance "$(params clusters=all 'instances=[orders-db]' replicas=2)"
+rejected "tpg-scale-instance: clusters=all is refused (a list of names only)" 'clusters="all" must be a List in brackets'
+wf tpg-patch "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-db]' 'postgresPatchFilePath=[./patches/mem.yaml]' 'patchFiles={"./patches/mem.yaml":"YQ=="}' pushMode=direct)"
 accepted "tpg-patch: a local file path and patchFiles are accepted"
-wf tpg-patch "$(params postgresPatchFilePath=/etc/passwd)"
-rejected "tpg-patch: a path that is not a .yaml or .yml file is refused" 'postgresPatchFilePath="/etc/passwd" must be a List of .yaml or .yml files'
-wf tpg-patch "$(params clusters=aks-tpg-poc-01 instances=orders-db 'postgresPatchFilePath=/home/me/pg.yaml, ~/sched.yaml, ../loc.yaml, repo:helm_artifacts/instance/tpg-instance/patches/team.yaml' pushMode=direct)"
+wf tpg-patch "$(params 'postgresPatchFilePath=[/etc/passwd]')"
+rejected "tpg-patch: a path that is not a .yaml or .yml file is refused" 'postgresPatchFilePath="[/etc/passwd]" must be a List of .yaml or .yml files in brackets'
+wf tpg-patch "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-db]' 'postgresPatchFilePath=[/home/me/pg.yaml, ~/sched.yaml, ../loc.yaml, repo:helm_artifacts/instance/tpg-instance/patches/team.yaml]' pushMode=direct)"
 accepted "tpg-patch 1c/1d: a list of absolute, ~/, ../ and repo: files is accepted"
 wf tpg-patch "$(params valuesPatchFilePath=a.yaml)"
 rejected "tpg-patch 1b: valuesPatchFilePath was renamed" 'valuesPatchFilePath was renamed postgresValuesPatchFilePath (Round 15)'
-wf tpg-patch "$(params postgresValuesPatchFilePath=a.yaml,b.yaml)"
-rejected "tpg-patch: postgresValuesPatchFilePath takes one file" 'postgresValuesPatchFilePath="a.yaml,b.yaml" must be the path of one .yaml or .yml file'
-wf tpg-patch "$(params patchMode=clear clearKinds=all,Postgres)"
-rejected "tpg-patch: clearKinds all stands alone" 'clearKinds="all,Postgres" must be a List of Postgres'
-wf tpg-patch "$(params patchMode=clear clearKinds=PostgresBackupSchedule,postgresValues)"
+wf tpg-patch "$(params 'postgresValuesPatchFilePath=[a.yaml, b.yaml]')"
+rejected "tpg-patch: postgresValuesPatchFilePath takes one file" 'postgresValuesPatchFilePath="[a.yaml, b.yaml]" must be a List of exactly one .yaml or .yml file in brackets'
+wf tpg-patch "$(params patchMode=clear 'clearKinds=[all, Postgres]')"
+rejected "tpg-patch: clearKinds all stands alone" 'clearKinds="[all, Postgres]" must be a List in brackets of Postgres'
+wf tpg-patch "$(params patchMode=clear 'clearKinds=[PostgresBackupSchedule, postgresValues]')"
 accepted "tpg-patch: clearKinds lists kinds"
-wf tpg-day0 "$(params clusters=all backupEnableSSL=true backupCaBundleFile=./azure.pem backupFullRetention=14 backupFullRetentionType=time)"
+wf tpg-day0 "$(params clusters=all backupEnableSSL=true 'backupCaBundleFile=[./azure.pem]' backupFullRetention=14 backupFullRetentionType=time)"
 accepted "tpg-day0 3.i/1g: backupCaBundleFile, backupFullRetention and backupFullRetentionType are accepted"
-wf tpg-day0 "$(params backupCaBundleFile=azure.txt backupFullRetentionType=days)"
-rejected "tpg-day0: a CA bundle that is not a PEM file name and an unknown retention type are refused" 'backupCaBundleFile="azure.txt" must be the path of one PEM file' 'backupFullRetentionType="days"'
+wf tpg-day0 "$(params 'backupCaBundleFile=[azure.txt]' backupFullRetentionType=days)"
+rejected "tpg-day0: a CA bundle that is not a PEM file name and an unknown retention type are refused" 'backupCaBundleFile="[azure.txt]" must be a List of exactly one PEM file' 'backupFullRetentionType="days"'
 wf tpg-backup-retention "$(params clusters=all)"
 rejected "Round 15: tpg-backup-retention is gone (a Workflow of it is refused)" 'WorkflowTemplate tpg-backup-retention has no parameter types in workflows/params/types.yaml'
-wf tpg-rotate-credential "$(params secretType=ca-bundle secretName=azure-storage caBundleFile=./azure.pem)"
+wf tpg-rotate-credential "$(params secretType=ca-bundle secretName=azure-storage 'caBundleFile=[./azure.pem]')"
 accepted "tpg-rotate-credential 3.ii: a ca-bundle from a file is accepted"
 wf tpg-rotate-credential "$(params secretType=git-push wrappingToken='hvs.bad token')"
 rejected "tpg-rotate-credential: a wrapping token with a space is refused" 'wrappingToken="hvs.bad token" must be a Vault wrapping token (tpg-aks-infra scripts/vault-secret.sh wrap prints it)'
 wf tpg-patch "$(params operatorManifestPatchFilePath=helm_artifacts/operator/patches/x.yaml)"
 rejected "tpg-patch: operatorManifestPatchFilePath is no longer an input" 'operatorManifestPatchFilePath is not an input of tpg-patch'
-wf tpg-day0 "$(params clusters=all instances=orders-db 'postgresOverlayFilePath=./ov/pg.yaml, repo:helm_artifacts/instance/tpg-instance/overlays/team.yaml' postgresValuesOverlayFilePath=./ov/v.yaml operatorValuesOverlayFilePath=repo:helm_artifacts/operator/overlays/team.yaml)"
+wf tpg-day0 "$(params clusters=all 'instances=[orders-db]' 'postgresOverlayFilePath=[./ov/pg.yaml, repo:helm_artifacts/instance/tpg-instance/overlays/team.yaml]' 'postgresValuesOverlayFilePath=[./ov/v.yaml]' 'operatorValuesOverlayFilePath=[repo:helm_artifacts/operator/overlays/team.yaml]')"
 accepted "22: tpg-day0 takes the overlay inputs"
-wf tpg-create-instance "$(params clusters=aks-tpg-poc-01 instances=docs-db postgresOverlayFilePath=./ov/pg.yaml postgresValuesOverlayFilePath=repo:helm_artifacts/instance/tpg-instance/overlays/v.yaml)"
+wf tpg-create-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[docs-db]' 'postgresOverlayFilePath=[./ov/pg.yaml]' 'postgresValuesOverlayFilePath=[repo:helm_artifacts/instance/tpg-instance/overlays/v.yaml]')"
 accepted "22: tpg-create-instance takes the overlay inputs"
-wf tpg-day0 "$(params postgresPatchFilePath=./a.yaml)"
+wf tpg-day0 "$(params 'postgresPatchFilePath=[./a.yaml]')"
 rejected "22: tpg-day0 no longer takes postgresPatchFilePath (renamed postgresOverlayFilePath)" 'postgresPatchFilePath is not an input of tpg-day0'
-wf tpg-create-instance "$(params postgresValuesPatchFilePath=./a.yaml)"
+wf tpg-create-instance "$(params 'postgresValuesPatchFilePath=[./a.yaml]')"
 rejected "22: tpg-create-instance no longer takes postgresValuesPatchFilePath" 'postgresValuesPatchFilePath is not an input of tpg-create-instance'
-wf tpg-delete-apps "$(params clusters=aks-tpg-poc-01 forceDeleteStuckApps=false)"
+wf tpg-delete-apps "$(params 'clusters=[aks-tpg-poc-01]' forceDeleteStuckApps=false)"
 accepted "22: tpg-delete-apps takes forceDeleteStuckApps"
-wf tpg-delete-instance "$(params clusters=aks-tpg-poc-01 forceDeleteStuckApps=maybe)"
+wf tpg-delete-instance "$(params 'clusters=[aks-tpg-poc-01]' forceDeleteStuckApps=maybe)"
 rejected "22: forceDeleteStuckApps is true or false" 'forceDeleteStuckApps="maybe" must be a Boolean (true or false)'
 wf tpg-patch "$(params patchMode=append)"
 rejected "tpg-patch: patchMode takes apply or clear" 'patchMode="append" must be one of apply, clear'
@@ -165,12 +165,73 @@ wf tpg-restore "$(params sourceCluster=aks-tpg-poc-01 instance=orders-db mode=ti
 rejected "tpg-restore: targetTime without the time of day is refused" 'targetTime="2026-09-15" must be a UTC time'
 wf tpg-upgrade "$(params component=operator targetVersion=4.5.1 clusters=all pushMode=direct operatorPatches=keep)"
 rejected "tpg-upgrade: operatorPatches is gone with the manifest patches (Round 14)" 'operatorPatches is not an input of tpg-upgrade'
-wf tpg-scale-instance "$(params clusters=aks-tpg-poc-01 maxReadReplicas=0 rolloutMode=canary)"
+wf tpg-scale-instance "$(params 'clusters=[aks-tpg-poc-01]' maxReadReplicas=0 rolloutMode=canary)"
 rejected "tpg-scale-instance: maxReadReplicas is an Integer of 1 or more" 'maxReadReplicas="0" must be an Integer (1 or more)'
-wf tpg-scale-instance "$(params clusters=aks-tpg-poc-01 maxReadReplicas=4 rolloutMode=batches maxParallel=2 pushMode=direct)"
+wf tpg-scale-instance "$(params 'clusters=[aks-tpg-poc-01]' maxReadReplicas=4 rolloutMode=batches maxParallel=2 pushMode=direct)"
 accepted "tpg-scale-instance: maxReadReplicas, rolloutMode and maxParallel are accepted"
 wf tpg-upgrade "$(params component=database)"
 rejected "tpg-upgrade: component outside its enum is refused" 'component="database" must be one of operator, postgres'
+# Round 23 phase 2: strict lists. Bracketed even with one value, YAML flow or JSON; only all (and auto
+# for components) stays bare; a comma string, [], an empty element and "repo: x.yaml" are refused
+wf tpg-day0 "$(params clusters=all 'instances=orders-db,billing-db')"
+rejected "R23: instances=orders-db,billing-db (a comma string) is refused, the bracket form is named" 'instances="orders-db,billing-db" must be a List in brackets, for example [orders-db, billing-db]'
+wf tpg-day0 "$(params clusters=aks-tpg-poc-01)"
+rejected "R23: one bare cluster name where a list is required is refused" 'clusters="aks-tpg-poc-01" must be a List in brackets'
+wf tpg-day0 "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-db]')"
+accepted "R23: a list of one value is accepted"
+wf tpg-day0 "$(params 'clusters=["aks-tpg-poc-01","aks-tpg-poc-02"]' 'instances=["orders-db", "billing-db"]')"
+accepted "R23: the JSON form is accepted"
+wf tpg-day0 "$(params "clusters=['aks-tpg-poc-01', \"aks-tpg-poc-02\"]")"
+accepted "R23: single and double quotes around elements are accepted"
+wf tpg-day0 "$(params clusters=all 'instances=[orders-db, , billing-db]')"
+rejected "R23: an empty element [a, , b] is refused" 'instances="[orders-db, , billing-db]" must be a List in brackets'
+wf tpg-day0 "$(params clusters=all 'instances=[]')"
+rejected "R23: [] is refused" 'instances="[]" must be a List in brackets'
+wf tpg-day0 "$(params 'clusters=[all]')"
+rejected "R23: [all] is refused (all stays bare)" 'clusters="[all]" must be a List in brackets'
+wf tpg-day0 "$(params 'clusters=[aks-tpg-poc-01, all]')"
+rejected "R23: all inside a list is refused" 'clusters="[aks-tpg-poc-01, all]" must be a List in brackets'
+wf tpg-day0 "$(params clusters=all instances=all)"
+rejected "R23: tpg-day0 instances is a list of names, not all" 'instances="all" must be a List in brackets'
+wf tpg-day0 "$(params clusters=all 'instances=[orders-db]' 'allowedSourceRanges=10.0.0.0/8')"
+rejected "R23: a CIDR without brackets is refused" 'allowedSourceRanges="10.0.0.0/8" must be a List of CIDRs in brackets'
+wf tpg-day0 "$(params clusters=all 'instances=[orders-db]' 'allowedSourceRanges=[10.0.0.0/8, 192.168.10.0/24]' 'ingressFromNamespaces=[app]' 'ingressFromCidrs=[10.1.0.0/16]' 'egressToCidrs=[10.2.0.0/24]' 'egressToFqdns=[api.example.com, *.example.org]')"
+accepted "R23: lists of CIDRs, namespaces and host names are accepted"
+wf tpg-day0 "$(params clusters=all 'egressToFqdns=api.example.com,*.example.org')"
+rejected "R23: host names as a comma string are refused" 'egressToFqdns="api.example.com,*.example.org" must be a List of host names in brackets'
+wf tpg-patch "$(params 'postgresPatchFilePath=[repo: helm_artifacts/instance/tpg-instance/patches/x.yaml]')"
+rejected "R23: [repo: x.yaml] (a space after the colon) is refused with the whitespace message" 'repo:<file path> "check for white spaces in between"'
+wf tpg-patch "$(params 'postgresValuesPatchFilePath=repo:helm_artifacts/instance/tpg-instance/patches/v.yaml')"
+rejected "R23: a single-file input without brackets is refused" 'postgresValuesPatchFilePath="repo:helm_artifacts/instance/tpg-instance/patches/v.yaml" must be a List of exactly one .yaml or .yml file in brackets'
+wf tpg-patch "$(params 'postgresValuesPatchFilePath=[repo:helm_artifacts/instance/tpg-instance/patches/v.yaml]' 'operatorValuesPatchFilePath=[./op.yaml]')"
+accepted "R23: single-file inputs in brackets are accepted"
+wf tpg-patch "$(params 'postgresPatchFilePath=./a.yaml,./b.yaml')"
+rejected "R23: postgresPatchFilePath as a comma string is refused" 'postgresPatchFilePath="./a.yaml,./b.yaml" must be a List of .yaml or .yml files in brackets'
+wf tpg-patch "$(params patchMode=clear clearKinds=all)"
+accepted "R23: clearKinds=all stays bare"
+wf tpg-patch "$(params patchMode=clear 'clearKinds=[all]')"
+accepted "R23: clearKinds=[all] is accepted"
+wf tpg-patch "$(params patchMode=clear 'clearKinds=Postgres,postgresValues')"
+rejected "R23: clearKinds as a comma string is refused" 'clearKinds="Postgres,postgresValues" must be a List in brackets'
+wf tpg-helm-addons "$(params 'clusters=[aks-tpg-poc-01]' 'components=cert-manager,vso')"
+rejected "R23: components as a comma string is refused" 'components="cert-manager,vso" must be auto, or a List in brackets of cert-manager, vso, monitoring'
+wf tpg-helm-addons "$(params 'clusters=[aks-tpg-poc-01]' 'components=[cert-manager, vso]')"
+accepted "R23: components as a bracketed list is accepted"
+wf tpg-helm-addons "$(params clusters=all components=auto)"
+accepted "R23: clusters=all and components=auto stay bare"
+wf tpg-helm-addons "$(params clusters=all 'components=[auto]')"
+rejected "R23: components=[auto] is refused (auto stays bare)" 'components="[auto]" must be auto, or a List in brackets'
+wf tpg-delete-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-db]' confirm=orders-db)"
+rejected "R23: confirm as a bare name is refused" 'confirm="orders-db" must be a List in brackets'
+wf tpg-delete-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-db]' 'confirm=[orders-db]')"
+accepted "R23: confirm as a list is accepted"
+wf tpg-backup "$(params 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' 'instances=[orders-db]')"
+accepted "R23: tpg-backup takes lists of clusters and instances"
+wf tpg-rotate-credential "$(params secretType=ca-bundle secretName=azure-storage 'caBundleFile=./azure.pem')"
+rejected "R23: caBundleFile without brackets is refused" 'caBundleFile="./azure.pem" must be a List of exactly one PEM file'
+wf tpg-day0 "$(params clusters=all 'backupCaBundleFile=[repo: ca-bundles/azure.pem]')"
+rejected "R23: a CA file with a space after repo: is refused with the whitespace message" 'check for white spaces in between'
+
 # A value written as a YAML number in a manifest is read as its text
 N=$((N + 1))
 RC=0; OUT="$(k create -f - <<YAML 2>&1

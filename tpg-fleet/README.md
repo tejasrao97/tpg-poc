@@ -301,17 +301,17 @@ Inputs are typed: a Workflow whose inputs do not match their types is rejected w
 ```bash
 # Dry run: fleet.yaml diff and pre-checks (operator, CRDs, same-named instances, versions)
 argo submit -n argo --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct -p dryRun=true --watch
 
 # Deploy: wave 0 canary alone, then later waves in batches of maxParallel (2)
 argo submit -n argo --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct --watch
 
 # Every selected cluster at once, no canary
 argo submit -n argo --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct -p rolloutMode=all --watch
 ```
 
@@ -331,11 +331,11 @@ argo submit -n argo --from workflowtemplate/tpg-upgrade \
 argo submit -n argo --from workflowtemplate/tpg-upgrade \
   -p component=postgres -p targetVersion=postgres-17.7 -p clusters=all -p instances=all -p pushMode=pr --watch
 argo submit -n argo --from workflowtemplate/tpg-scale-instance \
-  -p clusters=aks-tpg-poc-02 -p instances=orders-db -p replicas=2 -p pushMode=direct --watch
+  -p 'clusters=[aks-tpg-poc-02]' -p 'instances=[orders-db]' -p replicas=2 -p pushMode=direct --watch
 printf 'clusters: all\ninstances: orders-db\npushMode: pr\npostgresPatchFilePath: ./orders-memory.yaml\n' > orders.yaml
 ~/src/tpg-fleet/scripts/submit/pack-patch-files.sh -o orders.yaml
 argo submit -n argo --from workflowtemplate/tpg-patch --parameter-file orders.yaml --watch
-argo submit -n argo --from workflowtemplate/tpg-backup -p backupType=full -p clusters=aks-tpg-poc-01 --watch
+argo submit -n argo --from workflowtemplate/tpg-backup -p backupType=full -p 'clusters=[aks-tpg-poc-01]' --watch
 argo submit -n argo --from workflowtemplate/tpg-restore \
   -p sourceCluster=aks-tpg-poc-01 -p instance=orders-db -p mode=time \
   -p targetTime=2026-09-15T08:30:00Z --watch
@@ -355,8 +355,8 @@ argo submit -n argo --from workflowtemplate/tpg-restore \
 ```bash
 # Plan, then run with dryRun=false
 argo submit -n argo --from workflowtemplate/tpg-delete-apps \
-  -p clusters=aks-tpg-poc-03 -p apps='{"aks-tpg-poc-03":["tpg-instances","tpg-operator"]}' \
-  -p confirm=aks-tpg-poc-03 -p dryRun=true -p purgePvcs=false -p purgeNamespace=false -p pushMode=direct --watch
+  -p 'clusters=[aks-tpg-poc-03]' -p apps='{"aks-tpg-poc-03":["tpg-instances","tpg-operator"]}' \
+  -p 'confirm=[aks-tpg-poc-03]' -p dryRun=true -p purgePvcs=false -p purgeNamespace=false -p pushMode=direct --watch
 ```
 
 Instances leave `clusters/fleet.yaml` (a copy goes to `clusters/deleted/<cluster>/`), the Applications are removed without cascading (`preserveResourcesOnDeletion`), and the workflow deletes the objects in order. With `tpg-operator` it also deletes the operator and the `sql.tanzu.vmware.com` CRDs, refusing while other Postgres instances exist unless `force=true`. The backup repository is never deleted. An Application that cannot be rendered (`ComparisonError`, for example the Broadcom registry token expired and the chart download answers 401) stays in `Deleting` with its Argo CD finalizer; with `forceDeleteStuckApps=true` (default) the delete workflows log the condition after the wait, remove the finalizer, clean up the leftovers as usual and report `FORCED: Application removed without rendering (...)`; with `false` they fail `APPLICATION_NOT_REMOVED` (Round 22).
@@ -399,8 +399,8 @@ Email notifications are optional: see `monitoring/grafana/smtp/` (Grafana SMTP f
 
 ## Adding a cluster or an instance
 
-- **Instance:** run `tpg-create-instance -p clusters=<cluster> -p instances=<name> ...` on a cluster that runs the operator (or `tpg-day0`, which also installs the operator and add-ons). It adds the instance to `clusters/fleet.yaml` and deploys it.
-- **Cluster:** create it with `tpg-aks-infra` (`target_cluster_count`) or add a pre-created cluster to `inventory/clusters.yaml` with `wave: 1` or higher, run `tpg-aks-infra/scripts/run.sh` again, then run `tpg-day0 -p clusters=<cluster> ...`. No file or folder is added by hand.
+- **Instance:** run `tpg-create-instance -p 'clusters=[<cluster>]' -p 'instances=[<name>]' ...` on a cluster that runs the operator (or `tpg-day0`, which also installs the operator and add-ons). It adds the instance to `clusters/fleet.yaml` and deploys it.
+- **Cluster:** create it with `tpg-aks-infra` (`target_cluster_count`) or add a pre-created cluster to `inventory/clusters.yaml` with `wave: 1` or higher, run `tpg-aks-infra/scripts/run.sh` again, then run `tpg-day0 -p 'clusters=[<cluster>]' ...`. No file or folder is added by hand.
 
 ## Static validation
 
@@ -502,7 +502,7 @@ The Tanzu for Postgres custom resources have no public JSON schema, so confirm t
 | V59 | The CRDs in `helm_artifacts/instance/crd-reference/source-crds/` equal the lab operator's, so the registry and the schemas describe what runs | `kubectl get crd <name>.sql.tanzu.vmware.com -o yaml` for the 9 kinds into `source-crds/`, then `python3 tools/crd-defaults/generate.py --check` (no change) |
 | V60 | The pre-created preflight accepts a backup storage account with secure transfer turned off | `tpg-aks-infra/scripts/run.sh --targets precreated --only preflight` against an account with `--https-only false` |
 | V61 | A tpg-day0 run on a lab `clusters/fleet.yaml` that holds JSON-style entries commits the whole file in block YAML, and the Applications stay Synced (values unchanged) | `git show HEAD -- clusters/fleet.yaml` after the run; `argocd app get tpg-<cluster>-<instance>` |
-| V62 | The tpg-scale-instance validate step reads `clusters/fleet.yaml` (Vault Agent in that step) and refuses `replicas=2 enableHAIfNeeded=false` for a single-node instance before any change | `argo submit --from workflowtemplate/tpg-scale-instance -p clusters=<c> -p instances=<single-node> -p replicas=2 -p enableHAIfNeeded=false -p pushMode=direct`; the validate step log |
+| V62 | The tpg-scale-instance validate step reads `clusters/fleet.yaml` (Vault Agent in that step) and refuses `replicas=2 enableHAIfNeeded=false` for a single-node instance before any change | `argo submit --from workflowtemplate/tpg-scale-instance -p 'clusters=[<c>]' -p 'instances=[<single-node>]' -p replicas=2 -p enableHAIfNeeded=false -p pushMode=direct`; the validate step log |
 | V63 | tpg-patch `pushMode=pr`: Argo CD syncs an instance Application at the commit of the pull request branch (not on its `targetRevision`), the Application shows OutOfSync until the merge, and after the merge it turns Synced without a second sync (`argocd app history` shows the branch commit) | `scripts/submit/tpg-patch.sh` with a values file on the canary; `argocd app get tpg-<c>-<i>` before and after merging |
 | V64 | The operator Application is synced with its fleet source at the branch commit (`revisions` and `sourcePositions` of the sync request) and reads `helm_artifacts/operator/patches/clusters/<cluster>.yaml` from it | tpg-patch with `operatorValuesPatchFilePath` (resources) and `pushMode=pr`; `argocd app get tpg-<c>-operator -o json \| jq .status.operationState.syncResult` |
 | V65 | The diff of the plan shows only what the patch changes: an unchanged instance gives no `kubectl diff --server-side` output (the tracking annotation is added), and the operator chart render has no field that changes on every render | tpg-patch `dryRun=true` with a file whose content equals the current one: `NO_CHANGE`; the plan step log |

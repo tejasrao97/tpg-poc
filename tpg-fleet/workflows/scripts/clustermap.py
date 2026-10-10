@@ -13,12 +13,28 @@ also converted to JSON by the caller.
       writes the normalized map to --out (or stdout) and exits 0.
   clustermap.py normalize --map M.json --keys K.json
       Writes the normalized map without checking workflows or clusters.
+  clustermap.py list NAME VALUE [--bare WORD]... [--files] [--one] [--json|--csv]
+      The strict list parser of the workflow inputs (Round 23): VALUE is the text of an
+      input, a bracketed list "[a, b]" (YAML flow) or '["a","b"]' (JSON), also for one
+      value. Prints one item per line (--json: a JSON array, --csv: comma-separated);
+      an empty VALUE prints nothing. --bare WORD: a value that is exactly WORD stays
+      bare (all, auto). --files: the items are file paths (the whitespace message for
+      "repo: path"). --one: exactly one item. A bad value prints the message on stderr
+      and exits 1; the shell reaches this through lib.sh list_items, list_csv and file_item.
 
 Normalized map: {cluster: {<cluster key>: value, instances: {instance: {<key>: value}}}}
 with every scalar as a string ("true", "3", "v4.5.0", "postgres-17.6"); a patchFile
 is one .yaml or .yml path: a file of the submitting machine (absolute or relative;
 its contents come in patchFiles) or repo:<path> in the fleet repository (Round 15);
 a patchFileList is a list of them, a kindList a list of patch kinds.
+
+Lists are strict (Round 23): in the map a key of a list type is a YAML/JSON sequence,
+also with one value ([tpg-poc-01]); a single-file key (patchFile, caFile) is a
+sequence of exactly one path ([./a.yaml], normalized to the path). A string where a
+list belongs ("a,b", "a") is refused with the list syntax; kindList alone also takes
+the bare word all. A file entry that is not repo:<file path> or a local path, and
+"repo: path" with whitespace (which YAML reads as the map {repo: path}), fail with
+repo:<file path> "check for white spaces in between".
 """
 import argparse
 import difflib
@@ -91,16 +107,116 @@ def scalar(v):
     return str(v)
 
 
-def as_list(value):
-    """A list value: a YAML/JSON list or a comma-separated string -> list of strings."""
-    items = value if isinstance(value, list) else scalar(value).split(",")
-    return [scalar(p).strip() for p in items if p is not None and scalar(p).strip()]
+class ListError(ValueError):
+    """A value that is not a well-formed list; the message names the input and the fix."""
+
+
+LIST_SYNTAX = ('write a list in brackets, even with one value: [a] or [a, b] (YAML flow list) '
+               'or ["a", "b"] (JSON array)')
+FILE_SPACE = 'repo:<file path> "check for white spaces in between"'
+
+
+def list_syntax_error(where, text, bare=()):
+    """The message for a string where a list belongs: shows the bracketed form of what was written."""
+    t = text.strip()
+    pieces = [p.strip().strip("\"'") for p in t.split(",") if p.strip()]
+    fix = "[" + ", ".join(pieces) + "]" if pieces else "[a, b]"
+    more = f"; {' or '.join(bare)} stay{'s' if len(bare) == 1 else ''} bare" if bare else ""
+    return f"{where}: '{t}' is not a list; {LIST_SYNTAX}{more}. Did you mean {fix}?"
+
+
+def parse_list_text(text, where, bare=()):
+    """The elements of the text of a list input: '[a, b]' (YAML flow) or '["a","b"]' (JSON).
+    Quotes are removed; an empty element stays "" so as_list can name it. Not bracketed: ListError."""
+    s = text.strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        raise ListError(list_syntax_error(where, s, bare))
+    try:
+        v = json.loads(s)
+    except ValueError:
+        v = None
+    if isinstance(v, list):
+        return v
+    inner = s[1:-1]
+    items, cur, quote, quoted = [], "", None, False
+    for ch in inner:
+        if quote:
+            if ch == quote:
+                quote = None
+            else:
+                cur += ch
+        elif ch in "\"'" and not cur.strip() and not quoted:
+            quote, quoted = ch, True
+        elif ch == ",":
+            items.append(cur if quoted else cur.strip())
+            cur, quoted = "", False
+        elif quoted and not ch.isspace():
+            raise ListError(f"{where}: text after a closing quote in {s}; {LIST_SYNTAX}")
+        elif not quoted:
+            cur += ch
+    if quote:
+        raise ListError(f"{where}: unterminated quote in {s}; {LIST_SYNTAX}")
+    if items or cur.strip() or quoted:
+        items.append(cur if quoted else cur.strip())
+    out = []
+    for it in items:
+        if it.startswith("{"):       # YAML flow mapping, as in [repo: x.yaml] or {repo: x.yaml}
+            try:
+                it = json.loads(it)
+            except ValueError:
+                it = {it: None}
+        out.append(it)
+    return out
+
+
+def as_list(value, where="list", text=False, files=False, bare=()):
+    """A list value as a list of strings (Round 23: strict).
+
+    value  a list (a clusterMap sequence, or parsed JSON), or with text=True the text of an
+           input: "[a, b]" or '["a","b"]'. A string that is not bracketed ("a,b", "a") is not
+           a list: ListError with the syntax. An empty list, an empty element ([a, , b]), a
+           nested list and a mapping are refused too.
+    files  the items are file paths: an element with whitespace, or a mapping (YAML reads
+           [repo: x.yaml] as [{repo: x.yaml}]), fails with repo:<file path> "check for white
+           spaces in between".
+    bare   words that stay bare as a whole value (all, auto); the caller handles them.
+    Raises ListError."""
+    if isinstance(value, str):
+        if files and re.match(r"^\s*\{?\s*repo:\s", value):
+            raise ListError(f"{where}: {FILE_SPACE}")
+        if not text:
+            raise ListError(list_syntax_error(where, value, bare))
+        items = parse_list_text(value, where, bare)
+    elif isinstance(value, list):
+        items = value
+    else:
+        raise ListError(f"{where}: a list is expected, not a {type(value).__name__}; {LIST_SYNTAX}")
+    if not items:
+        raise ListError(f"{where}: the list is empty; name at least one value, for example [a, b] "
+                        "(leave the input empty, or remove the key, to use the default)")
+    out = []
+    for p in items:
+        if isinstance(p, dict):
+            if files:
+                raise ListError(f"{where}: {FILE_SPACE}")
+            raise ListError(f"{where}: a list entry must be a plain value, not a mapping")
+        if isinstance(p, list):
+            raise ListError(f"{where}: a list entry must be a plain value, not a nested list")
+        s = "" if p is None else scalar(p).strip()
+        if not s:
+            raise ListError(f"{where}: the list has an empty element (a doubled or trailing comma); "
+                            "write each value once: [a, b]")
+        if files and re.search(r"\s", s):
+            raise ListError(f"{where}: {FILE_SPACE}")
+        out.append(s)
+    return out
 
 
 def check_list(t, value, where):
-    items = as_list(value)
-    if not items:
-        return [], f"{where}: a non-empty list is expected (remove the key instead of setting it empty)"
+    try:
+        items = as_list(value, where)
+    except ListError as e:
+        return [], str(e)
     for p in items:
         if t == "nameList" and not NAME.match(p):
             return items, f"{where}: '{p}' must be a lowercase DNS label"
@@ -169,15 +285,19 @@ def check_value(spec, value, where):
     if t == "stringMap":
         return check_map(value, where)
     if t in ("patchFile", "caFile"):
-        if isinstance(value, (dict, list)):
-            return value, f"{where}: one file path is expected (one current file of this kind)"
-        return check_patch_file(spec, value, where)
+        # one file, but still a list (Round 23): [./a.yaml]; normalized to the path
+        try:
+            items = as_list(value, where, files=True)
+        except ListError as e:
+            return value, str(e)
+        if len(items) != 1:
+            return items, f"{where}: exactly one file is expected, in brackets: [path] (one current file of this kind)"
+        return check_patch_file(spec, items[0], where)
     if t == "patchFileList":
-        if isinstance(value, dict):
-            return value, f"{where}: a list of file paths is expected"
-        items = as_list(value)
-        if not items:
-            return [], f"{where}: a non-empty list is expected (remove the key instead of setting it empty)"
+        try:
+            items = as_list(value, where, files=True)
+        except ListError as e:
+            return value, str(e)
         out = []
         for p in items:
             n, err = check_patch_file(spec, p, where)
@@ -188,9 +308,12 @@ def check_value(spec, value, where):
             return out, f"{where}: duplicate entries"
         return out, None
     if t == "kindList":
-        items = as_list(value)
-        if not items:
-            return [], f"{where}: a non-empty list is expected (remove the key instead of setting it empty)"
+        if isinstance(value, str) and value.strip() == "all":
+            return ["all"], None            # all stays bare (Round 23)
+        try:
+            items = as_list(value, where, bare=("all",))
+        except ListError as e:
+            return value, str(e)
         for k in items:
             if k != "all" and k not in PATCH_KINDS:
                 return items, f"{where}: '{k}' must be one of {', '.join(PATCH_KINDS)}, or all{suggest(k, PATCH_KINDS)}"
@@ -357,7 +480,47 @@ def process(raw, keys, workflow=None, registered=None, flags=None):
     return norm, errors
 
 
+def list_command(argv):
+    """clustermap.py list NAME VALUE [--bare WORD]... [--files] [--one] [--json|--csv]"""
+    ap = argparse.ArgumentParser(prog="clustermap.py list")
+    ap.add_argument("name")
+    ap.add_argument("value")
+    ap.add_argument("--bare", action="append", default=[])
+    ap.add_argument("--files", action="store_true")
+    ap.add_argument("--one", action="store_true")
+    fmt = ap.add_mutually_exclusive_group()
+    fmt.add_argument("--json", action="store_true")
+    fmt.add_argument("--csv", action="store_true")
+    a = ap.parse_args(argv)
+    v = a.value.strip()
+    if not v:
+        if a.json:
+            print("[]")
+        return 0                       # an empty input is an unset input
+    if v in a.bare:
+        items = [v]
+    else:
+        try:
+            items = as_list(a.value, a.name, text=True, files=a.files, bare=tuple(a.bare))
+        except ListError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        if a.one and len(items) != 1:
+            print(f"{a.name}: exactly one file is expected, in brackets: [path] (one current file of this kind)",
+                  file=sys.stderr)
+            return 1
+    if a.json:
+        print(json.dumps(items, separators=(",", ":")))
+    elif a.csv:
+        print(",".join(items))
+    else:
+        print("\n".join(items))
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "list":
+        return list_command(sys.argv[2:])
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["validate", "normalize"])
     ap.add_argument("--workflow")

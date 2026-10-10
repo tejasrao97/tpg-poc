@@ -49,7 +49,9 @@
 #     [--kubeconfig FILE] [--context CTX] [--remote-write-url URL]
 #     [--existing ask|upgrade|skip|abort] [--dry-run]
 #     [--vault-addr URL --vault-ca-file FILE --vault-auth-mount MOUNT --vault-auth-role ROLE]  (vso)
-# LIST: comma-separated cert-manager, monitoring, vso, vault.
+# LIST: comma-separated cert-manager, monitoring, vso, vault (a flag of this command-line tool, called by
+# addons-cluster.sh and the tpg-aks-infra steps; the workflow input components is bracketed, [cert-manager, vso],
+# and addons-cluster.sh turns it into this form).
 # --existing defaults to ADDONS_EXISTING, else ask on a terminal and skip without one.
 #
 # Component vault reads VAULT_UNSEAL_MODE (shamir | azure-keyvault) and, for

@@ -13,12 +13,17 @@
     "additionalProperties": false,
     "properties": {
       "operatorValuesPatchFilePath": {
-        "type": "string",
-        "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/operator/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$",
-        "not": {
-          "pattern": "^repo:helm_artifacts/operator/(patches|overlays)/clusters/"
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 1,
+        "items": {
+          "type": "string",
+          "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/operator/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$",
+          "not": {
+            "pattern": "^repo:helm_artifacts/operator/(patches|overlays)/clusters/"
+          }
         },
-        "description": "An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/patches/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0 [String (file path); optional (default: the input operatorValuesPatchFilePath)]"
+        "description": "An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/patches/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0 [List (one file path); optional (default: the input operatorValuesPatchFilePath)]"
       },
       "patchMode": {
         "enum": [
@@ -28,9 +33,14 @@
         "description": "apply or clear, for the operator file of this cluster and the default of its instances [Enum; optional (default: the input patchMode)]"
       },
       "backupCaBundleFile": {
-        "type": "string",
-        "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.(pem|crt|cer)|repo:ca-bundles/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.(pem|crt|cer))$",
-        "description": "The backup CA bundle of the cluster's instances with backupEnableSSL: a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Not together with backupCaBundleVaultSecret on this level; an instance key wins [String (file path); optional (the instance key, else the cluster key, else the inputs)]"
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 1,
+        "items": {
+          "type": "string",
+          "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.(pem|crt|cer)|repo:ca-bundles/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.(pem|crt|cer))$"
+        },
+        "description": "The backup CA bundle of the cluster's instances with backupEnableSSL: a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Not together with backupCaBundleVaultSecret on this level; an instance key wins [List (one file path); optional (the instance key, else the cluster key, else the inputs)]"
       },
       "backupCaBundleVaultSecret": {
         "type": "string",
@@ -61,10 +71,6 @@
                 "operatorValues"
               ]
             }
-          },
-          {
-            "type": "string",
-            "pattern": "^\\s*(Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues|operatorValues)(\\s*,\\s*(Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues|operatorValues))*\\s*$"
           }
         ],
         "description": "patchMode=clear: the kinds whose current file is removed. operatorValues clears the operator file of the cluster; instance kinds are the default of its instances [List (kinds); optional (default: the input clearKinds)]"
@@ -93,9 +99,14 @@
               "description": "tpg-day0, tpg-create-instance and tpg-upgrade: the version to deploy or upgrade to. Guard in the other workflows: when set, an instance that runs another version is skipped (SKIPPED_VERSION_MISMATCH) and nothing is changed for it [String (version); guard (skip an instance that runs another version)]"
             },
             "backupCaBundleFile": {
-              "type": "string",
-              "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.(pem|crt|cer)|repo:ca-bundles/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.(pem|crt|cer))$",
-              "description": "The backup CA bundle of this instance (backupEnableSSL true): a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Wins over the cluster level and the inputs; not together with backupCaBundleVaultSecret [String (file path); optional (the instance key, else the cluster key, else the inputs)]"
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": {
+                "type": "string",
+                "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.(pem|crt|cer)|repo:ca-bundles/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.(pem|crt|cer))$"
+              },
+              "description": "The backup CA bundle of this instance (backupEnableSSL true): a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Wins over the cluster level and the inputs; not together with backupCaBundleVaultSecret [List (one file path); optional (the instance key, else the cluster key, else the inputs)]"
             },
             "backupCaBundleVaultSecret": {
               "type": "string",
@@ -103,30 +114,27 @@
               "description": "The backup CA bundle of this instance from Vault tpg/ca-bundles/<name> (key caBundle). Wins over the cluster level and the inputs; not together with backupCaBundleFile [String (name); optional (the instance key, else the cluster key, else the inputs)]"
             },
             "postgresPatchFilePath": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "minItems": 1,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "string",
-                    "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$"
-                  }
-                },
-                {
-                  "type": "string",
-                  "pattern": "^\\s*((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)(\\s*,\\s*((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml))*\\s*$"
-                }
-              ],
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$"
+              },
               "description": "One or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined into one stored file helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml; the objects a run does not send are carried over from the current file. Applied on top of the overlay of tpg-day0 and tpg-create-instance [List (file paths); optional (default: the input postgresPatchFilePath)]"
             },
             "postgresValuesPatchFilePath": {
-              "type": "string",
-              "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$",
-              "not": {
-                "pattern": "^repo:helm_artifacts/operator/(patches|overlays)/clusters/"
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": {
+                "type": "string",
+                "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:helm_artifacts/instance/tpg-instance/patches/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$",
+                "not": {
+                  "pattern": "^repo:helm_artifacts/operator/(patches|overlays)/clusters/"
+                }
               },
-              "description": "A tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/patches/<file>, stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay [String (file path); optional (default: the input postgresValuesPatchFilePath)]"
+              "description": "A tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/patches/<file>, stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay [List (one file path); optional (default: the input postgresValuesPatchFilePath)]"
             },
             "patchMode": {
               "enum": [
@@ -159,10 +167,6 @@
                       "operatorValues"
                     ]
                   }
-                },
-                {
-                  "type": "string",
-                  "pattern": "^\\s*(Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues|operatorValues)(\\s*,\\s*(Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues|operatorValues))*\\s*$"
                 }
               ],
               "description": "patchMode=clear: the kinds whose current file or documents are removed: Postgres, PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB, postgresValues, or all [List (kinds); optional (default: the input clearKinds)]"

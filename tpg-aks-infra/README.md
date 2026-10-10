@@ -805,12 +805,12 @@ It prints, to the terminal only, the Argo CD URL with the admin password, where 
 export KUBECONFIG="$PWD/.work/kubeconfig"
 # Dry run: validates the inputs, shows the clusters/fleet.yaml change and runs the pre-check
 argo submit -n argo --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
   -p dryRun=true --watch
 # Deploy
 argo submit -n argo --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct --watch
 ```
 
@@ -827,7 +827,7 @@ No per-cluster folder is needed in `tpg-fleet`: every cluster uses `clusters/_te
   1. Append the cluster to `inventory/clusters.yaml`.
   2. Run `scripts/run.sh --hub <mode> --targets precreated`.
 
-Then run `tpg-day0 -p clusters=<new> ...` with the same inputs as the other clusters.
+Then run `tpg-day0 -p 'clusters=[<new>]' ...` with the same inputs as the other clusters.
 
 ## Monitoring options
 

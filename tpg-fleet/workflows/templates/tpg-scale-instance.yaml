@@ -51,10 +51,10 @@ spec:
     parameters:
     # ---- targets: clusters and instances, or clusterMap (one of the two)
     - name: clusters
-      description: "List: comma-separated registered clusters (without clusterMap)"
+      description: "List: registered clusters in brackets, [aks-tpg-poc-01] (also with one value) (without clusterMap)"
       value: ""
     - name: instances
-      description: "List: instances to scale on every listed cluster; each must be declared there (without clusterMap)"
+      description: "List: instances to scale, in brackets, [orders-db], on every listed cluster; each must be declared there (without clusterMap)"
       value: ""
     - name: clusterMap
       description: "Map (YAML or JSON): cluster -> {maxReadReplicas, instances: {instance -> {replicas, enableHAIfNeeded}}}; the inputs below are the defaults. Example: {aks-tpg-poc-01: {maxReadReplicas: 4, instances: {orders-db: {replicas: 3}, billing-db: {replicas: 0}}}, aks-tpg-poc-02: {instances: {reporting-db: {replicas: 1}}}}"

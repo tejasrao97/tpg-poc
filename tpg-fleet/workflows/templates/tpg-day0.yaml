@@ -36,10 +36,10 @@ spec:
     parameters:
     # ---- targets: clusters and instances, or clusterMap (one of the two)
     - name: clusters
-      description: "List: comma-separated registered clusters, or all (without clusterMap)"
+      description: "List: registered clusters in brackets, [aks-tpg-poc-01, aks-tpg-poc-02] (also with one value), or all (without clusterMap)"
       value: ""
     - name: instances
-      description: "List: Postgres instances to deploy on every selected cluster, namespace pg-<instance> (without clusterMap)"
+      description: "List: Postgres instances to deploy, in brackets, [orders-db], on every selected cluster, namespace pg-<instance> (without clusterMap)"
       value: ""
     - name: clusterMap
       description: "Map (YAML or JSON): cluster -> {operatorVersion, maxReadReplicas, operatorValuesOverlayFilePath, instances: {instance -> {postgresVersion, highAvailability, readReplicas, storageSize, walStorageSize, storageClass, cpu, memory, backupSchedule, operatorFullSchedule, operatorIncrementalSchedule, backupEnableSSL, backupCaBundleFile, backupCaBundleVaultSecret, backupFullRetention, backupFullRetentionType, ferret, ferretReplicas, ferretReadOnlyReplicas, ferretExposure, ferretSecretName, ferretReadOnlySecretName, postgresOverlayFilePath (a list), postgresValuesOverlayFilePath, exposure, serviceAnnotations, readOnlyExposure, readOnlyServiceAnnotations, allowedSourceRanges, internalLoadBalancerSubnet, networkPolicy, ingressFromNamespaces, ingressFromPodLabels, ingressFromCidrs, egressToCidrs, egressToFqdns}}}; the inputs below are the defaults. Schema: workflows/params/schemas/clustermap-day0.schema.json"
@@ -151,7 +151,7 @@ spec:
       description: "Map (YAML or JSON): extra annotations of the read-only Service"
       value: ""
     - name: allowedSourceRanges
-      description: "List: CIDRs allowed to reach a load balancer Service (Azure annotation azure-allowed-ip-ranges)"
+      description: "List of CIDRs in brackets, [10.20.0.0/16]: allowed to reach a load balancer Service (Azure annotation azure-allowed-ip-ranges)"
       value: ""
     - name: internalLoadBalancerSubnet
       description: "internalLoadBalancer: the subnet of the cluster VNet for the load balancer IP (empty: the node subnet)"
@@ -162,34 +162,34 @@ spec:
       value: ""
       enum: ["", "none", "baseline"]
     - name: ingressFromNamespaces
-      description: "List: namespaces whose pods may connect on 5432"
+      description: "List in brackets, [orders-app]: namespaces whose pods may connect on 5432"
       value: ""
     - name: ingressFromPodLabels
       description: "Map (YAML or JSON): pod labels allowed to connect on 5432 (in ingressFromNamespaces, or any namespace)"
       value: ""
     - name: ingressFromCidrs
-      description: "List: CIDRs allowed to connect on 5432 (clients outside the cluster, through a load balancer)"
+      description: "List of CIDRs in brackets, [10.30.0.0/24]: allowed to connect on 5432 (clients outside the cluster, through a load balancer)"
       value: ""
     - name: egressToCidrs
-      description: "List: extra CIDRs the instance pods may reach"
+      description: "List of CIDRs in brackets, [10.40.0.0/24]: extra CIDRs the instance pods may reach"
       value: ""
     - name: egressToFqdns
-      description: "List: host names the instance pods may reach (CiliumNetworkPolicy toFQDNs; needs ACNS)"
+      description: "List in brackets, [api.example.com, *.example.org]: host names the instance pods may reach (CiliumNetworkPolicy toFQDNs; needs ACNS)"
       value: ""
     - name: postgresOverlayFilePath
-      description: "List (comma-separated) of .yaml or .yml files: partial manifests merged into the instances this run creates, one document per kind (Postgres, PostgresBackupLocation, PostgresBackupSchedule with metadata.name <instance>-backup-full or -incremental, PostgresFerretDocumentDB; apiVersion, kind, spec), each a local file (absolute or relative; contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/overlays/<file>; combined into helm_artifacts/instance/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, the instance's current postgres overlay (applied at the initial deployment; tpg-patch patches stack on top). A running instance whose current overlay differs: use tpg-patch"
+      description: "List in brackets, [./a.yaml, repo:<path>], of .yaml or .yml files: partial manifests merged into the instances this run creates, one document per kind (Postgres, PostgresBackupLocation, PostgresBackupSchedule with metadata.name <instance>-backup-full or -incremental, PostgresFerretDocumentDB; apiVersion, kind, spec), each a local file (absolute or relative; contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/overlays/<file>; combined into helm_artifacts/instance/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, the instance's current postgres overlay (applied at the initial deployment; tpg-patch patches stack on top). A running instance whose current overlay differs: use tpg-patch"
       value: ""
     - name: postgresValuesOverlayFilePath
-      description: "One .yaml or .yml file (local, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/overlays/<file>): tpg-instance chart values for the instances this run creates; stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml and recorded as their current postgresValues overlay"
+      description: "One .yaml or .yml file in brackets, [./values.yaml] (local, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/overlays/<file>): tpg-instance chart values for the instances this run creates; stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml and recorded as their current postgresValues overlay"
       value: ""
     - name: operatorValuesOverlayFilePath
-      description: "One .yaml or .yml file (local, absolute or relative, or repo:helm_artifacts/operator/overlays/<file>): operator chart values for the operator this run installs, only operatorImage (same tag as operatorVersion), instanceRegistryRepo, ferretDBImageRepo, dockerRegistrySecretName, certManagerClusterIssuerName, certManagerNamespace, resources, enableSecurityContext; stored as helm_artifacts/operator/overlays/<name>-<uid>.yaml. A running operator whose current overlay differs: use tpg-patch"
+      description: "One .yaml or .yml file in brackets, [./operator.yaml] (local, absolute or relative, or repo:helm_artifacts/operator/overlays/<file>): operator chart values for the operator this run installs, only operatorImage (same tag as operatorVersion), instanceRegistryRepo, ferretDBImageRepo, dockerRegistrySecretName, certManagerClusterIssuerName, certManagerNamespace, resources, enableSecurityContext; stored as helm_artifacts/operator/overlays/<name>-<uid>.yaml. A running operator whose current overlay differs: use tpg-patch"
       value: ""
     - name: patchFiles
       description: "JSON map: the contents of the local overlay (and patch) files, {\"<path as given above>\": \"<base64>\"}; filled by scripts/submit/tpg-day0.sh, or written into a parameter file by scripts/submit/pack-patch-files.sh -o FILE"
       value: ""
     - name: backupCaBundleFile
-      description: "One PEM file (.pem, .crt, .cer; local, absolute or relative, or repo:ca-bundles/<file>): the CA bundle of the storage account for the backupEnableSSL=true instances (contents in patchFiles); empty: backupCaBundleVaultSecret, else ConfigMap tpg-settings backupCaBundle. A clusterMap key of the instance or its cluster wins"
+      description: "One PEM file in brackets, [./ca.pem] (.pem, .crt, .cer; local, absolute or relative, or repo:ca-bundles/<file>): the CA bundle of the storage account for the backupEnableSSL=true instances (contents in patchFiles); empty: backupCaBundleVaultSecret, else ConfigMap tpg-settings backupCaBundle. A clusterMap key of the instance or its cluster wins"
       value: ""
     - name: backupCaBundleVaultSecret
       description: "The name of a CA bundle in Vault (tpg/ca-bundles/<name>, key caBundle; tpg-aks-infra scripts/vault-secret.sh ca put writes it) for the backupEnableSSL=true instances. Not with backupCaBundleFile"
