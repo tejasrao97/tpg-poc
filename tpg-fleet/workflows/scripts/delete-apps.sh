@@ -66,7 +66,7 @@ if [[ "$ALL_INSTANCES" == "true" ]]; then
 else
   while read -r i; do
     [[ -n "$i" ]] || continue
-    if grep -qx "$i" <<<"$declared" || grep -qx "$i" <<<"$live_names"; then
+    if grep -Fqx -- "$i" <<<"$declared" || grep -Fqx -- "$i" <<<"$live_names"; then
       targets="$(printf '%s\n%s' "$targets" "$i")"
     else
       cfail "$i" UNKNOWN_INSTANCE "not declared in ${FLEET_REL} and no Postgres ${i} on ${C}"
@@ -100,7 +100,7 @@ crds="$(tk get crd -o name 2>/dev/null | sed 's#^customresourcedefinition.apiext
 # ---- dry run
 if [[ "$DRY" == "true" ]]; then
   for i in $targets; do
-    in_git="no"; grep -qx "$i" <<<"$declared" && in_git="yes"
+    in_git="no"; grep -Fqx -- "$i" <<<"$declared" && in_git="yes"
     record "result.${C}.${i}" SUCCEEDED DRY_RUN "would delete Postgres ${i} (fleet.yaml entry: ${in_git}; finalBackup=$(cmap_ival "$C" "$i" finalBackup "${P_FINAL_BACKUP:-true}"), purgePvcs=$(cmap_ival "$C" "$i" purgePvcs "${P_PURGE_PVCS:-}"), purgeNamespace=$(cmap_ival "$C" "$i" purgeNamespace "${P_PURGE_NS:-}"))"
   done
   if [[ "$DELETE_OPERATOR" == "true" ]]; then

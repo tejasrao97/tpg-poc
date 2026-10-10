@@ -53,11 +53,6 @@
             "const": "all"
           },
           {
-            "const": [
-              "all"
-            ]
-          },
-          {
             "type": "array",
             "minItems": 1,
             "uniqueItems": true,
@@ -147,11 +142,6 @@
               "anyOf": [
                 {
                   "const": "all"
-                },
-                {
-                  "const": [
-                    "all"
-                  ]
                 },
                 {
                   "type": "array",

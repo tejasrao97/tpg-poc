@@ -22,8 +22,9 @@
 #       the JSON is printed, for -p on the command line; Linux limits one
 #       command-line argument to 128 KiB, about 90 KiB of files).
 # Lists are strict (Round 23): an input is a quoted string that holds a bracketed list,
-# postgresPatchFilePath: '[./a.yaml, ./b.yaml]', and a single-file input is a list of one,
-# backupCaBundleFile: '[./ca.pem]'; in the clusterMap they are YAML sequences. "repo: x.yaml"
+# postgresPatchFilePath: '[./a.yaml, ./b.yaml]', or a YAML sequence (argo sends it as the JSON
+# text ["./a.yaml","./b.yaml"]), and a single-file input is a list of one, backupCaBundleFile:
+# '[./ca.pem]' or [./ca.pem]; in the clusterMap they are YAML sequences. "repo: x.yaml"
 # (a space after the colon) fails with repo:<file path> "check for white spaces in between".
 # The bracketed lists are read with workflows/scripts/clustermap.py of the tpg-fleet clone
 # (TPG_FLEET_DIR, else the clone this script sits in) and python3.
@@ -84,11 +85,12 @@ if [[ $# -eq 0 ]]; then
     t="$(K="$k" yq -r '.[strenv(K)] | tag' "$out_file" 2>/dev/null || true)"
     case "$t" in
       ""|"!!null") continue ;;
-      "!!str") ;;
-      "!!seq") echo "${out_file}: ${k} is a YAML list; a workflow input is one string: write the list as a quoted string, ${k}: '[a.yaml, b.yaml]'. YAML lists belong in clusterMap." >&2; exit 1 ;;
-      *) echo "${out_file}: ${k} must be a string (a bracketed list), not ${t#!!}" >&2; exit 1 ;;
+      "!!str") v="$(K="$k" yq -r '.[strenv(K)]' "$out_file")" ;;
+      # argo 4.1.3 sends a YAML sequence of a parameter file as its JSON text (["a","b"]), which the
+      # workflow reads like the bracketed string
+      "!!seq") v="$(K="$k" yq -o=json -I=0 '.[strenv(K)]' "$out_file")" ;;
+      *) echo "${out_file}: ${k} must be a string or a list, not ${t#!!}" >&2; exit 1 ;;
     esac
-    v="$(K="$k" yq -r '.[strenv(K)]' "$out_file")"
     [[ -n "$(tr -d '[:space:]' <<<"$v")" ]] || continue
     lopts=(--files); [[ "$shape" != one ]] || lopts+=(--one)
     if ! items="$(python3 "$FLEET/workflows/scripts/clustermap.py" list "$k" "$v" "${lopts[@]}" 2>&1)"; then

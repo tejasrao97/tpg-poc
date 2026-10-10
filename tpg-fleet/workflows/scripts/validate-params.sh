@@ -17,6 +17,8 @@
 #   /tmp/selection       the cluster selection for the discover step: the clusterMap
 #                        clusters (comma-separated, an internal value), else the clusters input
 #   /tmp/approval        tpg-upgrade: true when a batch approval pause is needed
+#   /tmp/hasWrite        tpg-rotate-credential: true when the run writes a value (a wrappingToken or a
+#                        caBundleFile); the template's when: reads this, never the raw inputs
 MODE="$1"
 # shellcheck source=workflows/scripts/lib.sh
 source /scripts/lib.sh
@@ -66,14 +68,20 @@ file_get() {    # file_get NAME VALUE: the one file of a single-file input, [./a
   if ! out="$(file_item "$1" "$2" 2>&1)"; then err "$out"; return 0; fi   # (lib.sh runs with set -e: never fail here)
   FILE="$out"
 }
-no_all_item() { # no_all_item NAME: all is a bare word, not a name inside brackets (LIST from list_get)
+no_all_item() { # no_all_item NAME ALLOW_ALL EXAMPLE: all is a bare word, not a name inside brackets (LIST from list_get)
+  # where the input does not take all at all, the message says that (not "write it bare")
   local x
   for x in ${LIST[@]+"${LIST[@]}"}; do
-    [[ "$x" != all ]] || { err "$1: all stands alone, without brackets: $1=all"; return 1; }
+    [[ "$x" != all ]] || {
+      if [[ -n "${2:-}" ]]; then err "$1: all stands alone, without brackets: $1=all"
+      else err "$1 does not accept all (bare or in brackets): list the names, for example ${3:-[a, b]}"; fi
+      return 1
+    }
   done
 }
 clusters_in() {  # clusters_in NAME VALUE ALLOW_ALL -> validates and writes /tmp/clusters.json
-  local n="$1" v="$2" allow_all="$3" c out="[]"
+  local n="$1" v="$2" allow_all="${3:-}" c out="[]"
+  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"     # (the admission pattern lets white space surround all)
   if [[ -z "$v" ]]; then
     err "$n is mandatory: a list of cluster names in brackets, for example [aks-tpg-poc-01]${allow_all:+ or all} (or clusterMap). Registered clusters: ${REG_LIST:-none}"
     return
@@ -83,24 +91,31 @@ clusters_in() {  # clusters_in NAME VALUE ALLOW_ALL -> validates and writes /tmp
     printf '%s' "$(jq -cn --arg r "$REGISTERED" '$r | split("\n") | map(select(length > 0))')" > /tmp/clusters.json
     return
   fi
-  list_get "$n" "$v" || return 0       # (lib.sh runs with set -e: a failed list is already an error)
-  no_all_item "$n" || return 0
+  # all is bare where the input takes it (the hint then says so); where it does not, it is no list item at all
+  # shellcheck disable=SC2086  # the option is empty or two words
+  list_get "$n" "$v" ${allow_all:+--bare all} || return 0       # (lib.sh runs with set -e: a failed list is already an error)
+  no_all_item "$n" "$allow_all" "[aks-tpg-poc-01]" || return 0
   for c in ${LIST[@]+"${LIST[@]}"}; do
-    grep -qx "$c" <<<"$REGISTERED" || err "$n: cluster '${c}' is not registered. Registered clusters: ${REG_LIST:-none}"
+    grep -Fqx -- "$c" <<<"$REGISTERED" || err "$n: cluster '${c}' is not registered. Registered clusters: ${REG_LIST:-none}"
     out="$(jq -c --arg c "$c" 'if index($c) then . else . + [$c] end' <<<"$out")"
   done
   printf '%s' "$out" > /tmp/clusters.json
 }
 cluster_one() {  # cluster_one NAME VALUE: one registered cluster (a single-name input, not a list; empty allowed)
   [[ -n "$2" ]] || return 0
-  grep -qx "$2" <<<"$REGISTERED" || err "$1: cluster '${2}' is not registered. Registered clusters: ${REG_LIST:-none}"
+  grep -Fqx -- "$2" <<<"$REGISTERED" || err "$1: cluster '${2}' is not registered. Registered clusters: ${REG_LIST:-none}"
 }
-instances_in() { # instances_in NAME VALUE ALLOW_ALL
-  local i
-  if [[ -z "$2" ]]; then err "$1 is mandatory: a list of instance names in brackets, for example [orders-db]${3:+ or all} (or clusterMap)"; return; fi
-  [[ "$2" == "all" && -n "$3" ]] && return
-  list_get "$1" "$2" || return 0
-  no_all_item "$1" || return 0
+instances_in() { # instances_in NAME VALUE [ALLOW_ALL]
+  local i allow="${3:-}" v="$2"
+  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+  if [[ -z "$v" ]]; then err "$1 is mandatory: a list of instance names in brackets, for example [orders-db]${allow:+ or all} (or clusterMap)"; return; fi
+  if [[ "$v" == "all" ]]; then
+    [[ -n "$allow" ]] || err "$1 does not accept all (bare or in brackets): list the instances, for example [orders-db]"
+    return
+  fi
+  # shellcheck disable=SC2086  # the option is empty or two words
+  list_get "$1" "$2" ${allow:+--bare all} || return 0
+  no_all_item "$1" "$allow" "[orders-db]" || return 0
   for i in ${LIST[@]+"${LIST[@]}"}; do dnsname "$1" "$i"; done
 }
 opver() { [[ "$2" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ ]] || err "$1 must be an operator chart version such as v4.5.0 (got '${2}')"; }
@@ -109,17 +124,18 @@ PATCH_LOCAL_RE='^(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+
 # kinds_check NAME VALUE: a kindList (clearKinds), [Postgres, postgresValues] or all: known kinds, all alone, no repeats
 PATCH_KIND_NAMES="Postgres PostgresBackupLocation PostgresBackupSchedule PostgresFerretDocumentDB postgresValues operatorValues"
 kinds_check() {
-  local k kseen=" " n=0
+  local k kseen=" " v="$2"
+  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
   list_get "$1" "$2" --bare all || return 0
   for k in ${LIST[@]+"${LIST[@]}"}; do
-    n=$((n + 1))
     if [[ "$k" != all && " ${PATCH_KIND_NAMES} " != *" ${k} "* ]]; then
       err "$1: '${k}' must be one of ${PATCH_KIND_NAMES// /, }, or all"
     fi
     [[ "$kseen" != *" ${k} "* ]] || err "$1: ${k} is named twice"
     kseen="${kseen}${k} "
   done
-  [[ "$kseen" != *" all "* || "$n" -eq 1 ]] || err "$1: all stands alone"
+  # all is the bare word, as for clusters and instances: neither [all] nor [all, Postgres]
+  [[ "$kseen" != *" all "* || "$v" == all ]] || err "$1: all stands alone, without brackets: $1=all"
 }
 PATCH_REPO_RE='^repo:([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml$'
 PATCH_LOCAL_CA_RE='^(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.(pem|crt|cer)$'
@@ -488,6 +504,7 @@ flags_json() {  # flags_json NAME=VALUE... -> JSON object for clustermap.py --fl
 echo '[]' > /tmp/clusters.json
 : > /tmp/selection
 echo false > /tmp/approval
+echo false > /tmp/hasWrite
 case "$MODE" in
   day0)
     PW=Overlay; PG=overlays
@@ -913,6 +930,9 @@ case "$MODE" in
         [[ "${#ERRORS[@]}" -gt 0 ]] || P_BACKUP_CA_FILE="$P_CA_FILE" patch_files_check
       fi
     fi
+    # the write step runs for a value to write: the template's when: reads this file, not the raw
+    # inputs (a caBundleFile element may hold quotes and brackets)
+    [[ -z "$tokenv" && -z "$FILE" ]] || echo true > /tmp/hasWrite
     if [[ "${P_SECRET_TYPE:-}" == custom && -z "$tokenv" ]]; then
       err "secretType=custom needs wrappingToken (tpg-aks-infra scripts/vault-secret.sh wrap custom ${P_SECRET_NAME:-<name>})"
     fi
@@ -931,8 +951,8 @@ fi
 # registered cluster with an entry in clusters/fleet.yaml)
 if cmap_set; then
   jq -r 'join(",")' /tmp/clusters.json > /tmp/selection
-elif [[ "${P_CLUSTERS:-}" == "all" || -z "${P_CLUSTERS:-}" ]]; then
-  printf '%s' "${P_CLUSTERS:-all}" > /tmp/selection
+elif sel_in="${P_CLUSTERS:-}"; sel_in="${sel_in//[[:space:]]/}"; [[ "$sel_in" == "all" || -z "$sel_in" ]]; then
+  printf '%s' "${sel_in:-all}" > /tmp/selection
 else
   jq -r 'join(",")' /tmp/clusters.json > /tmp/selection
 fi

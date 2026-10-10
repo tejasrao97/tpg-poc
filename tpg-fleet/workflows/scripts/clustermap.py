@@ -32,7 +32,7 @@ Lists are strict (Round 23): in the map a key of a list type is a YAML/JSON sequ
 also with one value ([tpg-poc-01]); a single-file key (patchFile, caFile) is a
 sequence of exactly one path ([./a.yaml], normalized to the path). A string where a
 list belongs ("a,b", "a") is refused with the list syntax; kindList alone also takes
-the bare word all. A file entry that is not repo:<file path> or a local path, and
+the bare word all (and refuses [all]: all stands alone, without brackets). A file entry that is not repo:<file path> or a local path, and
 "repo: path" with whitespace (which YAML reads as the map {repo: path}), fail with
 repo:<file path> "check for white spaces in between".
 """
@@ -119,6 +119,8 @@ FILE_SPACE = 'repo:<file path> "check for white spaces in between"'
 def list_syntax_error(where, text, bare=()):
     """The message for a string where a list belongs: shows the bracketed form of what was written."""
     t = text.strip()
+    if t == "all" and "all" not in bare:
+        return f"{where}: 'all' is not a list, and this input does not take all; {LIST_SYNTAX}"
     pieces = [p.strip().strip("\"'") for p in t.split(",") if p.strip()]
     fix = "[" + ", ".join(pieces) + "]" if pieces else "[a, b]"
     more = f"; {' or '.join(bare)} stay{'s' if len(bare) == 1 else ''} bare" if bare else ""
@@ -145,6 +147,8 @@ def parse_list_text(text, where, bare=()):
                 quote = None
             else:
                 cur += ch
+        elif ch in "[]" and not quoted:
+            raise ListError(f"{where}: a list entry must be a plain value, not a nested list")
         elif ch in "\"'" and not cur.strip() and not quoted:
             quote, quoted = ch, True
         elif ch == ",":
@@ -203,6 +207,8 @@ def as_list(value, where="list", text=False, files=False, bare=()):
         if isinstance(p, list):
             raise ListError(f"{where}: a list entry must be a plain value, not a nested list")
         s = "" if p is None else scalar(p).strip()
+        if re.search(r"[\r\n]", s):
+            raise ListError(f"{where}: a list entry holds a line break; write each value on one line: [a, b]")
         if not s:
             raise ListError(f"{where}: the list has an empty element (a doubled or trailing comma); "
                             "write each value once: [a, b]")
@@ -317,8 +323,8 @@ def check_value(spec, value, where):
         for k in items:
             if k != "all" and k not in PATCH_KINDS:
                 return items, f"{where}: '{k}' must be one of {', '.join(PATCH_KINDS)}, or all{suggest(k, PATCH_KINDS)}"
-        if "all" in items and len(items) > 1:
-            return items, f"{where}: all stands alone"
+        if "all" in items:
+            return items, f"{where}: all stands alone, without brackets (write the bare word all, not a list)"
         if len(set(items)) != len(items):
             return items, f"{where}: duplicate entries"
         return items, None

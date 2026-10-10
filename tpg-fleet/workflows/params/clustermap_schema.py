@@ -141,7 +141,7 @@ def value_schema(spec):
                 "items": {"type": "string", "pattern": f"^({local}|{repo})$"}}
     if t == "kindList":
         return {"anyOf": [
-            {"const": "all"}, {"const": ["all"]},
+            {"const": "all"},   # all stays bare; [all] is refused (Round 23)
             {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"enum": list(cm.PATCH_KINDS)}}]}
     if t in ("nameList", "cidrList", "fqdnList"):
         item = {"nameList": _p(cm.NAME), "fqdnList": _p(cm.FQDN),

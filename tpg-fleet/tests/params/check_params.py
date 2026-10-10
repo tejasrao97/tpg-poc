@@ -23,6 +23,11 @@
   7 no YAML file under workflows/params repeats a mapping key (dupkeys.py): the
     parsers keep the last duplicate silently, which hid the fleet path of
     backupEnableSSL under disableInitialBackup
+  8 no template passes a list or file input (clusters, instances, confirm, caBundleFile, ...)
+    raw into a place that cannot take a bracketed list: a `when:` expression (a quote or
+    bracket in an element breaks it) or a step argument (the discover step reads the
+    comma-separated selection that the validate step writes, not the clusters input; the
+    instances input is the one list discover parses itself)
 Prints one line per problem; exit 1 when there is any.
 """
 import glob
@@ -263,6 +268,8 @@ for w in keys["workflows"]:
             "the renamed valuesPatchFilePath": {"c1": {"instances": {"i1": {"valuesPatchFilePath": ["v.yaml"]}}}},
             "two postgresValues files": {"c1": {"instances": {"i1": {"postgresValuesPatchFilePath": ["a.yaml", "b.yaml"]}}}},
             "clearKinds all with a kind": {"c1": {"instances": {"i1": {"clearKinds": ["all", "Postgres"]}}}},
+            "clearKinds [all] (all stays bare)": {"c1": {"clearKinds": ["all"]}},
+            "an instance clearKinds [all]": {"c1": {"instances": {"i1": {"clearKinds": ["all"]}}}},
             "a repo: file outside helm_artifacts/instance/tpg-instance/patches": {"c1": {"instances": {"i1": {"postgresPatchFilePath": ["repo:clusters/fleet.yaml"]}}}},
             "an operator file under helm_artifacts/operator/patches/clusters": {"c1": {"operatorValuesPatchFilePath": ["repo:helm_artifacts/operator/patches/clusters/c1.yaml"]}},
             "an operator patch file under helm_artifacts/operator/overlays/clusters": {"c1": {"operatorValuesPatchFilePath": ["repo:helm_artifacts/operator/overlays/clusters/c1.yaml"]}},
@@ -288,7 +295,7 @@ for w in keys["workflows"]:
         good = {"lists and every path form": {"c1": {"clearKinds": ["operatorValues"], "instances": {"i1": {
             "postgresPatchFilePath": ["/tmp/a.yaml", "~/b.yml", "../c.yaml", "repo:helm_artifacts/instance/tpg-instance/patches/d.yaml"],
             "postgresValuesPatchFilePath": ["repo:helm_artifacts/instance/tpg-instance/patches/v.yaml"], "backupCaBundleFile": ["../ca.crt"]}}}},
-            "clearKinds all stays bare": {"c1": {"clearKinds": "all", "instances": {"i1": {"clearKinds": ["all"]}}}},
+            "clearKinds all stays bare": {"c1": {"clearKinds": "all", "instances": {"i1": {"clearKinds": "all"}}}},
             "one value in a list": {"c1": {"instances": {"i1": {"postgresPatchFilePath": ["a.yaml"]}}}}}
     if w == "day0":
         good = {"YAML numbers and booleans as strings": {"c1": {"operatorVersion": "4.5.0", "instances": {"i1": {
@@ -327,6 +334,64 @@ for f in sorted(glob.glob(os.path.join(ROOT, "workflows", "params", "**", "*.y*m
     msg = dupkeys.check_file(f)
     if msg:
         problems.append(os.path.relpath(msg, ROOT) if msg.startswith(ROOT) else msg)
+
+# 8 list and file inputs reach scripts through the environment only
+def _list_input_problems(doc, list_names):
+    """Problems of one WorkflowTemplate document: raw list inputs in when: expressions and step arguments."""
+    out = []
+    ref = re.compile(r"\{\{\s*workflow\.parameters\.([A-Za-z0-9_]+)\s*\}\}")
+
+    def walk(x, path=""):
+        if isinstance(x, dict):
+            if isinstance(x.get("when"), str):
+                for n in ref.findall(x["when"]):
+                    if n in list_names:
+                        out.append(f"{path or x.get('name', '?')}: when: interpolates the list input {n}; decide it in the validate step (an output parameter)")
+            to = x.get("templateRef", {}).get("template") or x.get("template")
+            for a in (x.get("arguments") or {}).get("parameters", []) if isinstance(x.get("arguments"), dict) else []:
+                for n in ref.findall(str(a.get("value", ""))):
+                    if n not in list_names:
+                        continue
+                    if to == "discover" and a.get("name") == "instances" and n == "instances":
+                        continue         # the one list input discover.sh parses itself (lib.sh list_items)
+                    out.append(f"{path or x.get('name', '?')}: step argument {a.get('name')} passes the list input {n} raw"
+                               + (" to discover; pass {{steps.validate.outputs.parameters.selection}}" if to == "discover" and n == "clusters" else ""))
+            for k, v in x.items():
+                walk(v, x.get("name", path) if isinstance(x.get("name"), str) else path)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, path)
+
+    walk(doc.get("spec", {}))
+    return out
+
+
+for f in sorted(glob.glob(os.path.join(ROOT, "workflows", "templates", "*.yaml"))):
+    doc = yaml.safe_load(open(f))
+    name = doc["metadata"]["name"]
+    list_names = {pn for pn, ts in typed.get(name, {}).items() if types[ts["type"]].get("display", "").startswith("List")}
+    for msg in _list_input_problems(doc, list_names):
+        problems.append(f"{name}: {msg}")
+# the check itself finds the Round 23 review's two defects
+_bad = yaml.safe_load("""
+spec:
+  templates:
+  - name: main
+    steps:
+    - - name: write
+        template: write-secret
+        when: "'{{workflow.parameters.caBundleFile}}' != ''"
+    - - name: discover
+        templateRef: {name: tpg-lib, template: discover}
+        arguments:
+          parameters:
+          - {name: clusters, value: "{{workflow.parameters.clusters}}"}
+          - {name: instances, value: "{{workflow.parameters.instances}}"}
+""")
+_found = _list_input_problems(_bad, {"clusters", "instances", "caBundleFile"})
+if len(_found) != 2 or not any("when: interpolates the list input caBundleFile" in m for m in _found) \
+        or not any("passes the list input clusters raw to discover" in m for m in _found):
+    problems.append(f"the list-input template check misses a raw when:/discover argument: {_found}")
 
 for p in problems:
     print(p)

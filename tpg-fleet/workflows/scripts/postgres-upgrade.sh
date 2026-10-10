@@ -180,7 +180,7 @@ YAML
 git_clone "$WORK/repo"
 if [[ "$SELECTED" != "all" ]]; then
   for i in $(split_list "$SELECTED"); do
-    inventory_instances "$C" | grep -qx "$i" || { record "result.${C}.${i}" FAILED UNKNOWN_INSTANCE "not declared for ${C} in ${FLEET_REL}"; any_failed=1; }
+    inventory_instances "$C" | grep -Fqx -- "$i" || { record "result.${C}.${i}" FAILED UNKNOWN_INSTANCE "not declared for ${C} in ${FLEET_REL}"; any_failed=1; }
   done
 fi
 for i in $(inventory_instances "$C"); do

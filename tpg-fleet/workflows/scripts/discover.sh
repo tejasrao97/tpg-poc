@@ -71,8 +71,10 @@ plan_block() {  # plan_block KEY -> "REASON|DETAIL" of a BLOCKED record, or noth
 }
 
 inv="[]"
-for c in $wanted; do
-  if ! grep -qx "$c" <<<"$registered"; then
+mapfile -t wanted_list <<<"$wanted"      # (not word-split: a name is never a glob pattern)
+for c in ${wanted_list[@]+"${wanted_list[@]}"}; do
+  [[ -n "$c" ]] || continue
+  if ! grep -Fqx -- "$c" <<<"$registered"; then
     record "result.${c}" FAILED NOT_REGISTERED "Secret argo/kubeconfig-${c} is missing; registered clusters: $(paste -sd, <<<"$registered")"
     continue
   fi
@@ -92,7 +94,7 @@ for c in $wanted; do
     chosen="$declared"
     if [[ "$CHECK_ONLY" == "true" ]]; then
       for i in $(cmap_instances "$c"); do
-        grep -qx "$i" <<<"$declared" && continue
+        grep -Fqx -- "$i" <<<"$declared" && continue
         record "result.${c}.${i}" FAILED UNKNOWN_INSTANCE \
           "no clusters.${c}.instances.${i} in ${FLEET_REL}; declared on ${c}: $(paste -sd, <<<"$declared")"
         unknown=1
@@ -101,7 +103,7 @@ for c in $wanted; do
   else
     chosen=""
     for i in $(selected_instances "$REPO" "$c"); do
-      if grep -qx "$i" <<<"$declared"; then
+      if grep -Fqx -- "$i" <<<"$declared"; then
         chosen="$(printf '%s\n%s' "$chosen" "$i")"; seen_anywhere[$i]=1
       elif [[ -n "$cblock" || -n "$(plan_block "result.${c}.${i}")" ]]; then
         log "${c}/${i}: blocked in the plan, left out"

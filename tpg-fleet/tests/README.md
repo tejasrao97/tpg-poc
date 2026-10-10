@@ -185,7 +185,10 @@ number (`16.10`). Strict lists (Round 23, phase 2): `clustermap.py list` and eve
 comma string, a bare name, `[]`, an empty element (`[a, , b]`), `[all]` and `repo: x.yaml` (the
 whitespace message `repo:<file path> "check for white spaces in between"`) are refused with the
 list syntax in the message, and so is a string where a clusterMap key needs a sequence; a
-single-file input holds exactly one file. It also runs `fleet-day0.sh` with stub clusters to prove the
+single-file input holds exactly one file; a nested list and a line break inside an element are refused; `[all]`
+is refused for `clearKinds` too; where an input does not take `all` the message says so; a cluster name is matched
+literally (`[".*"]` is not registered); the rotate validate step's `selection` feeds discover and its `hasWrite`
+decides the write step. It also runs `fleet-day0.sh` with stub clusters to prove the
 version rule of tpg-day0: an input that nothing runs yet replaces the value in
 `fleet.yaml`, and a running operator or instance of another version blocks the
 cluster.

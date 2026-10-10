@@ -61,7 +61,7 @@ cases = {
                     ["a.yaml", "a.yaml,b.yaml", "[]", "[repo: x.yaml]", "[a.txt]", "[a.yaml, , b.yaml]"]),
   "patchFile": (["[./a.yaml]", "[repo:helm_artifacts/x.yaml]", '["a.yaml"]'], ["a.yaml", "[a.yaml, b.yaml]", "[]", "[repo: x.yaml]", "[a.txt]"]),
   "caFile": (["[./ca.pem]", "[repo:ca-bundles/x.crt]"], ["ca.pem", "[ca.pem, b.pem]", "[]", "[repo: ca-bundles/x.pem]", "[ca.txt]"]),
-  "kindList": (["all", "[all]", "[Postgres]", "[Postgres, postgresValues]"], ["Postgres", "Postgres,postgresValues", "[]", "[all, Postgres]", "[Nope]"]),
+  "kindList": (["all", "[Postgres]", "[Postgres, postgresValues]"], ["Postgres", "Postgres,postgresValues", "[]", "[all]", "[all, Postgres]", "[Nope]"]),
 }
 for t, (good, bad) in cases.items():
     pat = types[t]["pattern"]

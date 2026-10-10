@@ -210,7 +210,7 @@ rejected "R23: postgresPatchFilePath as a comma string is refused" 'postgresPatc
 wf tpg-patch "$(params patchMode=clear clearKinds=all)"
 accepted "R23: clearKinds=all stays bare"
 wf tpg-patch "$(params patchMode=clear 'clearKinds=[all]')"
-accepted "R23: clearKinds=[all] is accepted"
+rejected "R23: clearKinds=[all] is refused (all stays bare, as for clusters)" 'clearKinds="[all]" must be a List in brackets of Postgres' 'all stands alone, without brackets'
 wf tpg-patch "$(params patchMode=clear 'clearKinds=Postgres,postgresValues')"
 rejected "R23: clearKinds as a comma string is refused" 'clearKinds="Postgres,postgresValues" must be a List in brackets'
 wf tpg-helm-addons "$(params 'clusters=[aks-tpg-poc-01]' 'components=cert-manager,vso')"

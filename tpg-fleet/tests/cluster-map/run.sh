@@ -30,6 +30,11 @@ if [[ "$*" == *"get secret -l tpg.fleet/cluster"* ]]; then
     printf '{"metadata":{"labels":{"tpg.fleet/cluster":"%s"}}},' "$c"; done | sed 's/,$//')"
   exit 0
 fi
+# the Workflow object of the run (tpg-rotate-credential reads wrappingToken from it): S_TOKEN set
+if [[ "$*" == *"get workflow"* && -n "${S_TOKEN:-}" ]]; then
+  jq -cn --arg t "$S_TOKEN" '{spec: {arguments: {parameters: [{name: "wrappingToken", value: $t}]}}}'
+  exit 0
+fi
 exit 0
 STUB
 chmod +x "$TMP/bin/kubectl"
@@ -667,6 +672,105 @@ vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {clearKinds: "Postgres,postgresValues", 
 invalid "R23 clusterMap: clearKinds as a comma string is refused" "clearKinds: 'Postgres,postgresValues' is not a list" "Did you mean [Postgres, postgresValues]?"
 vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {clearKinds: all, instances: {orders-db: {}}}' P_PATCH_MODE=clear P_PUSH_MODE=direct
 valid "R23 clusterMap: clearKinds: all stays bare"
+
+# ---- Round 23 phase 2 review: the rotate selection, hasWrite, [all], messages, literal matching
+# rotate: the validate step writes /tmp/selection (the internal comma form) and the discover step
+# reads that, never the bracketed input; an input [c1] handed to discover is NOT_REGISTERED
+cat > "$TMP/prelude-disc.sh" <<PRELUDE
+export TPG_WORK="$TMP/discwork"
+source "$ROOT/workflows/scripts/lib.sh"
+set +e
+git_clone() { rm -rf "\$1"; cp -r "$TMP/scalerepo" "\$1"; }
+record() { printf '%s|%s|%s|%s\n' "\$1" "\$2" "\${3:-}" "\${4:-}" >> "$TMP/disc-records"; }
+record_entry() { record "\$@"; }
+run_records() { echo '{}'; }
+registered_clusters() { printf 'aks-tpg-poc-01\naks-tpg-poc-02\naks-tpg-poc-03\n'; }
+registered_wave() { echo 0; }
+kubectl() { :; }
+PRELUDE
+sed "s#source /scripts/lib.sh#source $TMP/prelude-disc.sh#" "$ROOT/workflows/scripts/discover.sh" > "$TMP/discover-rot.sh"
+disc() {  # disc SELECTION: the discover step of a rotate run; the inventory names in $INV, the records in $DREC
+  rm -rf "$TMP/discwork"; : > "$TMP/disc-records"; rm -f /tmp/inventory.json
+  RC=0; OUT="$(bash "$TMP/discover-rot.sh" wf "$1" 2>&1)" || RC=$?
+  INV="$(jq -c 'map(.name)' /tmp/inventory.json 2>/dev/null || echo none)"; DREC="$(cat "$TMP/disc-records")"
+}
+vp rotate P_SECRET_TYPE=broadcom-registry P_CLUSTERS='[aks-tpg-poc-01]'
+valid "R23 review rotate: clusters=[aks-tpg-poc-01] is valid"
+disc "$(cat /tmp/selection)"
+[[ "$RC" -eq 0 && "$INV" == '["aks-tpg-poc-01"]' && "$DREC" != *NOT_REGISTERED* ]] \
+  && ok "R23 review rotate: discover with the selection of a validate of clusters=[c1] finds the cluster" || bad "rotate selection to discover" "$(cat /tmp/selection) $INV $DREC $OUT"
+disc '[aks-tpg-poc-01]'
+[[ "$DREC" == *NOT_REGISTERED* ]] \
+  && ok "R23 review rotate: the raw bracketed input is NOT_REGISTERED in discover (why the templates pass the selection)" || bad "raw bracketed input" "$INV $DREC"
+vp rotate P_SECRET_TYPE=backup-storage P_CLUSTERS=all
+valid "R23 review rotate: clusters=all is valid"
+disc "$(cat /tmp/selection)"
+[[ "$RC" -eq 0 && "$(jq -r 'length' /tmp/inventory.json)" -ge 1 && "$DREC" != *NOT_REGISTERED* ]] \
+  && ok "R23 review rotate: the selection of clusters=all stays all" || bad "rotate all selection" "$(cat /tmp/selection) $INV $DREC"
+# hasWrite: the write step runs for a wrappingToken or a caBundleFile, decided by the validate step
+vp rotate P_SECRET_TYPE=broadcom-registry P_CLUSTERS=all
+valid "R23 review rotate: nothing to write is valid"
+[[ "$(cat /tmp/hasWrite)" == false ]] && ok "R23 review rotate: no wrappingToken and no caBundleFile: hasWrite false" || bad "hasWrite false" "$(cat /tmp/hasWrite 2>&1)"
+vp rotate P_SECRET_TYPE=broadcom-registry P_CLUSTERS=all S_TOKEN=hvs.0123456789abcdefghij
+valid "R23 review rotate: a wrapping token is valid"
+[[ "$(cat /tmp/hasWrite)" == true ]] && ok "R23 review rotate: a wrappingToken: hasWrite true" || bad "hasWrite token" "$(cat /tmp/hasWrite 2>&1)"
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=ok-ca -keyout "$TMP/rot.key" -out "$TMP/rot.pem" 2>/dev/null
+ROT_PF="$(jq -cn --arg b "$(base64 < "$TMP/rot.pem" | tr -d '\n')" '{"./ca.pem": $b}')"
+vp rotate P_SECRET_TYPE=ca-bundle P_SECRET_NAME=storage-ca P_CLUSTERS=all P_CA_FILE='[./ca.pem]' P_PATCH_FILES="$ROT_PF"
+valid "R23 review rotate: caBundleFile [./ca.pem] with its patchFiles is valid"
+[[ "$(cat /tmp/hasWrite)" == true ]] && ok "R23 review rotate: a caBundleFile: hasWrite true" || bad "hasWrite ca" "$(cat /tmp/hasWrite 2>&1)"
+vp rotate P_SECRET_TYPE=ca-bundle P_SECRET_NAME=storage-ca P_CLUSTERS=all P_CA_FILE="['./ca.pem']" P_PATCH_FILES="$ROT_PF"
+valid "R23 review rotate: a single-quoted element ['./ca.pem'] is valid"
+[[ "$(cat /tmp/hasWrite)" == true ]] && ok "R23 review rotate: a quoted caBundleFile element: hasWrite true (no quote reaches a when expression)" || bad "hasWrite quoted ca" "$(cat /tmp/hasWrite 2>&1)"
+
+# [all] is refused for clearKinds too (only the bare all)
+vp patch P_CLUSTERS='[aks-tpg-poc-01]' P_INSTANCES='[orders-db]' P_CLEAR_KINDS='[all]' P_PATCH_MODE=clear P_PUSH_MODE=direct
+invalid "R23 review patch: clearKinds=[all] is refused" "clearKinds: all stands alone, without brackets: clearKinds=all"
+vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {clearKinds: [all], instances: {orders-db: {}}}' P_PATCH_MODE=clear P_PUSH_MODE=direct
+invalid "R23 review clusterMap: clearKinds: [all] is refused (the bare scalar all stays)" "clearKinds: all stands alone, without brackets"
+vp patch P_CLUSTER_MAP='aks-tpg-poc-01: {instances: {orders-db: {clearKinds: [all]}}}' P_PATCH_MODE=clear P_PUSH_MODE=direct
+invalid "R23 review clusterMap: an instance clearKinds: [all] is refused" "clearKinds: all stands alone, without brackets"
+
+# messages that do not send the user in a circle
+vp day0 P_CLUSTERS=all P_INSTANCES=all P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=17.6 P_PUSH_MODE=direct
+invalid "R23 review day0: instances=all says the workflow does not take all" "instances does not accept all"
+[[ "$OUT" != *"Did you mean [all]"* ]] && ok "R23 review day0: instances=all does not suggest [all]" || bad "instances=all suggests [all]" "$OUT"
+vp day0 P_CLUSTERS=all P_INSTANCES='[all]' P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=17.6 P_PUSH_MODE=direct
+invalid "R23 review day0: instances=[all] says the workflow does not take all" "instances does not accept all"
+[[ "$OUT" != *"instances=all"* ]] && ok "R23 review day0: instances=[all] does not suggest instances=all" || bad "[all] suggests instances=all" "$OUT"
+vp delete-instance P_CLUSTERS='[all]' P_INSTANCES='[orders-db]' P_CONFIRM='[orders-db]'
+invalid "R23 review delete-instance: clusters=[all] says the workflow does not take all" "clusters does not accept all"
+[[ "$OUT" != *"clusters=all"* ]] && ok "R23 review delete-instance: clusters=[all] does not suggest clusters=all" || bad "clusters [all] suggests clusters=all" "$OUT"
+vp delete-instance P_CLUSTERS=all P_INSTANCES='[orders-db]' P_CONFIRM='[orders-db]'
+invalid "R23 review delete-instance: clusters=all says the workflow does not take all" "clusters does not accept all"
+vp create-instance P_CLUSTERS='[all]' P_INSTANCES='[new-db]' P_PUSH_MODE=direct
+invalid "R23 review create-instance: clusters=[all] says the workflow does not take all" "clusters does not accept all"
+li f 'all'
+[[ "$RC" -eq 1 && "$OUT" != *"Did you mean [all]"* && "$OUT" == *"does not take all"* ]] \
+  && ok "R23 review list: all where it is not taken has no Did-you-mean [all]" || bad "list all message" "$OUT"
+
+# a cluster name is a literal, never a regular expression
+vp rotate P_SECRET_TYPE=broadcom-registry P_CLUSTERS='[".*"]'
+invalid "R23 review rotate: clusters=[\".*\"] is not registered (no regex match)" "cluster '.*' is not registered"
+vp day0 P_CLUSTERS='[aks-tpg-poc-0.]' P_INSTANCES='[orders-db]' P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=17.6 P_PUSH_MODE=direct
+invalid "R23 review day0: a pattern in a cluster list is not registered" "cluster 'aks-tpg-poc-0.' is not registered"
+disc '.*'
+[[ "$DREC" == *"result..*|FAILED|NOT_REGISTERED"* ]] \
+  && ok "R23 review discover: a selection of .* is NOT_REGISTERED (literal membership)" || bad "discover regex" "$INV $DREC $OUT"
+
+# the list text: nested lists and line breaks inside an element
+li clusters '[a, [b]]'
+[[ "$RC" -eq 1 && "$OUT" == *"clusters: a list entry must be a plain value, not a nested list"* ]] && ok "list: a nested list [a, [b]] is refused" || bad "list nested" "$OUT"
+li clusters '[[b, c]]'
+[[ "$RC" -eq 1 && "$OUT" == *"not a nested list"* ]] && ok "list: [[b, c]] is refused as a nested list" || bad "list nested 2" "$OUT"
+li clusters '[["b"], "c"]'
+[[ "$RC" -eq 1 && "$OUT" == *"not a nested list"* ]] && ok "list: a nested JSON list is refused" || bad "list nested json" "$OUT"
+li clusters $'[a\nb, c]'
+[[ "$RC" -eq 1 && "$OUT" == *"clusters: a list entry holds a line break"* ]] && ok "list: a line break inside an element is refused" || bad "list newline" "$OUT"
+li clusters $'["a\\nb","c"]'
+[[ "$RC" -eq 1 && "$OUT" == *"clusters: a list entry holds a line break"* ]] && ok "list: a line break inside a quoted JSON element is refused" || bad "list newline json" "$OUT"
+li clusters $'[a,\n b]'
+[[ "$RC" -eq 0 && "$OUT" == $'a\nb' ]] && ok "list: a line break between elements is only white space" || bad "list newline between" "$OUT"
 
 # ---- lib accessors
 cat > "$TMP/acc.sh" <<ACC

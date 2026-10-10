@@ -244,10 +244,40 @@ printf "pushMode: direct\npostgresPatchFilePath: '[repo:helm_artifacts/instance/
 RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o repo-only.yaml 2>&1)" || RC=$?
 [[ "$RC" -eq 0 ]] && ! grep -q '^patchFiles:' "$W/run/repo-only.yaml" && grep -q "no local file named" <<<"$OUT" \
   && ok "2iii: only repo: files: nothing to pack, patchFiles not written" || bad "pack repo only" "$OUT"
-printf 'pushMode: direct\npostgresPatchFilePath: [pg.yaml]\n' > "$W/run/list.yaml"
-RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o list.yaml 2>&1)" || RC=$?
-[[ "$RC" -ne 0 ]] && grep -q "postgresPatchFilePath is a YAML list; a workflow input is one string" <<<"$OUT" && grep -q "'\[a.yaml, b.yaml\]'" <<<"$OUT" \
-  && ok "2ii: a YAML list as a top-level input is refused with the quoted bracketed form" || bad "pack list input" "$OUT"
+# Round 23 review: argo 4.1.3 accepts a YAML sequence in --parameter-file and sends it as a JSON array string
+# (["a","b"]); the pack script reads that form as well as the quoted bracketed string
+cat > "$W/run/seq.yaml" <<'YAML'
+pushMode: direct
+postgresPatchFilePath: [pg.yaml, ../up/sched.yaml, repo:helm_artifacts/instance/tpg-instance/patches/team.yaml]
+postgresValuesPatchFilePath: [~/p/vals.yaml]
+backupCaBundleFile:
+  - ./ca.pem
+YAML
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o seq.yaml 2>&1)" || RC=$?
+[[ "$RC" -eq 0 && "$(yq -r '.patchFiles' "$W/run/seq.yaml" | jq -c 'keys')" == '["../up/sched.yaml","./ca.pem","pg.yaml","~/p/vals.yaml"]' ]] \
+  && ok "R23 review: -o reads YAML sequences for list and single-file inputs (the same files as the quoted bracketed form)" || bad "pack sequence inputs" "$OUT $(cat "$W/run/seq.yaml")"
+[[ "$(yq -o=json -I=0 '.postgresPatchFilePath' "$W/run/seq.yaml")" == '["pg.yaml","../up/sched.yaml","repo:helm_artifacts/instance/tpg-instance/patches/team.yaml"]' ]] \
+  && ok "R23 review: the parameter file keeps the sequence (argo sends it as a JSON array string)" || bad "pack keeps sequence" "$(head -5 "$W/run/seq.yaml")"
+printf 'pushMode: direct\npostgresPatchFilePath: [pg.yaml, pg.yaml]\n' > "$W/run/seqdup.yaml"
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o seqdup.yaml 2>&1)" || RC=$?
+[[ "$RC" -eq 0 && "$(yq -r '.patchFiles' "$W/run/seqdup.yaml" | jq -c 'keys')" == '["pg.yaml"]' ]] \
+  && ok "R23 review: a file named twice is packed once" || bad "pack sequence dup" "$OUT"
+printf 'pushMode: direct\npostgresValuesPatchFilePath: [pg.yaml, ../up/sched.yaml]\n' > "$W/run/seqtwo.yaml"
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o seqtwo.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q "postgresValuesPatchFilePath: exactly one file is expected" <<<"$OUT" \
+  && ok "R23 review: a sequence of two for a single-file input is refused" || bad "pack sequence two" "$OUT"
+printf 'pushMode: direct\npostgresPatchFilePath: []\n' > "$W/run/seqempty.yaml"
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o seqempty.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q "postgresPatchFilePath: the list is empty" <<<"$OUT" \
+  && ok "R23 review: an empty sequence is refused" || bad "pack sequence empty" "$OUT"
+printf 'pushMode: direct\npostgresPatchFilePath:\n  - repo: helm_artifacts/instance/tpg-instance/patches/team.yaml\n' > "$W/run/seqrepo.yaml"
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o seqrepo.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q 'postgresPatchFilePath: repo:<file path> "check for white spaces in between"' <<<"$OUT" \
+  && ok "R23 review: a sequence entry repo: x.yaml (a mapping in YAML) fails with the whitespace message" || bad "pack sequence repo space" "$OUT"
+printf 'pushMode: direct\npostgresPatchFilePath: {a: b}\n' > "$W/run/seqmap.yaml"
+RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o seqmap.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q "postgresPatchFilePath must be a string or a list" <<<"$OUT" \
+  && ok "R23 review: a mapping where a list belongs is refused" || bad "pack mapping input" "$OUT"
 # Round 23: the input is a quoted string that holds a bracketed list; a single file is a list of one
 cat > "$W/run/inputs.yaml" <<'YAML'
 pushMode: direct

@@ -776,7 +776,7 @@ kustomization:
 
 | Option | Where the metric is | Directory | Kind | Applied by |
 |---|---|---|---|---|
-| standalone | targets | `monitoring/standalone/targets/` | `monitoring.coreos.com/v1` PodMonitor or ServiceMonitor, namespace `monitoring` (the kustomization is applied with `-n monitoring`) | `helm-addons.sh` (`tpg-helm-addons -p components=monitoring`, `tpg-day0`, `--only addons`) |
+| standalone | targets | `monitoring/standalone/targets/` | `monitoring.coreos.com/v1` PodMonitor or ServiceMonitor, namespace `monitoring` (the kustomization is applied with `-n monitoring`) | `helm-addons.sh` (`tpg-helm-addons -p 'components=[monitoring]'`, `tpg-day0`, `--only addons`) |
 | standalone | hub | `monitoring/standalone/hub/` | `monitoring.coreos.com/v1`, namespace `monitoring` (set by the kustomization) | `helm-addons.sh --role hub` (`--only addons`), or `kubectl apply -k monitoring/standalone/hub` |
 | azure | targets | `monitoring/azure/targets/` | `azmonitoring.coreos.com/v1` PodMonitor or ServiceMonitor in `kube-system`, like the existing ones | Argo CD Application `tpg-<cluster>-monitoring` (automated sync from `main`) |
 | azure | hub | `monitoring/azure/hub/` | `azmonitoring.coreos.com/v1`, `kube-system` | Argo CD Application `tpg-hub-monitoring` (automated sync) |
