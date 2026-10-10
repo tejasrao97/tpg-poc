@@ -22,7 +22,9 @@
 # clusters/fleet.yaml (default pg-<instance>; the audit copy in clusters/deleted when the entry is gone,
 # lib.sh instance_ns_known); "its own namespace" below means that one. A live Postgres outside the
 # namespace of its entry or copy is not an instance of tpg-instances: it is left alone and reported
-# (warning POSTGRES_SKIPPED; tpg-instances:<name> selects it). purgeNamespace
+# (warning POSTGRES_SKIPPED; tpg-instances:<name> selects it only when no entry and no audit copy names
+# another namespace and the name runs in one namespace; the warning says which case it is, and otherwise
+# in which namespace to delete it by hand). purgeNamespace
 # on an instance whose namespace another instance outside this run still uses is refused
 # (NAMESPACE_SHARED, nothing changes), and so is purgeNamespace=true for one instance of a namespace
 # when another instance of the run in it has purgeNamespace=false; instances of the run that share a
@@ -81,11 +83,26 @@ live_names="$(jq -r '.[].name' <<<"$live")"
 targets=""
 if [[ "$ALL_INSTANCES" == "true" ]]; then
   targets="$(printf '%s\n%s\n' "$declared" "$(jq -r '.[] | select(.namespace == .expected) | .name' <<<"$live")" | grep -v '^$' | sort -u || true)"
-  # a Postgres outside the namespace of its entry or audit copy is not one of ours: left alone, and said so
+  # a Postgres outside the namespace of its entry or audit copy is not one of ours: left alone, and said so.
+  # tpg-instances:<name> reaches it only when nothing records another namespace for the name (no entry, no
+  # audit copy) and it runs in one namespace only (delete-instance.sh gone_instance_ns); otherwise the
+  # message says it has to be deleted by hand, and where
   while read -r row; do
     [[ -n "$row" ]] || continue
-    record_entry "warning.${C}.$(jq -r '.namespace + "." + .name' <<<"$row")" WARNING POSTGRES_SKIPPED \
-      "Postgres $(jq -r '.namespace + "/" + .name' <<<"$row") is not in the namespace its fleet.yaml entry or audit copy gives ($(jq -r .expected <<<"$row")), so tpg-instances leaves it alone; select it with tpg-instances:$(jq -r .name <<<"$row") to delete it"
+    n="$(jq -r .name <<<"$row")"; rns="$(jq -r .namespace <<<"$row")"; rexp="$(jq -r .expected <<<"$row")"
+    rsrc="$(instance_ns_source "$REPO" "$C" "$n")"
+    rall="$(jq -r --arg n "$n" '[.[] | select(.name == $n) | .namespace] | sort | join(", ")' <<<"$live")"
+    why="Postgres ${rns}/${n} is not in the namespace its fleet.yaml entry or audit copy gives (${rexp}), so tpg-instances leaves it alone"
+    case "$rsrc" in
+      entry) fix="; the entry in ${FLEET_REL} says ${rexp}, so tpg-instances:${n} cannot reach it: delete it by hand in namespace ${rns} (kubectl -n ${rns} delete postgres ${n})" ;;
+      copy)  fix="; the audit copy in clusters/deleted/${C} says ${rexp}, so tpg-instances:${n} cannot reach it (NAMESPACE_MISMATCH): delete it by hand in namespace ${rns} (kubectl -n ${rns} delete postgres ${n}) if it is not the deleted instance" ;;
+      *)     if [[ "$rall" == *,* ]]; then
+               fix="; ${n} runs in ${rall}, so tpg-instances:${n} refuses it (NAMESPACE_AMBIGUOUS): delete it by hand in namespace ${rns} (kubectl -n ${rns} delete postgres ${n})"
+             else
+               fix="; select it with tpg-instances:${n} to delete it"
+             fi ;;
+    esac
+    record_entry "warning.${C}.${rns}.${n}" WARNING POSTGRES_SKIPPED "${why}${fix}"
   done < <(jq -c '.[] | select(.namespace != .expected)' <<<"$live")
 else
   while read -r i; do

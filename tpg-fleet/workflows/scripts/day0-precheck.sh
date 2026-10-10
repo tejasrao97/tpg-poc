@@ -144,22 +144,50 @@ fi
 # 8. Secrets the fleet does not manage (Round 23). The owner of the shared Secrets of a namespace renders
 #    VaultStaticSecrets named regsecret and backup-storage, which create (and overwrite: Vault Secrets
 #    Operator, destination.overwrite) the Secrets of those names. A Secret of that name that is neither
-#    created by a VaultStaticSecret (ownerReferences) nor tracked by an Application of the fleet
-#    (tpg-<cluster>-*) belongs to someone else and would be overwritten: NAMESPACE_SECRET_CONFLICT.
-#    A namespace that does not exist yet has none.
+#    created by a VaultStaticSecret of the fleet nor tracked by an Application of the fleet (tpg-<cluster>-*)
+#    belongs to someone else and would be overwritten: NAMESPACE_SECRET_CONFLICT. A Secret "created by a
+#    VaultStaticSecret" is one with an ownerReference to the VaultStaticSecret of its name whose own tracking
+#    annotation names an Application of the fleet (a VaultStaticSecret somebody else applied is foreign).
+#    Only the metadata is read (jsonpath; the Secret data is never fetched). Only NotFound means "no such
+#    Secret" (a namespace that does not exist yet has none); any other error (Forbidden, a timeout) is
+#    CLUSTER_API_ERROR, not "no conflict".
 declare -A SEEN_SECRET=()
+read_meta() {  # read_meta NAMESPACE KIND NAME -> metadata JSON on stdout; rc 0 read, 1 NotFound, 2 other error (text on stdout)
+  local out rc=0
+  out="$(tk -n "$1" get "$2" "$3" -o jsonpath='{.metadata}' 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    printf '%s' "$out" | tr '\n,' ' ;' | head -c 300
+    grep -qiE 'NotFound|not found' <<<"$out" && return 1
+    return 2
+  fi
+  if ! jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1; then printf 'unexpected answer: %s' "$(tr '\n,' ' ;' <<<"$out" | head -c 200)"; return 2; fi
+  printf '%s' "$out"
+}
 for i in $(inventory_instances "$C"); do
   if ! ns="$(instance_ns "$C" "$i")"; then block "FLEET_UNREADABLE:${i}: the namespace of the instance cannot be read from the fleet repository"; continue; fi
   for sec in regsecret backup-storage; do
     [[ -z "${SEEN_SECRET["${ns}/${sec}"]:-}" ]] || continue
-    sj="$(tk -n "$ns" get secret "$sec" -o json 2>/dev/null || true)"
-    [[ -n "$sj" ]] || continue
     SEEN_SECRET["${ns}/${sec}"]=1
-    if ! jq -e --arg a "tpg-${C}-" --arg n "$sec" '
-        any(.metadata.ownerReferences[]?; .kind == "VaultStaticSecret" and .name == $n and ((.apiVersion // "") | startswith("secrets.hashicorp.com/")))
-        or ((.metadata.annotations["argocd.argoproj.io/tracking-id"] // "") | startswith($a))' <<<"$sj" >/dev/null 2>&1; then
-      block "NAMESPACE_SECRET_CONFLICT:namespace ${ns} already has the Secret ${sec}, which the fleet does not manage (instance ${i} would overwrite it from Vault); rename that Secret or choose another namespace with the namespace key"
+    rc=0; sj="$(read_meta "$ns" secret "$sec")" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) continue ;;
+      *) block "CLUSTER_API_ERROR:cannot read the Secret ${ns}/${sec} on ${C}: ${sj}"; continue ;;
+    esac
+    managed=false
+    if jq -e --arg a "tpg-${C}-" '((.annotations["argocd.argoproj.io/tracking-id"] // "") | startswith($a))' <<<"$sj" >/dev/null 2>&1; then
+      managed=true
+    elif jq -e --arg n "$sec" 'any(.ownerReferences[]?; .kind == "VaultStaticSecret" and .name == $n and ((.apiVersion // "") | startswith("secrets.hashicorp.com/")))' <<<"$sj" >/dev/null 2>&1; then
+      # created by the VaultStaticSecret of its name: the fleet's only when that VaultStaticSecret is tracked by a fleet Application
+      rc=0; vj="$(read_meta "$ns" vaultstaticsecret "$sec")" || rc=$?
+      case "$rc" in
+        0) ! jq -e --arg a "tpg-${C}-" '((.annotations["argocd.argoproj.io/tracking-id"] // "") | startswith($a))' <<<"$vj" >/dev/null 2>&1 || managed=true ;;
+        1) ;;   # the VaultStaticSecret is gone: the Secret is not kept by the fleet
+        *) block "CLUSTER_API_ERROR:cannot read the VaultStaticSecret ${ns}/${sec} on ${C}: ${vj}"; continue ;;
+      esac
     fi
+    [[ "$managed" == true ]] \
+      || block "NAMESPACE_SECRET_CONFLICT:namespace ${ns} already has the Secret ${sec}, which the fleet does not manage (instance ${i} would overwrite it from Vault); rename that Secret or choose another namespace with the namespace key"
   done
 done
 

@@ -741,6 +741,23 @@ _app_wait_idle() {
   done
 }
 
+: "${SYNC_OP_WAIT_SECONDS:=60}"        # _app_settle_op: how long a running operation may finish by itself
+: "${SYNC_TERMINATE_WAIT_SECONDS:=60}" # _app_settle_op: how long a terminated operation may take to end
+
+_app_settle_op() {
+  # _app_settle_op APP -> 0 when APP has no operation running or requested. A running operation is
+  # given SYNC_OP_WAIT_SECONDS to finish; then it is terminated (Argo CD API: DELETE
+  # /applications/APP/operation, what `argocd app terminate-op APP` calls) and given
+  # SYNC_TERMINATE_WAIT_SECONDS to end. An operation that times out in app_sync_wait keeps running in
+  # Argo CD: it would finish later and apply its objects over whatever was synced since. Returns 1
+  # when the operation is still there
+  local app="$1"
+  _app_wait_idle "$app" "$SYNC_OP_WAIT_SECONDS" && return 0
+  log "${app}: its operation is still running after ${SYNC_OP_WAIT_SECONDS}s; terminating it (argocd app terminate-op ${app})"
+  acd DELETE "/api/v1/applications/${app}/operation" >/dev/null 2>&1 || log "${app}: terminate request rejected (the operation may have just ended)"
+  _app_wait_idle "$app" "$SYNC_TERMINATE_WAIT_SECONDS"
+}
+
 _app_op_wait() {
   # _app_op_wait APP PREVIOUS_STARTED_AT DEADLINE -> 0 Succeeded, 1 Failed/Error
   # (message in SYNC_OP_MESSAGE), 2 timeout. Only an operation whose startedAt
@@ -2160,15 +2177,32 @@ instance_ns_in() {
 
 FLEET_UNREADABLE_DETAIL="the fleet repository could not be read for the namespace of an instance: this step has no checkout of it, the instance is not in the run inventory and a clone failed (Vault, GitHub)"
 
+instance_ns_override() {
+  # instance_ns_override CLUSTER INSTANCE NAMESPACE: from here on, in this shell and in every script it
+  # starts, instance_ns CLUSTER INSTANCE is NAMESPACE (INSTANCE_NS_OVERRIDE, exported, "<cluster>/<instance>=<ns>"
+  # words). A workflow that resolved the namespace of an instance by other means than its entry (the audit
+  # copy of a deleted entry, the live Postgres: gone_instance_ns) sets it once, so every helper it calls
+  # (busy_operations, pg_state, backup-instance.sh) works in that namespace and none falls back to the
+  # pg-<instance> of a checkout that has no entry. The last override of an instance wins
+  export INSTANCE_NS_OVERRIDE="${INSTANCE_NS_OVERRIDE:+${INSTANCE_NS_OVERRIDE} }${1}/${2}=${3}"
+}
+
 instance_ns() {
-  # instance_ns CLUSTER INSTANCE -> the namespace of the instance: instance.namespace of its
-  # entry in clusters/fleet.yaml (instance_ns_in) in a checkout the step already has; else the
-  # namespace the run inventory recorded (discover.sh); else a clone is made and read.
+  # instance_ns CLUSTER INSTANCE -> the namespace of the instance: the one set with instance_ns_override;
+  # else instance.namespace of its entry in clusters/fleet.yaml (instance_ns_in) in a checkout the step
+  # already has; else the namespace the run inventory recorded (discover.sh); else a clone is made and read.
   # pg-<instance> only when a checkout of the fleet repository was actually read and the instance
   # has no namespace there. When nothing could be read (no checkout, the instance not in the
   # inventory, the clone failed) it prints nothing and returns 1, and the caller stops with
   # FLEET_UNREADABLE (FLEET_UNREADABLE_DETAIL): a guessed pg-<instance> would act on another namespace
-  local c="$1" i="$2" repo ns=""
+  local c="$1" i="$2" repo ns="" kv
+  for kv in ${INSTANCE_NS_OVERRIDE:-}; do
+    [[ "${kv%%=*}" == "${c}/${i}" ]] && ns="${kv#*=}"
+  done
+  if [[ -n "$ns" ]]; then
+    printf '%s' "$ns"
+    return 0
+  fi
   if repo="$(instance_ns_repo_local)"; then
     instance_ns_in "$repo" "$c" "$i"
     return 0
@@ -2190,7 +2224,9 @@ instance_ns() {
 instance_ns_known() {
   # instance_ns_known REPO CLUSTER INSTANCE -> the namespace an instance is expected in: its entry
   # in clusters/fleet.yaml, else the audit copy of a deleted entry (clusters/deleted), else
-  # pg-<instance> (the checkout REPO was read, so the default is a fact, not a guess)
+  # pg-<instance>: the expectation for an instance nothing records (REPO was read and has neither an
+  # entry nor a copy). A live Postgres of that name elsewhere is not found by this; the callers
+  # compare it with where the Postgres actually is (delete-apps: POSTGRES_SKIPPED, gone_instance_ns)
   local copy ns
   if fleet_has_instance "$1" "$2" "$3"; then
     instance_ns_in "$1" "$2" "$3"
@@ -2199,6 +2235,15 @@ instance_ns_known() {
     printf '%s' "${ns:-pg-$3}"
   else
     printf 'pg-%s' "$3"
+  fi
+}
+
+instance_ns_source() {
+  # instance_ns_source REPO CLUSTER INSTANCE -> where instance_ns_known takes the namespace from: "entry"
+  # (clusters/fleet.yaml), "copy" (the audit copy of a deleted entry) or "default" (nothing records it)
+  if fleet_has_instance "$1" "$2" "$3"; then printf entry
+  elif deleted_copy "$1" "$2" "$3" >/dev/null; then printf copy
+  else printf default
   fi
 }
 
@@ -2260,14 +2305,14 @@ gone_instance_ns() {
 
 fleet_ns_table() {
   # fleet_ns_table REPO CLUSTER -> one line per instance of the cluster in clusters/fleet.yaml, TAB
-  # separated: instance, namespace (instance.namespace, default pg-<instance>), owner (true unless
-  # instance.sharedSecretsOwner is false). One pass with one yq call. Both are keys of the entry that no
+  # separated: instance, namespace (instance.namespace, default pg-<instance>; "" counts as absent, as in
+  # instance_ns_in), owner (true unless instance.sharedSecretsOwner is false). One pass with one yq call. Both are keys of the entry that no
   # patch file can set (patch_values_errors), so the entry, with the cluster level instance defaults
   # instance_values merges in, is what instance_ns_in and instance_effective would return, instance by instance
   # shellcheck disable=SC2016  # yq variables, not shell
   C="$2" yq -r '.clusters[strenv(C)] as $c | ($c.instances // {}) | to_entries[]
     | ((($c.instance // {}) * (.value.instance // {})) as $x
-       | [.key, ($x.namespace // ("pg-" + .key)), (((($x.sharedSecretsOwner | tostring) == "false") | not) | tostring)] | @tsv)' "$1/$FLEET_REL"
+       | [.key, (($x.namespace | select(. != "")) // ("pg-" + .key)), (((($x.sharedSecretsOwner | tostring) == "false") | not) | tostring)] | @tsv)' "$1/$FLEET_REL"
 }
 
 fleet_ns_members() {
@@ -2345,9 +2390,10 @@ ensure_shared_secrets() {
 }
 
 _secrets_adopted() {
-  # _secrets_adopted NAMESPACE APP: one poll (for wait_logged) of "the shared objects of the namespace
-  # are tracked by APP and the VaultStaticSecrets are healthy" - the same rule as the Argo CD health
-  # check of VaultStaticSecret (the Ready condition, else SecretSynced, is True)
+  # _secrets_adopted NAMESPACE APP [tracking]: one poll (for wait_logged) of "the shared objects of the
+  # namespace are tracked by APP and the VaultStaticSecrets are healthy" - the same rule as the Argo CD
+  # health check of VaultStaticSecret (the Ready condition, else SecretSynced, is True). With "tracking"
+  # only the per-object tracking is checked (each of the three objects on its own, no health)
   local ns="$1" app="$2" kind name json t
   for kind in serviceaccount:tpg-vso vaultstaticsecret:regsecret vaultstaticsecret:backup-storage; do
     name="${kind#*:}"; kind="${kind%%:*}"
@@ -2355,12 +2401,23 @@ _secrets_adopted() {
     json="$(tk -n "$ns" get "$kind" "$name" -o json 2>/dev/null)" || { log "  ${kind}/${name} does not exist yet"; return 1; }
     t="$(jq -r '(.metadata.annotations["argocd.argoproj.io/tracking-id"] // "") | split(":")[0]' <<<"$json")"
     [[ "$t" == "$app" ]] || { log "  ${kind}/${name} is tracked by '${t:-nothing}', not by ${app}"; return 1; }
-    if [[ "$kind" == vaultstaticsecret ]] && ! jq -e '(.status.conditions // []) as $c
+    if [[ "$kind" == vaultstaticsecret && "${3:-}" != tracking ]] && ! jq -e '(.status.conditions // []) as $c
         | (($c | map(select(.type == "Ready")) | first) // ($c | map(select(.type == "SecretSynced")) | first) // {}) | .status == "True"' <<<"$json" >/dev/null; then
       log "  ${kind}/${name} is not synced from Vault yet: $(vss_summary "$ns" "$name")"
       return 1
     fi
   done
+}
+
+_secrets_trackers() {
+  # _secrets_trackers NAMESPACE -> what tracks each shared object: "ServiceAccount/tpg-vso=<app>, ..." ("none" = absent)
+  local ns="$1" kind name out=""
+  for kind in serviceaccount:tpg-vso vaultstaticsecret:regsecret vaultstaticsecret:backup-storage; do
+    name="${kind#*:}"; kind="${kind%%:*}"
+    out+="${out:+, }${kind}/${name}=$(tk -n "$ns" get "$kind" "$name" -o json 2>/dev/null | jq -r '(.metadata.annotations["argocd.argoproj.io/tracking-id"] // "nothing") | split(":")[0]' 2>/dev/null || true)"
+    [[ "$out" != *"=" ]] || out+="none"
+  done
+  printf '%s' "$out"
 }
 
 _flag_get() {  # _flag_get REPO CLUSTER INSTANCE -> "true", "false" or "" (no key) for instance.sharedSecretsOwner
@@ -2378,17 +2435,37 @@ _handover_revert() {
   # _handover_revert REPO CLUSTER INSTANCE SUCCESSOR NAMESPACE INSTANCE_FLAG SUCCESSOR_FLAG WHY TIMEOUT REVISION:
   # a hand-over failed after its flag commit was pushed. Without a revert Git would name SUCCESSOR the owner
   # while the Application of INSTANCE still tracks the Secrets and no longer renders them: a later sync with
-  # prune of INSTANCE would delete them. Push the old flags back (INSTANCE owns them again), give the tracking
-  # annotation back to INSTANCE when the successor's sync had moved it, and report HANDOVER_FAILED.
-  local repo="$1" c="$2" i="$3" succ="$4" ns="$5" ip="$6" sp="$7" why="$8" timeout="$9" rev="${10:-}"
+  # prune of INSTANCE would delete them. Push the old flags back (INSTANCE owns them again), then make
+  # Argo CD agree, whatever state the failed sync left (a selective sync can apply some of the three objects
+  # and fail on another, and a sync that timed out keeps running and may finish later):
+  #   - the successor's operation is waited for (bounded) or terminated, so it cannot finish after the revert
+  #   - the shared objects of INSTANCE are synced again (idempotent: objects it already tracks are re-applied
+  #     unchanged), whatever the annotation of regsecret says
+  #   - each of ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage is checked to be
+  #     tracked by INSTANCE's Application (tracking only, not health); what is not is named in the report
+  # and report HANDOVER_FAILED.
+  local repo="$1" c="$2" i="$3" succ="$4" ns="$5" ip="$6" sp="$7" why="$8" timeout="$9" rev="${10:-}" ok=true
   HANDOVER_REASON=HANDOVER_FAILED
   _flag_set "$repo" "$c" "$i" "$ip"
   _flag_set "$repo" "$c" "$succ" "$sp"
   if git_commit_push "$repo" "revert the hand-over of the shared Secrets of ${c}/${ns} from ${i} to ${succ}" "$FLEET_REL"; then
     HANDOVER_DETAIL="${why}; the owner flags were reverted in Git (${PUSHED_REVISION:0:12}), ${i} owns the shared Secrets of ${ns} again; ${i} was not deleted"
-    if ! _secrets_app_is "$ns" "tpg-${c}-${i}" && ! sync_shared_secrets "$c" "$i" "$ns" "$timeout" "${PUSHED_REVISION:-$rev}"; then
-      HANDOVER_DETAIL+="; the shared objects could not be given back to tpg-${c}-${i} (${SYNC_FAIL_REASON}): sync it again before anything prunes"
+    if ! _app_settle_op "tpg-${c}-${succ}"; then
+      ok=false
+      HANDOVER_DETAIL+="; the sync operation of tpg-${c}-${succ} is still running and could not be terminated (it may apply the shared objects later)"
     fi
+    if ! sync_shared_secrets "$c" "$i" "$ns" "$timeout" "${PUSHED_REVISION:-$rev}"; then
+      ok=false
+      HANDOVER_DETAIL+="; the shared objects could not be synced back to tpg-${c}-${i} (${SYNC_FAIL_REASON})"
+    fi
+    if ! wait_logged "shared objects of ${ns} tracked by tpg-${c}-${i}" 6 10 _secrets_adopted "$ns" "tpg-${c}-${i}" tracking; then
+      ok=false
+      HANDOVER_DETAIL+="; NOT every shared object is tracked by tpg-${c}-${i} ($(_secrets_trackers "$ns")): sync tpg-${c}-${i} again (its shared objects) before anything prunes"
+    elif [[ "$ok" == true ]]; then
+      HANDOVER_DETAIL+="; ServiceAccount tpg-vso and VaultStaticSecrets regsecret and backup-storage are tracked by tpg-${c}-${i} again"
+    fi
+  elif [[ "${PUSH_MODE:-direct}" == "pr" && -n "${PR_NUMBER:-}" ]]; then
+    HANDOVER_DETAIL="${why}; the revert of the owner flags was NOT merged: it is pull request #${PR_NUMBER}${PR_URL:+ (${PR_URL})} - close it (a merge later would undo what the next run finishes); ${succ} is the owner in clusters/fleet.yaml but ${i} still tracks the Secrets - run tpg-delete-instance for ${i} again (it finishes the hand-over)"
   else
     HANDOVER_DETAIL="${why}; the revert of the owner flags was NOT pushed: ${succ} is the owner in clusters/fleet.yaml but ${i} still tracks the Secrets - run tpg-delete-instance for ${i} again (it finishes the hand-over)"
   fi

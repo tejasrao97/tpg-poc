@@ -60,13 +60,18 @@ EV="@TMP@/events"
 ev() { printf '%s\n' "$*" >> "$EV"; }
 record() { printf '%s|%s|%s|%s\n' "$1" "$2" "${3:-}" "${4:-}" >> "@TMP@/records"; RESULT_RECORDED=1; }
 record_entry() { printf '%s|%s|%s|%s\n' "$1" "$2" "${3:-}" "${4:-}" >> "@TMP@/records"; }
-run_data() { :; }
+run_data() {   # a result key: the last record of it as the JSON delete-instance.sh reads (the final backup); anything else: nothing
+  [[ "$1" == result.* ]] || return 0
+  grep -F "$1|" "@TMP@/records" | tail -n1 | jq -Rc 'split("|") | {status: .[1], reason: .[2], detail: .[3]}'
+}
 setting() { :; }
 use_cluster() { CLUSTER="$1"; }
 git_clone() { rm -rf "$1"; mkdir -p "$1"; cp -r "@REPO@/." "$1/"; cp "@TMP@/fleet.yaml" "$1/clusters/fleet.yaml"
   [[ ! -d "@TMP@/deleted" ]] || cp -r "@TMP@/deleted" "$1/clusters/deleted"; }
 git_commit_push() {
   local dir="$1" n
+  # $TMP/pr-timeout: PUSH_MODE=pr, the pull request of the revert is opened and not merged in time
+  if [[ -f "@TMP@/pr-timeout" && "$2" == revert* ]]; then PR_NUMBER=42; PR_URL="https://github.example/o/r/pull/42"; ev "pr opened #42 (not merged)"; return 1; fi
   if [[ "${FLEET_CLONE:-}" == "$dir" && -d "$WORK/fleet" ]]; then fleet_flush "$dir"; fi
   fleet_yaml_style "$dir/clusters/fleet.yaml"
   cp "$dir/clusters/fleet.yaml" "@TMP@/fleet.yaml"
@@ -84,13 +89,35 @@ app_removed_or_force() { ev "removed $1|tracked-by=$(cat "@TMP@/tracked")"; echo
 # a sync renders the chart of the instance from the pushed fleet.yaml; the Application whose chart renders
 # the shared VaultStaticSecret becomes the one Argo CD tracks it with (the apply writes the annotation).
 # --resources: a selective sync (the event says which objects). $TMP/sync-fail: the sync fails;
-# $TMP/no-move: it succeeds and changes nothing
+# $TMP/no-move: it succeeds and changes nothing; $TMP/partial: the sync of app-b moves ServiceAccount tpg-vso
+# only and fails (a selective sync applied part of its objects); $TMP/late: the sync of app-b times out and its
+# operation keeps running (op-running) - it finishes after the next sync of another Application and then
+# takes all three objects; $TMP/stuck-sa: a sync of an owner leaves tpg-vso with the Application that had it
+# $TMP/tracked.<object>: an object with its own tracking Application (else $TMP/tracked)
 sleep() { :; }
+export SYNC_OP_WAIT_SECONDS=0 SYNC_TERMINATE_WAIT_SECONDS=5
+app_get() { if [[ -s "@TMP@/op-running" && "$1" == "$(cat "@TMP@/op-running")" ]]; then echo '{"status":{"operationState":{"phase":"Running"}}}'; else echo '{}'; fi; }
+acd() {
+  local app
+  if [[ "$1" == DELETE && "$2" == */operation ]]; then app="${2#/api/v1/applications/}"; app="${app%/operation}"; ev "terminate $app"; : > "@TMP@/op-running"; fi
+}
 app_sync_wait() {
   local app="$1" inst sel="full" tail
   inst="${app#tpg-c1-}"
   shift 2
   while [[ $# -gt 0 ]]; do case "$1" in --resources) sel="selective:$2"; shift 2 ;; --revision) shift 2 ;; *) shift ;; esac; done
+  if [[ -f "@TMP@/partial" && "$app" == tpg-c1-app-b ]]; then
+    echo "$app" > "@TMP@/tracked.tpg-vso"
+    SYNC_FAIL_REASON=SYNC_FAILED; SYNC_FAIL_DETAIL="$app: VaultStaticSecret regsecret failed to apply"
+    ev "sync $app|partly applied (tpg-vso moved)|tracked-by=$(cat "@TMP@/tracked")|$sel"
+    return 1
+  fi
+  if [[ -f "@TMP@/late" && "$app" == tpg-c1-app-b ]]; then
+    echo "$app" > "@TMP@/op-running"
+    SYNC_FAIL_REASON=SYNC_TIMEOUT; SYNC_FAIL_DETAIL="$app: the sync operation did not finish in 600s"
+    ev "sync $app|timeout, the operation keeps running|tracked-by=$(cat "@TMP@/tracked")|$sel"
+    return 2
+  fi
   if [[ -f "@TMP@/sync-fail" ]]; then
     SYNC_FAIL_REASON=SYNC_FAILED; SYNC_FAIL_DETAIL="$app: sync failed"
     ev "sync $app|failed|tracked-by=$(cat "@TMP@/tracked")|$sel"
@@ -100,10 +127,17 @@ app_sync_wait() {
   cp -r "@REPO@/helm_artifacts/instance" "@TMP@/render-repo/helm_artifacts/"; cp -r "@REPO@/clusters/_template" "@TMP@/render-repo/clusters/"
   cp "@TMP@/fleet.yaml" "@TMP@/render-repo/clusters/fleet.yaml"
   if instance_render "@TMP@/render-repo" c1 "$inst" 2>/dev/null | yq -e 'select(.kind == "VaultStaticSecret" and .metadata.name == "regsecret")' >/dev/null 2>&1; then
-    [[ -f "@TMP@/no-move" ]] || echo "$app" > "@TMP@/tracked"
+    if [[ ! -f "@TMP@/no-move" ]]; then
+      echo "$app" > "@TMP@/tracked"
+      [[ -f "@TMP@/stuck-sa" ]] && echo tpg-c1-app-b > "@TMP@/tracked.tpg-vso" || rm -f "@TMP@"/tracked.*
+    fi
     ev "sync $app|renders the shared Secrets|tracked-by=$(cat "@TMP@/tracked")|$sel"
   else
     ev "sync $app|renders no shared Secrets|tracked-by=$(cat "@TMP@/tracked")|$sel"
+  fi
+  if [[ -s "@TMP@/op-running" && "$(cat "@TMP@/op-running")" != "$app" ]]; then   # the operation that timed out finishes now
+    cp "@TMP@/op-running" "@TMP@/tracked"; rm -f "@TMP@"/tracked.*; : > "@TMP@/op-running"
+    ev "late operation finished after the sync of $app: all three objects are tracked by $(cat "@TMP@/tracked")"
   fi
   return 0
 }
@@ -118,9 +152,14 @@ tk() {
     *readyz*) return 0 ;;
     *"get crd postgres.sql.tanzu.vmware.com"*) return 0 ;;
     *"get crd -o name"*) return 0 ;;
-    *"get vaultstaticsecret "*|*"get serviceaccount "*)   # the shared objects: tracked by the Application $TMP/tracked names
-      jq -cn --arg t "$(cat "@TMP@/tracked"):apiextensions/Shared:${ns}/${5}" --arg r "$([[ -f "@TMP@/vss-not-ready" ]] && echo False || echo True)" \
+    *" apply -f -"*) cat > "@TMP@/applied"; ev "apply $ns|$(awk '/^kind:/ {print $2}' "@TMP@/applied")" ;;   # the final backup: a PostgresBackup in the namespace it is asked in
+    *" get postgresbackup -o json"*|*" get postgresrestore -o json"*|*" get postgresversionupgrade -o json"*)   # $TMP/busyops: "<namespace> <kind>" lines of unfinished operations
+      jq -Rn --arg ns "$ns" --arg k "${args##* get }" '[inputs | split(" ") | select(length == 2 and .[0] == $ns and .[1] == ($k | split(" ")[0]))
+        | {metadata: {name: "op"}, status: {phase: "Running"}}] | {items: .}' < "@TMP@/busyops" | jq -c . ;;
+    *"get vaultstaticsecret "*|*"get serviceaccount "*)   # the shared objects: tracked by the Application $TMP/tracked (or tracked.<name>) names
+      jq -cn --arg t "$(cat "@TMP@/tracked.${5}" 2>/dev/null || cat "@TMP@/tracked"):apiextensions/Shared:${ns}/${5}" --arg r "$([[ -f "@TMP@/vss-not-ready" ]] && echo False || echo True)" \
         '{metadata: {annotations: {"argocd.argoproj.io/tracking-id": $t}}, status: {conditions: [{type: "Ready", status: $r}]}}' ;;
+    *" get postgresbackup "*"-o json"*) echo '{"status":{"phase":"Succeeded","size":"1GB"}}' ;;
     "get postgres -A -o json"*) live_items ;;
     *" get postgres -o json"*) live_items "$ns" ;;
     *" get postgres "*)
@@ -145,13 +184,13 @@ tk() {
 }
 PRELUDE
 sed -e "s#@TMP@#$TMP#g" -e "s#@ROOT@#$ROOT#g" -e "s#@REPO@#$REPO#g" "$TMP/prelude.tmpl" > "$TMP/prelude.sh"
-for s in delete-instance delete-apps; do
-  sed -e "s#source /scripts/lib.sh#source $TMP/prelude.sh#" -e "s#bash /scripts/delete-instance.sh#bash $TMP/delete-instance.sh#" \
+for s in delete-instance delete-apps backup-instance; do
+  sed -e "s#source /scripts/lib.sh#source $TMP/prelude.sh#" -e "s#bash /scripts/delete-instance.sh#bash $TMP/delete-instance.sh#" -e "s#bash /scripts/backup-instance.sh#bash $TMP/backup-instance.sh#" \
     "$ROOT/workflows/scripts/$s.sh" > "$TMP/$s.sh"
 done
 
 reset() {  # reset [REMOVE_INSTANCES...]: the base fleet, every instance running, one PVC each, app-a tracks the shared Secrets
-  rm -rf "$TMP/work" "$TMP/deleted" "$TMP/render-repo"; rm -f "$TMP/sync-fail" "$TMP/no-move" "$TMP/vss-not-ready"; : > "$TMP/nsgone"; : > "$TMP/records"; : > "$TMP/events"; : > "$TMP/removed"; echo 0 > "$TMP/rev"
+  rm -rf "$TMP/work" "$TMP/deleted" "$TMP/render-repo"; rm -f "$TMP/sync-fail" "$TMP/no-move" "$TMP/vss-not-ready" "$TMP/partial" "$TMP/late" "$TMP/stuck-sa" "$TMP/pr-timeout" "$TMP"/tracked.*; : > "$TMP/op-running"; : > "$TMP/busyops"; : > "$TMP/nsgone"; : > "$TMP/records"; : > "$TMP/events"; : > "$TMP/removed"; echo 0 > "$TMP/rev"
   cp "$TMP/fleet.base.yaml" "$TMP/fleet.yaml"
   printf 'app-a shared\napp-b shared\napp-c shared\norders-db pg-orders-db\n' > "$TMP/live"
   printf 'data-app-a-0 shared app-a\ndata-app-b-0 shared app-b\ndata-app-c-0 shared app-c\ndata-orders-db-0 pg-orders-db orders-db\n' > "$TMP/pvcs"
@@ -242,6 +281,50 @@ c3="$(lineno 'sync tpg-c1-app-a|renders the shared Secrets|tracked-by=tpg-c1-app
 [[ -n "$c1" && -n "$c2" && -n "$c3" && "$c1" -lt "$c2" && "$c2" -lt "$c3" ]] && grep -q '^tpg-c1-app-a$' "$TMP/tracked" && [[ "$(owners_now)" == 1 ]] \
   && ok "hand-over: Secrets not healthy after the successor's sync: reverted, and the objects are synced back to app-a (the annotation returns)" \
   || bad "unhealthy revert" "$(cat "$TMP/events") $(cat "$TMP/records")"
+# the revert re-syncs the old owner whatever regsecret says (Round 23 re-review): a selective sync that applied
+# ServiceAccount tpg-vso and failed on a VaultStaticSecret leaves regsecret with app-a and tpg-vso with app-b
+trk() { local n out=""; for n in tpg-vso regsecret backup-storage; do out+="$(cat "$TMP/tracked.$n" 2>/dev/null || cat "$TMP/tracked") "; done; printf '%s' "${out% }"; }
+reset
+touch "$TMP/partial"
+del app-a false false false
+r2="$(lineno 'commit rev2|revert the hand-over')"; r3="$(lineno 'sync tpg-c1-app-a|renders the shared Secrets|tracked-by=tpg-c1-app-a|selective:')"
+[[ -n "$r2" && -n "$r3" && "$r2" -lt "$r3" && "$(trk)" == "tpg-c1-app-a tpg-c1-app-a tpg-c1-app-a" ]] && ! has_ev 'delete c1/app-a' \
+  && rec "result.c1.app-a|FAILED|HANDOVER_FAILED" | grep -q "ServiceAccount tpg-vso and VaultStaticSecrets regsecret and backup-storage are tracked by tpg-c1-app-a again" \
+  && ok "hand-over revert: a partly applied selective sync (tpg-vso moved, regsecret not) is repaired - old owner synced again, all three objects tracked by it, said in the report" \
+  || bad "partial apply revert" "$(trk) $(cat "$TMP/events") $(cat "$TMP/records")"
+# a sync that timed out keeps running in Argo CD and would finish after the revert: it is terminated first
+reset
+touch "$TMP/late"
+del app-a false false false
+t1="$(lineno 'terminate tpg-c1-app-b')"; r3="$(lineno 'sync tpg-c1-app-a|renders the shared Secrets|tracked-by=tpg-c1-app-a|selective:')"
+[[ -n "$t1" && -n "$r3" && "$t1" -lt "$r3" && "$(trk)" == "tpg-c1-app-a tpg-c1-app-a tpg-c1-app-a" ]] && ! has_ev 'late operation finished' \
+  && rec "result.c1.app-a|FAILED|HANDOVER_FAILED" | grep -q "SYNC_TIMEOUT" \
+  && ok "hand-over revert: the successor's sync timed out (SYNC_TIMEOUT) and still runs: its operation is terminated before the old owner is synced, so it cannot finish later" \
+  || bad "late timeout revert" "$(trk) $(cat "$TMP/events") $(cat "$TMP/records")"
+# an operation that ends by itself within the wait is not terminated
+reset
+echo tpg-c1-app-b > "$TMP/op-running"
+touch "$TMP/sync-fail"
+del app-a false false false
+has_ev 'terminate tpg-c1-app-b' && ok "hand-over revert: an operation still running when the wait is over is terminated" || bad "terminate when busy" "$(cat "$TMP/events")"
+reset
+touch "$TMP/sync-fail"
+del app-a false false false
+! has_ev 'terminate' && ok "hand-over revert: no operation running, nothing to terminate" || bad "no terminate when idle" "$(cat "$TMP/events")"
+# the old owner is synced but one object stays with the successor: said clearly, per object
+reset
+touch "$TMP/partial" "$TMP/stuck-sa"
+del app-a false false false
+rec "result.c1.app-a|FAILED|HANDOVER_FAILED" | grep -q "NOT every shared object is tracked by tpg-c1-app-a (serviceaccount/tpg-vso=tpg-c1-app-b, vaultstaticsecret/regsecret=tpg-c1-app-a, vaultstaticsecret/backup-storage=tpg-c1-app-a)" \
+  && ok "hand-over revert: an object that is still tracked by the successor is named in the report (per-object check)" || bad "per-object report" "$(cat "$TMP/records")"
+# PUSH_MODE=pr: the revert pull request is not merged in time - the report names it and says to close it
+reset
+touch "$TMP/sync-fail" "$TMP/pr-timeout"
+export PUSH_MODE=pr
+del app-a false false false
+unset PUSH_MODE
+rec "result.c1.app-a|FAILED|HANDOVER_FAILED" | grep -q "pull request #42 (https://github.example/o/r/pull/42) - close it" && yq -e '.clusters.c1.instances | has("app-a")' "$TMP/fleet.yaml" >/dev/null \
+  && ok "hand-over revert in PUSH_MODE=pr: the HANDOVER_FAILED detail names the revert pull request #42 and says to close it" || bad "pr revert detail" "$(cat "$TMP/records")"
 # the successor has no Application: refused before anything is pushed
 reset
 echo tpg-c1-app-b >> "$TMP/removed"
@@ -433,11 +516,82 @@ echo "ghost team-g" >> "$TMP/live"
 apps '{"c1":["tpg-instances"]}' true false
 ! has_ev 'team-g' && rec "warning.c1.team-g.ghost|WARNING|POSTGRES_SKIPPED" | grep -q "team-g/ghost is not in the namespace its fleet.yaml entry or audit copy gives (pg-ghost)" \
   && ok "delete-apps: a Postgres outside the namespace of its entry or copy is skipped with a report line (POSTGRES_SKIPPED), not silently" || bad "ghost skipped" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+# the hint is by case: tpg-instances:<name> reaches a Postgres only when no entry and no audit copy names another namespace
+# and the name runs in one namespace. Otherwise it must be deleted by hand, in the namespace the message names
+reset
+echo "orders-db other-ns" >> "$TMP/live"
+apps '{"c1":["tpg-instances"]}' true false
+w="$(rec 'warning.c1.other-ns.orders-db|WARNING|POSTGRES_SKIPPED')"
+[[ "$w" == *"the entry in clusters/fleet.yaml says pg-orders-db, so tpg-instances:orders-db cannot reach it: delete it by hand in namespace other-ns"* && "$w" != *"select it with"* ]] && has_ev 'delete postgres pg-orders-db/orders-db' && ! has_ev 'other-ns' \
+  && ok "delete-apps: a Postgres outside the namespace its entry gives: POSTGRES_SKIPPED says the selection cannot reach it and to delete it by hand in other-ns" || bad "skipped entry hint" "$w $(cat "$TMP/events")"
+copy_fixture
+grep -vx "orders team-o" "$TMP/live" > "$TMP/live.n"; mv "$TMP/live.n" "$TMP/live"; echo "orders other-ns" >> "$TMP/live"
+apps '{"c1":["tpg-instances"]}' true false
+w="$(rec 'warning.c1.other-ns.orders|WARNING|POSTGRES_SKIPPED')"
+[[ "$w" == *"the audit copy in clusters/deleted/c1 says team-o, so tpg-instances:orders cannot reach it (NAMESPACE_MISMATCH): delete it by hand in namespace other-ns"* && "$w" != *"select it with"* ]] && ! has_ev 'other-ns' \
+  && ok "delete-apps: the audit copy names another namespace: the hint says by hand in other-ns, not the selection" || bad "skipped copy hint" "$w $(cat "$TMP/events")"
+reset
+printf 'ghost team-g\nghost team-h\n' >> "$TMP/live"
+apps '{"c1":["tpg-instances"]}' true false
+w="$(rec 'warning.c1.team-g.ghost|WARNING|POSTGRES_SKIPPED')"
+[[ "$w" == *"ghost runs in team-g, team-h, so tpg-instances:ghost refuses it (NAMESPACE_AMBIGUOUS): delete it by hand in namespace team-g"* && "$w" != *"select it with"* ]] \
+  && ok "delete-apps: the same name in two namespaces and no record: the hint says the selection is ambiguous and to delete it by hand" || bad "skipped ambiguous hint" "$w"
 # and the explicit selection deletes it (ALLOW_UNTRACKED: the one live Postgres of that name)
 reset
 echo "ghost team-g" >> "$TMP/live"
 apps '{"c1":["tpg-instances:ghost"]}' true false
 has_ev 'delete postgres team-g/ghost' && ok "delete-apps: tpg-instances:ghost deletes it, in the namespace the live lookup finds" || bad "ghost selected" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+
+# ---- the namespace the delete resolved is the one every helper uses (Round 23 re-review)
+# orders: entry gone (a re-run), audit copy says team-o, the Postgres is live there. busy_operations, pg_state and
+# backup-instance.sh used to call instance_ns again, which gives pg-orders for an entry that is not in the checkout:
+# finalBackup=required failed with currentState=, finalBackup=true deleted without a backup
+copy_fixture
+del orders true false false
+a="$(lineno 'apply team-o|PostgresBackup')"; d="$(lineno 'delete postgres team-o/orders')"
+[[ "$RC" -eq 0 && -n "$a" && -n "$d" && "$a" -lt "$d" ]] && ! grep -q 'pg-orders' "$TMP/events" && rec "result.c1.orders|SUCCEEDED" | grep -q 'final backup orders-full-' \
+  && ok "re-run in a custom namespace, finalBackup=true: the final backup is taken in team-o and the Postgres is deleted only after it" || bad "re-run backup true" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+copy_fixture
+del orders required false false
+a="$(lineno 'apply team-o|PostgresBackup')"; d="$(lineno 'delete postgres team-o/orders')"
+[[ "$RC" -eq 0 && -n "$a" && -n "$d" && "$a" -lt "$d" ]] && ! rec "result.c1.orders|FAILED" | grep -q . \
+  && ok "re-run in a custom namespace, finalBackup=required: the Postgres is Running in team-o, the backup is taken there (no FINAL_BACKUP_IMPOSSIBLE)" || bad "re-run backup required" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+# a backup, restore or upgrade running in team-o blocks the delete (busy_operations looked at pg-orders)
+copy_fixture
+echo "team-o postgresrestore" > "$TMP/busyops"
+del orders true false false
+rec "result.c1.orders|FAILED|OPERATION_IN_PROGRESS" | grep -q 'postgresrestore' && [[ ! -s "$TMP/events" ]] \
+  && ok "re-run in a custom namespace: an unfinished operation in team-o blocks the delete (OPERATION_IN_PROGRESS), nothing changed" || bad "re-run busy" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+# the live lookup (no entry, no copy, ALLOW_UNTRACKED) is used by the helpers as well
+reset
+echo "ghost team-g" >> "$TMP/live"
+ALLOW_UNTRACKED=true del ghost required false false
+a="$(lineno 'apply team-g|PostgresBackup')"; d="$(lineno 'delete postgres team-g/ghost')"
+[[ "$RC" -eq 0 && -n "$a" && -n "$d" && "$a" -lt "$d" ]] \
+  && ok "untracked Postgres in team-g (finalBackup=required): backed up in team-g, then deleted" || bad "untracked required" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+# tpg-delete-apps: the untracked ghost outside pg-<instance> with the default finalBackup (P_FINAL_BACKUP unset: true)
+reset
+echo "ghost team-g" >> "$TMP/live"
+RC=0; OUT="$(P_APPS='{"c1":["tpg-instances:ghost"]}' P_DRY_RUN=false P_PURGE_PVCS=false P_PURGE_NS=false P_FORCE=false P_TIMEOUT=600 bash "$TMP/delete-apps.sh" wf c1 2>&1)" || RC=$?
+a="$(lineno 'apply team-g|PostgresBackup')"; d="$(lineno 'delete postgres team-g/ghost')"
+[[ "$RC" -eq 0 && -n "$a" && -n "$d" && "$a" -lt "$d" ]] && ! grep -q 'pg-ghost' "$TMP/events" \
+  && ok "delete-apps: an untracked Postgres in a custom namespace with the default finalBackup is backed up in that namespace before it is deleted" || bad "apps ghost backup" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+# an entry that is there: the same helpers, the namespace of the entry (unchanged)
+reset
+del app-b true false false
+a="$(lineno 'apply shared|PostgresBackup')"; d="$(lineno 'delete postgres shared/app-b')"
+[[ "$RC" -eq 0 && -n "$a" && -n "$d" && "$a" -lt "$d" ]] \
+  && ok "an instance with an entry (namespace shared): the final backup is taken in shared, as before" || bad "entry backup" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+# instance_ns honours the per-instance override first, and only for that cluster/instance
+reset
+rm -rf "$TMP/ov-repo"; mkdir -p "$TMP/ov-repo/clusters"; cp "$TMP/fleet.yaml" "$TMP/ov-repo/clusters/fleet.yaml"
+ov="$(bash -c "
+  export TPG_WORK='$TMP/ov-work'
+  source '$ROOT/workflows/scripts/lib.sh'
+  INSTANCE_NS_REPO='$TMP/ov-repo'
+  instance_ns_override c1 orders team-o
+  echo \"\$(instance_ns c1 orders)|\$(instance_ns c1 orders-db)|\$(instance_ns c2 orders)\"" 2>/dev/null)"
+[[ "$ov" == "team-o|pg-orders-db|pg-orders" ]] && ok "instance_ns_override: honoured first for that cluster/instance only (others unchanged)" || bad "override" "$ov"
 
 # ---- the namespace of an instance: a checkout, the run inventory, a clone (Round 23 review)
 # instance_ns reads, in this order: a checkout the step has, the inventory, a clone; nothing readable: rc 1, no pg-<instance> guess
@@ -538,6 +692,20 @@ t0=$SECONDS
 out="$(bash -c "source '$ROOT/workflows/scripts/lib.sh'; fleet_ns_owners '$TMP/many' c1 ns0 | paste -sd,; fleet_ns_members '$TMP/many' c1 ns1 | wc -l | tr -d ' '" 2>/dev/null)"
 [[ "$out" == "i60,20"* || "$out" == $'i60\n20' ]] && (( SECONDS - t0 <= 5 )) \
   && ok "fleet_ns_owners / fleet_ns_members: 60 instances in one pass (the owners of ns0 and the members of ns1 as the entries say)" || bad "ns many" "$out in $((SECONDS - t0))s"
+
+# an empty instance.namespace counts as absent (pg-<instance>), in fleet_ns_table as in instance_ns_in
+mkdir -p "$TMP/empty-ns/clusters"
+cat > "$TMP/empty-ns/clusters/fleet.yaml" <<'YAML'
+clusters:
+  c1:
+    instances:
+      e1: {instance: {namespace: "", postgresVersion: postgres-17.6}}
+      e2: {instance: {postgresVersion: postgres-17.6}}
+      e3: {instance: {namespace: team-e, postgresVersion: postgres-17.6}}
+YAML
+out="$(bash -c "source '$ROOT/workflows/scripts/lib.sh'; fleet_ns_table '$TMP/empty-ns' c1 | cut -f1,2 | paste -sd' '; fleet_ns_members '$TMP/empty-ns' c1 pg-e1; instance_ns_in '$TMP/empty-ns' c1 e1" 2>/dev/null | paste -sd'|')"
+[[ "$out" == "e1	pg-e1 e2	pg-e2 e3	team-e|e1|pg-e1" ]] \
+  && ok "fleet_ns_table: instance.namespace \"\" is absent (pg-<instance>), the same as instance_ns_in says" || bad "empty namespace" "$out"
 
 # ---- tpg-day0 / tpg-create-instance: a non-owner syncs only when the shared Secrets exist (Round 23 review)
 cat > "$TMP/prelude-day0.sh" <<PRELUDE

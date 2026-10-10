@@ -31,6 +31,8 @@
 #   - when the entry is already gone (a re-run) the namespace is read from the audit copy
 #     clusters/deleted/<cluster>/<instance>-<yyyymmddHHMM>.yaml (exactly that name, lib.sh deleted_copy) and
 #     checked against the live Postgres (NAMESPACE_MISMATCH, NAMESPACE_AMBIGUOUS: lib.sh gone_instance_ns)
+#     The namespace resolved here is handed to every helper (lib.sh instance_ns_override: busy_operations,
+#     pg_state, backup-instance.sh), so none of them falls back to pg-<instance> for a gone entry
 # DELETE_FROM_MAP=true (tpg-delete-instance, tpg-delete-apps): finalBackup,
 # purgePvcs and purgeNamespace come from clusterMap (P_CLUSTER_MAP) when set for
 # the instance, and the clusterMap postgresVersion guard applies.
@@ -75,6 +77,9 @@ else
   gone_instance_ns "$WORK/repo" "$C" "$I" || fail "$GONE_REASON" "$GONE_DETAIL"
   NS="$GONE_NS"
 fi
+# every helper below (busy_operations, pg_state, backup-instance.sh) asks lib.sh instance_ns, which reads the
+# entry in the checkout and gives pg-<instance> for a gone one: tell it the namespace resolved here
+instance_ns_override "$C" "$I" "$NS"
 if [[ "${DELETE_FROM_MAP:-false}" == "true" ]] && ! g="$(cmap_guard "$C" "$I")"; then
   record "$key" SKIPPED_VERSION_MISMATCH "" "$g"
   exit 0

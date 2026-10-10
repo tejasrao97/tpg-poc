@@ -160,24 +160,40 @@ tk() {
       if [[ " \${S_API_ERR:-} " == *" \$ns "* ]]; then echo "Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout" >&2; return 1; fi
       echo "Error from server (NotFound): postgres.sql.tanzu.vmware.com \"\$ns\" not found" >&2
       return 1 ;;
-    *" get secret "*)
-      # -n NAMESPACE get secret NAME -o json: S_SECRETS lists "namespace/name=kind" words (Round 23 review);
-      # kind foreign (nobody manages it), vss (created by a VaultStaticSecret), tracked (Argo CD tracking
-      # annotation of a fleet Application), other-app (tracking annotation of another Argo CD Application)
-      local w k sn="\$5" sns="\$2"
+    *" get secret "*|*" get vaultstaticsecret "*)
+      # -n NAMESPACE get secret|vaultstaticsecret NAME -o jsonpath={.metadata}: the metadata object only (the precheck never reads
+      # the data). S_SECRETS lists "namespace/name=kind" words (Round 23 review) for the Secret:
+      #   foreign (nobody manages it), tracked (Argo CD tracking annotation of a fleet Application), other-app (tracking
+      #   annotation of another Argo CD Application), vss-other (owned by a VaultStaticSecret of another name), forbidden (the
+      #   API answers Forbidden), vss* (owned by the VaultStaticSecret of its name, and that VaultStaticSecret is
+      #   vss: tracked by a fleet Application, vss-untracked: applied by somebody else, vss-gone: NotFound, vss-forbidden: Forbidden)
+      local w k sn="\$5" sns="\$2" what=secret
+      [[ "\$*" != *" get vaultstaticsecret "* ]] || what=vss
       for w in \${S_SECRETS:-}; do
         [[ "\${w%%=*}" == "\$sns/\$sn" ]] || continue
         k="\${w#*=}"
+        if [[ "\$what" == vss ]]; then
+          case "\$k" in
+            vss) echo '{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"tpg-c1-app-a:secrets.hashicorp.com/VaultStaticSecret:'"\$sns"'/'"\$sn"'"}}' ;;
+            vss-untracked) echo '{"name":"'"\$sn"'"}' ;;
+            vss-forbidden) echo "Error from server (Forbidden): vaultstaticsecrets.secrets.hashicorp.com \"\$sn\" is forbidden: User cannot get resource" >&2; return 1 ;;
+            *) break ;;
+          esac
+          return 0
+        fi
         case "\$k" in
-          foreign) echo '{"metadata":{"name":"'"\$sn"'"}}' ;;
-          vss) echo '{"metadata":{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"'"\$sn"'"}]}}' ;;
-          tracked) echo '{"metadata":{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"tpg-c1-app-a:secrets.hashicorp.com/VaultStaticSecret:'"\$sns"'/'"\$sn"'"}}}' ;;
-          other-app) echo '{"metadata":{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"team-app:/Secret:'"\$sns"'/'"\$sn"'"}}}' ;;
-          vss-other) echo '{"metadata":{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"somebody-elses"}]}}' ;;
+          foreign) echo '{"name":"'"\$sn"'"}' ;;
+          vss|vss-untracked|vss-forbidden) echo '{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"'"\$sn"'"}]}' ;;
+          tracked) echo '{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"tpg-c1-app-a:secrets.hashicorp.com/VaultStaticSecret:'"\$sns"'/'"\$sn"'"}}' ;;
+          other-app) echo '{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"team-app:/Secret:'"\$sns"'/'"\$sn"'"}}' ;;
+          vss-other) echo '{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"somebody-elses"}]}' ;;
+          vss-gone) echo '{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"'"\$sn"'"}]}' ;;
+          forbidden) echo "Error from server (Forbidden): secrets \"\$sn\" is forbidden: User \"system:serviceaccount:argo:wf\" cannot get resource \"secrets\" in namespace \"\$sns\"" >&2; return 1 ;;
         esac
         return 0
       done
-      echo "Error from server (NotFound): secrets \"\$sn\" not found" >&2
+      if [[ "\$what" == vss ]]; then echo "Error from server (NotFound): vaultstaticsecrets.secrets.hashicorp.com \"\$sn\" not found" >&2
+      else echo "Error from server (NotFound): secrets \"\$sn\" not found" >&2; fi
       return 1 ;;
     *"get nodes -l tpg.fleet/pool=postgres -o json"*)
       printf '{"items":['; local z first=1
@@ -812,6 +828,21 @@ secret_check ""
 ! rec "precheck.c1|BLOCKED" | grep -q . && ok "23 review: no such Secret (a new namespace): no conflict" || bad "no secret" "$(cat "$TMP/records")"
 secret_check "other-ns/regsecret=foreign"
 ! rec "precheck.c1|BLOCKED" | grep -q . && ok "23 review: a foreign Secret in a namespace no instance of the run uses is nobody's business" || bad "other namespace" "$(cat "$TMP/records")"
+# the Secret is read by its metadata; only NotFound means "no Secret" (Round 23 re-review)
+secret_check "team-db/regsecret=forbidden"
+rec "precheck.c1|BLOCKED|CLUSTER_API_ERROR:cannot read the Secret team-db/regsecret on c1: Error from server (Forbidden)" | grep -q . && ! rec "NAMESPACE_SECRET_CONFLICT" | grep -q . \
+  && ok "23 re-review: a Forbidden answer for the Secret blocks with CLUSTER_API_ERROR (it was read as 'no such Secret' and passed)" || bad "forbidden secret" "$(cat "$TMP/records") $(cat "$TMP/out")"
+secret_check "team-db/regsecret=vss-forbidden"
+rec "precheck.c1|BLOCKED|CLUSTER_API_ERROR:cannot read the VaultStaticSecret team-db/regsecret on c1" | grep -q . \
+  && ok "23 re-review: the same for the VaultStaticSecret that owns the Secret" || bad "forbidden vss" "$(cat "$TMP/records") $(cat "$TMP/out")"
+secret_check "team-db/regsecret=vss-untracked"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT:namespace team-db already has the Secret regsecret" | grep -q . \
+  && ok "23 re-review: a Secret owned by a VaultStaticSecret that no fleet Application tracks (applied by somebody else) is foreign" || bad "foreign vss" "$(cat "$TMP/records") $(cat "$TMP/out")"
+secret_check "team-db/regsecret=vss-gone"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT" | grep -q . \
+  && ok "23 re-review: the owning VaultStaticSecret is gone (NotFound): the Secret is not kept by the fleet" || bad "gone vss" "$(cat "$TMP/records") $(cat "$TMP/out")"
+grep -q "jsonpath='{.metadata}'" "$ROOT/workflows/scripts/day0-precheck.sh" && ! grep -n "get secret.*-o json" "$ROOT/workflows/scripts/day0-precheck.sh" | grep -q . \
+  && ok "23 re-review: the pre-check reads the metadata of the Secret (jsonpath), never its data" || bad "metadata only"
 # tpg-create-instance runs the same pre-check
 : > "$TMP/records"
 rm -rf "$TMP/work"
