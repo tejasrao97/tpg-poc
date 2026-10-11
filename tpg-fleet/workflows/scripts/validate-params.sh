@@ -19,6 +19,8 @@
 #   /tmp/approval        tpg-upgrade: true when a batch approval pause is needed
 #   /tmp/hasWrite        tpg-rotate-credential: true when the run writes a value (a wrappingToken or a
 #                        caBundleFile); the template's when: reads this, never the raw inputs
+#   /tmp/pairs.json      tpg-restore: the normalized pairs of clusterMap (JSON array; fields in the header of
+#                        clustermap.py), which plan-batches.sh batches and the restore steps read
 MODE="$1"
 # shellcheck source=workflows/scripts/lib.sh
 source /scripts/lib.sh
@@ -100,10 +102,6 @@ clusters_in() {  # clusters_in NAME VALUE ALLOW_ALL -> validates and writes /tmp
     out="$(jq -c --arg c "$c" 'if index($c) then . else . + [$c] end' <<<"$out")"
   done
   printf '%s' "$out" > /tmp/clusters.json
-}
-cluster_one() {  # cluster_one NAME VALUE: one registered cluster (a single-name input, not a list; empty allowed)
-  [[ -n "$2" ]] || return 0
-  grep -Fqx -- "$2" <<<"$REGISTERED" || err "$1: cluster '${2}' is not registered. Registered clusters: ${REG_LIST:-none}"
 }
 instances_in() { # instances_in NAME VALUE [ALLOW_ALL]
   local i allow="${3:-}" v="$2"
@@ -220,7 +218,13 @@ patch_files_check() {
     [[ -z "${P_VALUES_PATCH:-}" ]] || printf 'values\t%s\tpostgresValues%sFilePath\n' "$(file_item "postgresValues${PW}FilePath" "$P_VALUES_PATCH")" "$PW"
     [[ -z "${P_OPERATOR_VALUES_PATCH:-}" ]] || printf 'operator\t%s\toperatorValues%sFilePath\n' "$(file_item "operatorValues${PW}FilePath" "$P_OPERATOR_VALUES_PATCH")" "$PW"
     [[ -z "${P_BACKUP_CA_FILE:-}" ]] || printf 'ca\t%s\tbackupCaBundleFile\n' "$(file_item backupCaBundleFile "$P_BACKUP_CA_FILE")"
-    if cmap_set && [[ -s "$WORK/cmap.json" ]]; then
+    # tpg-restore: the spec file of a new target (a Postgres manifest), one per pair at most
+    if [[ "$MODE" == restore && -s "$WORK/pairs.json" ]]; then
+      jq -r '.[] | select(.target.specFile != "")
+        | ["spec", .target.specFile, ("clusterMap[" + (.index | tostring) + "].targetClusterConfig." + .target.cluster + "." + .target.namespace + "." + .target.instance + ".targetInstanceSpecFilePath")]
+        | @tsv' "$WORK/pairs.json"
+    fi
+    if [[ "$MODE" != restore ]] && cmap_set && [[ -s "$WORK/cmap.json" ]]; then
       jq -r --arg w "$PW" 'to_entries[] | .key as $c
         | (if .value["operatorValues" + $w + "FilePath"] then ["operator", .value["operatorValues" + $w + "FilePath"], ($c + ".operatorValues" + $w + "FilePath")] else empty end),
           (if .value.backupCaBundleFile then ["ca", .value.backupCaBundleFile, ($c + ".backupCaBundleFile")] else empty end),
@@ -251,7 +255,7 @@ patch_files_check() {
         out="$(ca_check "$tmp/f$k.yaml")" || err "${where}: ${p}: ${out}"
         continue
       fi
-      if [[ "$kind" == postgres ]]; then yq ea -o=json -I=0 '[.]' "$tmp/f$k.yaml" > "$tmp/f$k.json" 2>"$tmp/err"
+      if [[ "$kind" == postgres || "$kind" == spec ]]; then yq ea -o=json -I=0 '[.]' "$tmp/f$k.yaml" > "$tmp/f$k.json" 2>"$tmp/err"
       else yq -o=json -I=0 '.' "$tmp/f$k.yaml" > "$tmp/f$k.json" 2>"$tmp/err"; fi \
         || { err "${p}: not valid YAML: $(head -n 2 "$tmp/err" | tr '\n' ' ')"; bad=1; continue; }
       jf+=("$tmp/f$k.json"); nm+=(--name "${where}: ${p}")
@@ -487,6 +491,24 @@ map_validate() {   # map_validate WORKFLOW FLAGS_JSON: clustermap.py validate; w
   fi
   jq -c 'keys' "$WORK/cmap.json" > /tmp/clusters.json
 }
+restore_map_validate() {   # clustermap.py restore on the pairs of clusterMap; writes /tmp/pairs.json and /tmp/clusters.json
+  local out opt=()
+  if ! cmap_to_json "$P_CLUSTER_MAP" > "$WORK/cmap.raw.json" 2> "$WORK/cmap.err"; then
+    err "clusterMap is not valid YAML or JSON: $(tr '\n' ' ' < "$WORK/cmap.err" | cut -c1-300)"
+    return
+  fi
+  yq -o=json -I=0 '.' "$(cmap_keys_file)" > "$WORK/cmap-keys.json"
+  printf '%s\n' "$REGISTERED" > "$WORK/registered"
+  # a real restore (dryRun=false) needs the confirmation of an in-place pair; the plan (dryRun=true) does not
+  [[ "${P_DRY_RUN:-true}" != "false" ]] || opt=(--confirm-required)
+  if ! out="$(python3 "$TPG_LIB_DIR/clustermap.py" restore --map "$WORK/cmap.raw.json" --keys "$WORK/cmap-keys.json" \
+      --registered "$WORK/registered" --out "$WORK/pairs.json" ${opt[@]+"${opt[@]}"})"; then
+    while IFS= read -r line; do [[ -z "$line" ]] || err "$line"; done <<<"$out"
+    return
+  fi
+  cp "$WORK/pairs.json" /tmp/pairs.json
+  jq -c '[.[] | .source.cluster, .target.cluster] | unique' "$WORK/pairs.json" > /tmp/clusters.json
+}
 map_each_instance() {  # map_each_instance JQ_FILTER MESSAGE: an error for every instance entry where FILTER is false
   # FILTER sees {cluster, instance, v: <instance keys>}
   local bad
@@ -502,6 +524,7 @@ flags_json() {  # flags_json NAME=VALUE... -> JSON object for clustermap.py --fl
 }
 
 echo '[]' > /tmp/clusters.json
+echo '[]' > /tmp/pairs.json
 : > /tmp/selection
 echo false > /tmp/approval
 echo false > /tmp/hasWrite
@@ -759,49 +782,21 @@ case "$MODE" in
     bool scheduledOnly "${P_SCHEDULED_ONLY:-false}"
     ;;
   restore)
-    need sourceCluster "${P_SOURCE_CLUSTER:-}" "one registered cluster. Registered clusters: ${REG_LIST:-none}"
-    cluster_one sourceCluster "${P_SOURCE_CLUSTER:-}"
-    need instance "${P_INSTANCE:-}" "the Postgres instance to restore from"; [[ -z "${P_INSTANCE:-}" ]] || dnsname instance "$P_INSTANCE"
-    need mode "${P_MODE:-}" "time, latest, backup, lsn or xid"
-    [[ -z "${P_MODE:-}" ]] || oneof mode "$P_MODE" time latest backup lsn xid
-    case "${P_MODE:-}" in
-      time)
-        need targetTime "${P_TARGET_TIME:-}" "UTC timestamp such as 2026-09-01T10:30:00Z"
-        [[ -z "${P_TARGET_TIME:-}" || "$P_TARGET_TIME" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
-          || err "targetTime must look like 2026-09-01T10:30:00Z" ;;
-      backup) need backupName "${P_BACKUP_NAME:-}" "a PostgresBackup name in the source namespace" ;;
-      lsn) need lsn "${P_LSN:-}" "a log sequence number" ;;
-      xid) need xid "${P_XID:-}" "a transaction ID"; [[ -z "${P_XID:-}" ]] || nonneg xid "$P_XID" ;;
-    esac
-    # Exactly one recovery point for the chosen mode
-    given=""
-    [[ -z "${P_TARGET_TIME:-}" ]] || given="${given}targetTime "
-    [[ -z "${P_BACKUP_NAME:-}" ]] || given="${given}backupName "
-    [[ -z "${P_LSN:-}" ]] || given="${given}lsn "
-    [[ -z "${P_XID:-}" ]] || given="${given}xid "
-    case "$(printf '%s' "$given" | wc -w)" in
-      0|1) ;;  # 0 is already reported by the per-mode need above (mode=latest takes none)
-      *) err "set only the recovery point of the chosen mode (given: ${given})" ;;
-    esac
-    [[ "${P_MODE:-}" != "latest" || -z "$given" ]] || err "mode=latest takes no recovery point (given: ${given})"
-    if [[ -n "${P_TARGET_CLUSTER:-}" ]]; then
-      cluster_one targetCluster "$P_TARGET_CLUSTER"
-      [[ "${P_MODE:-}" != "backup" || "$P_TARGET_CLUSTER" == "${P_SOURCE_CLUSTER:-}" ]] \
-        || err "mode=backup restores only inside the source namespace; use time, latest, lsn or xid for another cluster"
+    # tpg-restore (Round 23, locked decision 7): clusterMap is a list of pairs {sourceClusterConfig,
+    # targetClusterConfig}, the only target input; the flat inputs (sourceCluster, instance, mode,
+    # targetTime, backupName, lsn, xid, targetCluster, targetInstance, confirm, bestEffort) are gone.
+    # clustermap.py restore checks the pairs; what needs the clusters is checked by the restore steps.
+    if ! cmap_set; then
+      err "clusterMap is mandatory: tpg-restore takes a list of pairs, - {sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {sourceBackupName: orders-db-full-20260914000000}}}}, targetClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {pitrEnabled: false, confirm: orders-db}}}}}"
+    else
+      restore_map_validate
     fi
-    [[ -z "${P_TARGET_INSTANCE:-}" ]] || dnsname targetInstance "$P_TARGET_INSTANCE"
-    if [[ "${P_MODE:-}" == "backup" && -z "${P_TARGET_INSTANCE:-}" && -n "${P_INSTANCE:-}" ]]; then
-      err "mode=backup restores only inside the source namespace, and the default target is a new instance in its own namespace: set targetInstance=${P_INSTANCE} and confirm=${P_INSTANCE} (in place), or use time, latest, lsn or xid"
-    fi
-    if [[ -n "${P_TARGET_INSTANCE:-}" && "${P_TARGET_INSTANCE}" != "${P_INSTANCE:-}" && "${P_MODE:-}" == "backup" ]]; then
-      err "mode=backup restores only inside the source namespace (a new target is created in its own namespace, pg-${P_TARGET_INSTANCE}); use time, latest, lsn or xid"
-    fi
-    if [[ "${P_TARGET_INSTANCE:-}" == "${P_INSTANCE:-}" && -n "${P_INSTANCE:-}" ]]; then
-      [[ "${P_CONFIRM:-}" == "${P_INSTANCE}" ]] || err "an in-place restore overwrites ${P_INSTANCE}: set confirm=${P_INSTANCE}"
-    fi
+    oneof rolloutMode "${P_ROLLOUT_MODE:-all}" canary batches all
+    posint maxParallel "${P_MAX_PARALLEL:-2}"
     oneof pushMode "${P_PUSH_MODE:-direct}" direct pr
-    bool bestEffort "${P_BEST_EFFORT:-false}"
+    bool dryRun "${P_DRY_RUN:-true}"; bool keepSourceLocation "${P_KEEP_SOURCE_LOCATION:-true}"
     posint restoreTimeoutSeconds "${P_TIMEOUT:-7200}"; posint prTimeoutSeconds "${P_PR_TIMEOUT:-3600}"
+    [[ "${#ERRORS[@]}" -gt 0 ]] || patch_files_check
     ;;
   delete-instance)
     oneof finalBackup "${P_FINAL_BACKUP:-true}" true false required
@@ -979,7 +974,7 @@ if [[ "${#ERRORS[@]}" -gt 0 ]]; then
   printf '  - %s\n' "${ERRORS[@]}" >&2
   exit 1
 fi
-[[ "$(jq 'length' /tmp/clusters.json)" -gt 0 || "$MODE" == "restore" ]] \
+[[ "$(jq 'length' /tmp/clusters.json)" -gt 0 ]] \
   || { echo "no registered clusters selected (registered: ${REG_LIST:-none})" >&2; exit 1; }
 # The selection the discover step reads: "all" keeps its meaning there (every
 # registered cluster with an entry in clusters/fleet.yaml)

@@ -146,7 +146,7 @@ keys = yaml.safe_load(open(os.path.join(ROOT, "workflows/params/cluster-map-keys
 tmpl = {"scale": "tpg-scale-instance"}
 known_types = {"string", "name", "namespace", "azureName", "boolean", "integer", "posint", "quantity", "enum", "operatorVersion",
                "postgresVersion", "patchFile", "patchFileList", "kindList", "caFile", "nameList", "cidrList", "fqdnList", "stringMap",
-               "cron", "k8sName", "k8sNameList"}
+               "cron", "k8sName", "k8sNameList", "timestamp", "lsn", "stanzaName", "backupLabel"}
 # tpg-upgrade takes the default of operatorVersion and postgresVersion from
 # targetVersion (validate-params.sh upgrade), not from inputs of those names
 # maxReadReplicas: the input of that name exists on tpg-scale-instance only;
@@ -172,6 +172,16 @@ for level in ("cluster", "instance"):
             if flag and (t, k) not in flag_exceptions and flag not in templates.get(t, {}) \
                     and spec["workflows"][w] != "guard":
                 problems.append(f"cluster-map-keys.yaml {level}.{k}: default input {flag} is not an input of {t}")
+
+# 3b the restore section (tpg-restore pairs, Round 23): known types, a doc for every key, and a template with clusterMap
+for side in ("source", "target"):
+    for k, spec in keys["restore"][side].items():
+        if spec["type"] not in known_types:
+            problems.append(f"cluster-map-keys.yaml restore.{side}.{k}: unknown type {spec['type']}")
+        if not spec.get("doc"):
+            problems.append(f"cluster-map-keys.yaml restore.{side}.{k}: no doc")
+if "clusterMap" not in templates.get("tpg-restore", {}):
+    problems.append("cluster-map-keys.yaml: tpg-restore has no clusterMap input")
 
 # 4 input tables: a table whose header starts with "| Input | Type |", inside the
 # section "## N. tpg-<name>" of that WorkflowTemplate
@@ -315,6 +325,140 @@ for w in keys["workflows"]:
     for what, m in good.items():
         for e in v.iter_errors(m):
             problems.append(f"clustermap-{w}.schema.json refuses {what}: {e.message}")
+
+# 5b the clusterMap of tpg-restore: a list of pairs. The example passes the validator and the schema and shows
+# every key of the section restore; the rules the schema can say agree with the validator on a table of maps
+rsch = json.load(open(os.path.join(sdir, "clustermap-restore.schema.json")))
+rex = yaml.safe_load(open(os.path.join(sdir, "clustermap-restore.example.yaml")))
+rkeys = keys["restore"]
+rregistered = {c for p_ in rex for side_ in p_.values() for c in side_}
+
+
+def restore_validate(m):
+    """The errors of clustermap.py restore for a map (a list of pairs), registered clusters c1, c2 and the example's."""
+    return cmod.process_restore(json.loads(json.dumps(m)), keys_json, rregistered | {"c1", "c2"})[1]
+
+
+errs = restore_validate(rex)
+if errs:
+    problems.append("clustermap-restore.example.yaml is refused by clustermap.py restore: " + "; ".join(errs))
+shown = set()
+
+
+def walk_paths(node, prefix=""):
+    for k, v in node.items():
+        if isinstance(v, dict) and any(x.startswith(prefix + k + ".") for x in list(rkeys["source"]) + list(rkeys["target"])):
+            yield from walk_paths(v, prefix + k + ".")
+        else:
+            yield prefix + k
+
+
+for p_ in rex:
+    for side_ in p_.values():
+        for ns_ in side_.values():
+            for inst_ in ns_.values():
+                for ns2 in inst_.values():
+                    shown.update(walk_paths(ns2))
+for side_ in ("source", "target"):
+    for k in rkeys[side_]:
+        if k not in shown:
+            problems.append(f"clustermap-restore.example.yaml does not show the key {k}")
+if jsonschema is not None:
+    rv = jsonschema.Draft202012Validator(rsch)
+    for e in rv.iter_errors(rex):
+        problems.append(f"clustermap-restore.example.yaml does not match its schema: {e.message}")
+
+    def rp(src_keys=None, tgt_keys=None, src=("c1", "pg-a", "a"), tgt=("c2", "pg-b", "b")):
+        return {"sourceClusterConfig": {src[0]: {src[1]: {src[2]: src_keys or {}}}},
+                "targetClusterConfig": {tgt[0]: {tgt[1]: {tgt[2]: tgt_keys or {}}}}}
+
+    LATEST = {"pitrEnabled": True, "pitrConfig": {"type": "latest"}}
+    TIME = {"pitrEnabled": True, "bestEffort": True, "pitrConfig": {"type": "time", "timestamp": "2026-09-15T08:30:00Z"}}
+    LSN = {"pitrEnabled": True, "bestEffort": False, "pitrConfig": {"type": "lsn", "target": "0/3000060"}}
+    XID = {"pitrEnabled": True, "bestEffort": True, "pitrConfig": {"type": "transaction", "target": "987654"}}
+
+    def with_(base, **kw):
+        out = json.loads(json.dumps(base))
+        for k, v in kw.items():
+            out[k] = v
+        return out
+
+    def with_cfg(base, **kw):
+        out = json.loads(json.dumps(base))
+        out["pitrConfig"].update(kw)
+        return out
+
+    good = {
+        "latest": [rp(None, LATEST)], "time": [rp(None, TIME)], "lsn": [rp(None, LSN)], "transaction": [rp(None, XID)],
+        "a named backup in the same namespace": [rp({"sourceBackupName": "b-full"}, {"pitrEnabled": False}, tgt=("c1", "pg-a", "b"), src=("c1", "pg-a", "a"))],
+        "in place": [rp(None, with_(LATEST, confirm="a"), src=("c1", "pg-a", "a"), tgt=("c1", "pg-a", "a"))],
+        "a spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.yaml"]))],
+        "a repo spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:clusters/a.yaml"]))],
+        "a label, location and stanza": [rp(None, with_cfg(TIME, sourceBackupConfig={"srcBackupLabel": "20260915-020000F_20260916-010000I",
+                                                                                  "srcBackupLocationName": "loc", "srcStanzaName": "pg-a-a-0000"}))],
+        "flags as strings": [rp(None, with_(LATEST, skipMinorVersionCheck="true", postRestoreBackup=False))],
+        "an integer transaction target": [rp(None, with_cfg(XID, target=987654))],
+        "two pairs": [rp(None, LATEST), rp(None, LATEST, tgt=("c2", "pg-b", "b2"))],
+    }
+    bad = {
+        "a mapping instead of a list": rp(None, LATEST),
+        "an empty list": [],
+        "a pair without a target": [{"sourceClusterConfig": rp()["sourceClusterConfig"]}],
+        "a misspelled pair key": [{**rp(None, LATEST), "targetClusterConf": {}}],
+        "two source clusters": [{"sourceClusterConfig": {"c1": {"pg-a": {"a": {}}}, "c2": {"pg-a": {"a": {}}}}, "targetClusterConfig": rp(None, LATEST)["targetClusterConfig"]}],
+        "two target namespaces": [{"sourceClusterConfig": rp()["sourceClusterConfig"], "targetClusterConfig": {"c2": {"pg-b": {"b": LATEST}, "pg-c": {"b": LATEST}}}}],
+        "two target instances": [{"sourceClusterConfig": rp()["sourceClusterConfig"], "targetClusterConfig": {"c2": {"pg-b": {"b": LATEST, "c": LATEST}}}}],
+        "no target cluster": [{"sourceClusterConfig": rp()["sourceClusterConfig"], "targetClusterConfig": {}}],
+        "an unknown source key": [rp({"sourceBackup": "x"}, LATEST)],
+        "an unknown target key": [rp(None, with_(LATEST, pitrEnable=True))],
+        "an unknown pitrConfig key": [rp(None, with_cfg(LATEST, taget="x"))],
+        "no pitrEnabled": [rp(None, {"pitrConfig": {"type": "latest"}})],
+        "pitrEnabled not a boolean": [rp(None, with_(LATEST, pitrEnabled="maybe"))],
+        "pitrEnabled false with pitrConfig": [rp(None, {"pitrEnabled": False, "pitrConfig": {"type": "latest"}})],
+        "pitrEnabled false with bestEffort": [rp(None, {"pitrEnabled": False, "bestEffort": True})],
+        "pitrEnabled true without pitrConfig": [rp(None, {"pitrEnabled": True})],
+        "pitrEnabled true without a type": [rp(None, {"pitrEnabled": True, "pitrConfig": {}})],
+        "an unknown type": [rp(None, with_cfg(LATEST, type="lates"))],
+        "latest with bestEffort": [rp(None, with_(LATEST, bestEffort=True))],
+        "latest with a timestamp": [rp(None, with_cfg(LATEST, timestamp="2026-09-15T08:30:00Z"))],
+        "latest with a target": [rp(None, with_cfg(LATEST, target="0/3000060"))],
+        "latest with a backup label": [rp(None, with_cfg(LATEST, sourceBackupConfig={"srcBackupLabel": "20260915-020000F"}))],
+        "time without a timestamp": [rp(None, {"pitrEnabled": True, "bestEffort": True, "pitrConfig": {"type": "time"}})],
+        "time without bestEffort": [rp(None, {"pitrEnabled": True, "pitrConfig": TIME["pitrConfig"]})],
+        "time with a target": [rp(None, with_cfg(TIME, target="0/3000060"))],
+        "a timestamp without the time of day": [rp(None, with_cfg(TIME, timestamp="2026-09-15"))],
+        "a timestamp with an offset": [rp(None, with_cfg(TIME, timestamp="2026-09-15T08:30:00+02:00"))],
+        "lsn without a target": [rp(None, {"pitrEnabled": True, "bestEffort": False, "pitrConfig": {"type": "lsn"}})],
+        "an lsn without a slash": [rp(None, with_cfg(LSN, target="3000060"))],
+        "lsn with a timestamp": [rp(None, with_cfg(LSN, timestamp="2026-09-15T08:30:00Z"))],
+        "lsn without bestEffort": [rp(None, {"pitrEnabled": True, "pitrConfig": LSN["pitrConfig"]})],
+        "a transaction target that is not a number": [rp(None, with_cfg(XID, target="0/3"))],
+        "transaction without a target": [rp(None, {"pitrEnabled": True, "bestEffort": True, "pitrConfig": {"type": "transaction"}})],
+        "a bad backup label": [rp(None, with_cfg(TIME, sourceBackupConfig={"srcBackupLabel": "yesterday"}))],
+        "a bad stanza": [rp(None, with_cfg(TIME, sourceBackupConfig={"srcStanzaName": "bad stanza"}))],
+        "a spec file that is a string": [rp(None, with_(LATEST, targetInstanceSpecFilePath="./a.yaml"))],
+        "two spec files": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.yaml", "./b.yaml"]))],
+        "a spec file that is not yaml": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.txt"]))],
+        "a spec file entry YAML reads as a mapping ([repo: x.yaml])": [rp(None, with_(LATEST, targetInstanceSpecFilePath=[{"repo": "a.yaml"}]))],
+        "a confirm that is not a name": [rp(None, with_(LATEST, confirm="Bad_Name"))],
+        "postRestoreBackup not a boolean": [rp(None, with_(LATEST, postRestoreBackup="yes please"))],
+        "a cluster name in capitals": [rp(None, LATEST, tgt=("C2", "pg-b", "b"))],
+        "an instance name with _": [rp(None, LATEST, tgt=("c2", "pg-b", "b_1"))],
+        "a target namespace that is not a DNS label": [rp(None, LATEST, tgt=("c2", "PG_b", "b"))],
+    }
+    for ns_ in list(keys["instance"]["namespace"]["reserved"]) + ["kube-other"]:
+        bad[f"the reserved target namespace {ns_}"] = [rp(None, LATEST, tgt=("c2", ns_, "b"))]
+    for what, m in good.items():
+        for e in rv.iter_errors(m):
+            problems.append(f"clustermap-restore.schema.json refuses {what}: {e.message}")
+        ve = restore_validate(m)
+        if ve:
+            problems.append(f"clustermap.py restore refuses {what}: {'; '.join(ve)}")
+    for what, m in bad.items():
+        if rv.is_valid(m):
+            problems.append(f"clustermap-restore.schema.json accepts {what}")
+        if not restore_validate(m):
+            problems.append(f"clustermap.py restore accepts {what}")
 
 # 6 the writer step: a fixed image, the only template that runs as the writer
 for f in sorted(glob.glob(os.path.join(ROOT, "workflows", "templates", "*.yaml"))):

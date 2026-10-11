@@ -392,7 +392,7 @@ vvalid "restore: an environment variable of a removed flat input is not read"
 # the local spec file: its contents travel in patchFiles (pack-patch-files.sh), checked as a Postgres document
 SPEC_MAP="$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [./orders-dr.yaml]')"
 vp P_CLUSTER_MAP="$SPEC_MAP"
-vinvalid "restore: a local spec file that is not in patchFiles is refused" "orders-dr.targetInstanceSpecFilePath: ./orders-dr.yaml: its contents are not in patchFiles"
+vinvalid "restore: a local spec file that is not in patchFiles is refused" "orders-db-dr.targetInstanceSpecFilePath: orders-dr.yaml: its contents are not in patchFiles"
 PF_OK="$(jq -cn --arg c $'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  highAvailability:\n    enabled: false\n' '{"orders-dr.yaml": ($c | @base64)}')"
 vp P_CLUSTER_MAP="$SPEC_MAP" P_PATCH_FILES="$PF_OK"
 vvalid "restore: a local spec file with one Postgres document in patchFiles is accepted"
@@ -406,6 +406,87 @@ vp P_CLUSTER_MAP="$MAP" P_PATCH_FILES="$PF_OK"
 vinvalid "restore: patchFiles that no spec file key names are refused" "patchFiles carries orders-dr.yaml, which no path input or clusterMap key names"
 vp P_CLUSTER_MAP="$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:clusters/restore/orders-dr.yaml]')"
 vvalid "restore: a repo: spec file needs nothing in patchFiles (the plan step reads the repository)"
+
+# ---- part 3: pack-patch-files.sh packs the spec file of a pair
+echo "== 3. pack-patch-files.sh"
+mkdir -p "$TMP/pack"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n' > "$TMP/pack/orders-dr.yaml"
+{ printf 'dryRun: "false"\nclusterMap: |\n'; X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [./orders-dr.yaml]' | sed 's/^/  /'; } > "$TMP/pack/params.yaml"
+RC=0; OUT="$(cd "$TMP/pack" && TPG_FLEET_DIR="$ROOT" bash "$ROOT/scripts/submit/pack-patch-files.sh" -o params.yaml 2>&1)" || RC=$?
+if [[ "$RC" -eq 0 ]] && yq -r '.patchFiles' "$TMP/pack/params.yaml" | jq -e 'keys == ["./orders-dr.yaml"] or keys == ["orders-dr.yaml"]' >/dev/null; then
+  ok "pack: the spec file named by a pair of the clusterMap is packed into patchFiles"
+else bad "pack: spec file" "$OUT"; fi
+{ printf 'clusterMap: |\n'; X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo: clusters/restore/orders-dr.yaml]' | sed 's/^/  /'; } > "$TMP/pack/ws.yaml"
+RC=0; OUT="$(cd "$TMP/pack" && TPG_FLEET_DIR="$ROOT" bash "$ROOT/scripts/submit/pack-patch-files.sh" -o ws.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -qF 'targetInstanceSpecFilePath: repo:<file path> "check for white spaces in between"' <<<"$OUT" \
+  && ok "pack: [repo: x.yaml] in a pair gets the whitespace message" || bad "pack: whitespace" "$OUT"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: PostgresBackupLocation\nspec:\n  retentionPolicy:\n    fullRetention:\n      number: 4\n' > "$TMP/pack/orders-dr.yaml"
+RC=0; OUT="$(cd "$TMP/pack" && TPG_FLEET_DIR="$ROOT" bash "$ROOT/scripts/submit/pack-patch-files.sh" -o params.yaml 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -qF "exactly one kind: Postgres document" <<<"$OUT" \
+  && ok "pack: a spec file of another kind is refused before the run" || bad "pack: other kind" "$OUT"
+
+# ---- part 4: the WorkflowTemplate, the gate and the stub entry point
+echo "== 4. template, gate, restore-pair.sh"
+TPL="$ROOT/workflows/templates/tpg-restore.yaml"
+inputs="$(yq -r '.spec.arguments.parameters[].name' "$TPL" | sort | paste -sd' ')"
+[[ "$inputs" == "clusterMap dryRun keepSourceLocation maxParallel patchFiles prTimeoutSeconds pushMode restoreTimeoutSeconds rolloutMode toolsImage" ]] \
+  && ok "the template's inputs: clusterMap, rolloutMode, pushMode, dryRun, maxParallel, restoreTimeoutSeconds, prTimeoutSeconds, patchFiles, keepSourceLocation, toolsImage" || bad "template inputs" "$inputs"
+d="$(yq -r '.spec.arguments.parameters[] | select(.name == "dryRun" or .name == "rolloutMode" or .name == "keepSourceLocation") | .name + "=" + .value' "$TPL" | sort | paste -sd' ')"
+[[ "$d" == "dryRun=true keepSourceLocation=true rolloutMode=all" ]] && ok "defaults: dryRun true, rolloutMode all, keepSourceLocation true" || bad "template defaults" "$d"
+flat='(P_|workflow\.parameters\.)(sourceCluster|SOURCE_CLUSTER|instance|INSTANCE|mode|MODE|targetTime|TARGET_TIME|backupName|BACKUP_NAME|lsn|LSN|xid|XID|targetCluster|TARGET_CLUSTER|targetInstance|TARGET_INSTANCE|confirm|CONFIRM|bestEffort|BEST_EFFORT)\b'
+if grep -nE "$flat" "$TPL" "$ROOT/workflows/scripts/restore-pair.sh" | grep -v '^[^:]*:[0-9]*:\s*#'; then
+  bad "a removed flat input is still referenced (above)"
+else ok "no removed flat input is an input or environment variable of the template or the entry point"; fi
+sed -n '/^  restore)/,/^  delete-instance)/p' "$ROOT/workflows/scripts/validate-params.sh" | grep -nE 'P_(SOURCE_CLUSTER|INSTANCE|MODE|TARGET_TIME|BACKUP_NAME|LSN|XID|TARGET_CLUSTER|TARGET_INSTANCE|CONFIRM|BEST_EFFORT)\b' \
+  && bad "the restore branch of validate-params.sh reads a removed flat input (above)" || ok "the restore branch of validate-params.sh reads no removed flat input"
+! grep -q 'cluster_one' "$ROOT/workflows/scripts/validate-params.sh" && ok "the cluster_one helper of Phase 2 is gone" || bad "cluster_one is still defined"
+yq -o=json -I=0 '.spec.templates[] | select(.name == "main") | .steps | flatten | map(.name)' "$TPL" | jq -e '. == ["validate","init","batches","split","canary","first","rest","gate"]' >/dev/null \
+  && ok "steps: validate, init, batches, split, canary or first batch, the rest, gate" || bad "template steps" "$(yq -o=json -I=0 '.spec.templates[0].steps | flatten | map(.name)' "$TPL")"
+yq -e '(.spec.templates[] | select(.name == "main") | .steps[][] | select(.name == "canary") | .when) == "'"'"'{{workflow.parameters.rolloutMode}}'"'"' == '"'"'canary'"'"'"' "$TPL" >/dev/null \
+  && yq -e '(.spec.templates[] | select(.name == "main") | .steps[][] | select(.name == "canary") | has("continueOn")) == false' "$TPL" >/dev/null \
+  && yq -e '(.spec.templates[] | select(.name == "main") | .steps[][] | select(.name == "first") | .continueOn.failed) == true' "$TPL" >/dev/null \
+  && yq -e '(.spec.templates[] | select(.name == "run-batches") | .steps[][] | select(.name == "restore") | .continueOn.failed) == true' "$TPL" >/dev/null \
+  && ok "a failed canary fails its step (the run stops); a failed pair of any other batch does not stop the rest" || bad "canary and continueOn"
+yq -e '(.spec.templates[] | select(.name == "restore-pair") | .container.command[1]) == "/scripts/restore-pair.sh"' "$TPL" >/dev/null \
+  && grep -q 'scripts/restore-pair.sh' "$ROOT/workflows/kustomization.yaml" && grep -q 'params/types.yaml' "$ROOT/workflows/kustomization.yaml" \
+  && ok "one restore-pair step per pair runs restore-pair.sh, which the tpg-scripts ConfigMap ships" || bad "restore-pair step"
+yq -o=json -I=0 '.spec.templates[] | select(.name == "gate") | .container.args' "$TPL" | jq -e '. == ["{{workflow.name}}", "failed"]' >/dev/null \
+  && ok "the run ends with the gate that also fails the run for a FAILED or TIMEOUT pair" || bad "gate step"
+yq -e '(.spec.templates[] | select(.name == "validate") | .outputs.parameters[0].valueFrom.path) == "/tmp/pairs.json"' "$TPL" >/dev/null \
+  && ok "the validate step outputs the normalized pairs" || bad "validate output"
+
+mkdir -p "$TMP/gate"
+cat > "$TMP/gate/lib.sh" <<'LIB'
+log() { printf '%s\n' "$*" >&2; }
+run_records() { printf '%s' "$RECORDS"; }
+LIB
+sed "s#source /scripts/lib.sh#source $TMP/gate/lib.sh#" "$ROOT/workflows/scripts/blocked-gate.sh" > "$TMP/gate/gate.sh"
+rec() { jq -cn --arg k "$1" --arg s "$2" --arg r "$3" '{($k): ({status: $s, reason: $r} | tojson)}'; }
+gate() { RC=0; OUT="$(RECORDS="$1" bash "$TMP/gate/gate.sh" wf ${2:+"$2"} 2>&1)" || RC=$?; }
+gate "$(jq -cn --argjson a "$(rec result.c2.b SUCCEEDED '')" --argjson b "$(rec result.c2.c SKIPPED PENDING_6B)" '$a + $b')" failed
+[[ "$RC" -eq 0 ]] && ok "gate failed: SUCCEEDED and SKIPPED pairs pass" || bad "gate pass" "$OUT"
+gate "$(jq -cn --argjson a "$(rec result.c2.b FAILED RESTORE_FAILED)" --argjson b "$(rec result.c2.c SUCCEEDED '')" '$a + $b')" failed
+[[ "$RC" -ne 0 ]] && grep -q "c2.b FAILED RESTORE_FAILED" <<<"$OUT" && ok "gate failed: a FAILED pair fails the run and is named" || bad "gate FAILED" "$OUT"
+gate "$(rec result.c2.b TIMEOUT '')" failed
+[[ "$RC" -ne 0 ]] && ok "gate failed: a TIMEOUT pair fails the run" || bad "gate TIMEOUT" "$OUT"
+gate "$(rec result.c2.b BLOCKED RESTORE_FLAVOUR_UNSUPPORTED)" failed
+[[ "$RC" -ne 0 ]] && ok "gate failed: a BLOCKED pair fails the run" || bad "gate BLOCKED" "$OUT"
+gate "$(rec result.c2.b FAILED X)"
+[[ "$RC" -eq 0 ]] && ok "the gate without the argument still looks at BLOCKED only (the other workflows)" || bad "gate default" "$OUT"
+
+mkdir -p "$TMP/stub"
+cat > "$TMP/stub/lib.sh" <<'LIB'
+log() { printf '%s\n' "$*" >&2; }
+record() { printf 'RECORD %s|%s|%s|%s\n' "$1" "$2" "${3:-}" "${4:-}"; }
+result_guard() { :; }
+LIB
+sed "s#source /scripts/lib.sh#source $TMP/stub/lib.sh#" "$ROOT/workflows/scripts/restore-pair.sh" > "$TMP/stub/pair.sh"
+rm_run "$(X '' "$LATEST")"
+RC=0; OUT="$(P_PAIR="$(jq -c '.[0]' "$TMP/out.json")" bash "$TMP/stub/pair.sh" wf 2>&1)" || RC=$?
+[[ "$RC" -eq 0 ]] && grep -q "^RECORD result.aks-tpg-poc-02.orders-db-dr|SKIPPED|PENDING_6B|" <<<"$OUT" \
+  && ok "restore-pair.sh (6a stub) records the planned pair as SKIPPED PENDING_6B under result.<target cluster>.<target instance>" || bad "stub" "$OUT"
+RC=0; OUT="$(P_PAIR='not json' bash "$TMP/stub/pair.sh" wf 2>&1)" || RC=$?
+[[ "$RC" -ne 0 ]] && grep -q "INVALID_PAIR" <<<"$OUT" && ok "restore-pair.sh refuses an input that is not a normalized pair" || bad "stub invalid" "$OUT"
 
 echo
 echo "restore-map: ${PASS} passed, ${FAIL} failed"

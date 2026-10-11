@@ -14,7 +14,8 @@
 #       postgresValuesOverlayFilePath, operatorValuesOverlayFilePath (tpg-day0,
 #       tpg-create-instance; Round 22), backupCaBundleFile and caBundleFile
 #       (tpg-rotate-credential), and the clusterMap keys of the same names at
-#       cluster and instance level - checks each file, and
+#       cluster and instance level, and targetInstanceSpecFilePath in the pairs of the
+#       clusterMap of tpg-restore (Round 23) - checks each file, and
 #       writes (or replaces) the line patchFiles: '...' in the parameter file:
 #         pack-patch-files.sh -o patch-map.yaml
 #         argo submit -n argo --from workflowtemplate/tpg-patch --parameter-file patch-map.yaml --watch
@@ -64,7 +65,7 @@ local_file() {  # local_file PATH -> the file on this machine (~/ expanded)
   case "$1" in "~/"*) printf '%s/%s' "$HOME" "${1#\~/}" ;; *) printf '%s' "$1" ;; esac
 }
 
-# KIND<TAB>PATH<TAB>WHERE rows: postgres | values | operator | ca
+# KIND<TAB>PATH<TAB>WHERE rows: postgres | values | operator | ca | spec (tpg-restore targetInstanceSpecFilePath)
 rows=""
 if [[ $# -eq 0 ]]; then
   [[ -f "$out_file" ]] || { echo "${out_file}: no such parameter file" >&2; exit 1; }
@@ -114,11 +115,18 @@ if [[ $# -eq 0 ]]; then
                    elif type == "string" then [$p[1], ., $where] else ["bad", tostring, $where] end
           else ["bad", ($v | tostring), $where] end
         | @tsv;
+      if type == "array" then
+        # tpg-restore (Round 23): a list of pairs; the spec file of each target instance
+        to_entries[] | .key as $n | (.value | objects | .targetClusterConfig | objects | to_entries[]) | .key as $c
+        | (.value | objects | to_entries[]) | .key as $ns | (.value | objects | to_entries[]) | .key as $i | .value as $iv
+        | rows($iv; [["targetInstanceSpecFilePath","spec"]]; "clusterMap[" + ($n | tostring) + "].targetClusterConfig." + $c + "." + $ns + "." + $i)
+      else
       to_entries[] | .key as $c | .value as $cv
       | rows($cv; [["operatorValuesPatchFilePath","operator"], ["operatorValuesOverlayFilePath","operator"], ["backupCaBundleFile","ca"]]; $c),
         (($cv.instances // {}) | to_entries[] | .key as $i | .value as $iv
          | rows($iv; [["postgresPatchFilePath","postgres"], ["postgresOverlayFilePath","postgres"], ["postgresValuesPatchFilePath","values"],
-                      ["postgresValuesOverlayFilePath","values"], ["backupCaBundleFile","ca"]]; $c + ".instances." + $i))' 2>&1)"; then
+                      ["postgresValuesOverlayFilePath","values"], ["backupCaBundleFile","ca"]]; $c + ".instances." + $i))
+      end' 2>&1)"; then
       echo "${out_file}: clusterMap is not valid YAML or JSON: ${crows}" >&2; exit 1
     fi
     rows="${rows}"$'\n'"${crows}"
@@ -154,7 +162,7 @@ while IFS=$'\t' read -r kind p where; do
     *)
       case "$p" in *.yaml|*.yml) ;; *) echo "${where}: ${p}: a patch or overlay file ends in .yaml or .yml" >&2; errors=1; continue ;; esac
       if [[ "$kind" != "-" && -n "$FLEET" ]] && command -v yq >/dev/null && command -v python3 >/dev/null; then
-        if [[ "$kind" == postgres ]]; then yq ea -o=json -I=0 '[.]' "$f" > "$tmp/c.json" 2>"$tmp/e"; else yq -o=json -I=0 '.' "$f" > "$tmp/c.json" 2>"$tmp/e"; fi \
+        if [[ "$kind" == postgres || "$kind" == spec ]]; then yq ea -o=json -I=0 '[.]' "$f" > "$tmp/c.json" 2>"$tmp/e"; else yq -o=json -I=0 '.' "$f" > "$tmp/c.json" 2>"$tmp/e"; fi \
           || { echo "${where}: ${p}: not valid YAML: $(head -n 2 "$tmp/e" | tr '\n' ' ')" >&2; errors=1; continue; }
         word=Patch; [[ "$where" == *Overlay* ]] && word=Overlay   # the input names in the messages (Round 22)
         python3 "$FLEET/workflows/scripts/patchcheck.py" "$kind" "$tmp/c.json" --schemas "$FLEET/workflows/params/patch-schemas.json" \

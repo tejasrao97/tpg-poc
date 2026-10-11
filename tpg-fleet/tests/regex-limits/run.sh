@@ -57,6 +57,7 @@ cases = {
   "components": (["auto", "[vso]", "[cert-manager, vso, monitoring]"], ["vso", "cert-manager,vso", "[]", "[auto]", "[a]", "[vso, , vso]"]),
   "cidrList": (["[10.20.0.0/16]", "[10.20.0.0/16, 10.30.0.0/24]", "[fd00::/8]"], ["10.20.0.0/16", "10.20.0.0/16,10.30.0.0/24", "[]", "[10.20.0.0]"]),
   "fqdnList": (["[db.example.com]", "[db.example.com, *.example.org]"], ["db.example.com", "db.example.com,*.example.org", "[]", "[http://x]"]),
+  "pairList": (["[{sourceClusterConfig: {}}]", "- sourceClusterConfig:\n    c: {}", "  [ ]", '[{"a": 1}]'], ["aks-tpg-poc-01: {}", "{a: b}", "-sourceClusterConfig", "just text"]),
   "patchFileList": (["[./a.yaml]", "[a.yaml, repo:helm_artifacts/x.yaml]", "[~/a.yml, /abs/b.yaml, ../c.yaml]"],
                     ["a.yaml", "a.yaml,b.yaml", "[]", "[repo: x.yaml]", "[a.txt]", "[a.yaml, , b.yaml]"]),
   "patchFile": (["[./a.yaml]", "[repo:helm_artifacts/x.yaml]", '["a.yaml"]'], ["a.yaml", "[a.yaml, b.yaml]", "[]", "[repo: x.yaml]", "[a.txt]"]),

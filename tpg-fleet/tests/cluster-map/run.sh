@@ -283,10 +283,14 @@ vp delete-instance P_CLUSTERS='[aks-tpg-poc-01, aks-tpg-poc-02]' P_INSTANCES='[o
 valid "delete-instance: confirm repeats the instances (any order)"
 vp delete-instance P_CLUSTERS='[aks-tpg-poc-01]' P_INSTANCES='[orders-db]' P_CONFIRM='[orders]'
 invalid "delete-instance: a confirm that differs is refused" "confirm must repeat the instances value"
-vp restore P_SOURCE_CLUSTER=aks-tpg-poc-01 P_INSTANCE=orders-db P_MODE=backup P_BACKUP_NAME=orders-db-full-1
-invalid "restore: mode=backup without targetInstance is refused before the run" "mode=backup restores only inside the source namespace" "targetInstance=orders-db"
-vp restore P_SOURCE_CLUSTER=aks-tpg-poc-01 P_INSTANCE=orders-db P_MODE=backup P_BACKUP_NAME=orders-db-full-1 P_TARGET_INSTANCE=orders-db P_CONFIRM=orders-db
-valid "restore: mode=backup in place with confirm is valid"
+# tpg-restore takes a list of pairs (Round 23); the rules of its keys are tested in tests/restore-map
+RESTORE_BACKUP_MAP='- sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {sourceBackupName: orders-db-full-1}}}}
+  targetClusterConfig: {aks-tpg-poc-02: {pg-orders: {orders-db-dr: {pitrEnabled: false}}}}'
+vp restore P_CLUSTER_MAP="$RESTORE_BACKUP_MAP"
+invalid "restore: a named backup into another cluster is refused before the run" "pitrEnabled: false restores inside the source namespace only"
+vp restore P_CLUSTER_MAP='- sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {sourceBackupName: orders-db-full-1}}}}
+  targetClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {pitrEnabled: false, confirm: orders-db}}}}' P_DRY_RUN=false
+valid "restore: a named backup in place with confirm is valid"
 vp delete-apps P_CLUSTERS='[aks-tpg-poc-01, aks-tpg-poc-02]' P_APPS='{"aks-tpg-poc-01":["tpg-operator"],"aks-tpg-poc-02":["tpg-operator"]}' P_CONFIRM='[aks-tpg-poc-02, aks-tpg-poc-01]' P_DRY_RUN=true P_PURGE_PVCS=false P_PURGE_NS=false P_PUSH_MODE=direct
 valid "delete-apps: confirm repeats the clusters in any order"
 vp delete-instance P_CLUSTER_MAP='aks-tpg-poc-01: {instances: {orders-db: {purgeNamespace: true}}}' P_CONFIRM='[aks-tpg-poc-01]'

@@ -1758,6 +1758,7 @@
     "scheduled": "scalar"
    },
    "cluster": {
+    "allowInPlaceRestore": "scalar",
     "maxReadReplicas": "scalar",
     "name": "scalar"
    },

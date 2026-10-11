@@ -6,7 +6,7 @@ ARG="${1:-}"
 
 echo "=== tests/cli-flags"
 bash "${HERE}/cli-flags/run.sh" ${ARG:+"$ARG"}
-for suite in regex-limits waits git-merge stuck-app helm4 shared-lib sync-engine rollout params cluster-map scale patch chart crd-reference day0-plan network-policy delete backup-expire submit rotate pgdata admission monitoring unused-keys; do
+for suite in regex-limits waits git-merge stuck-app helm4 shared-lib sync-engine rollout params cluster-map restore-map scale patch chart crd-reference day0-plan network-policy delete backup-expire submit rotate pgdata admission monitoring unused-keys; do
   echo
   echo "=== tests/${suite}"
   bash "${HERE}/${suite}/run.sh"

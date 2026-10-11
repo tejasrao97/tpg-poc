@@ -176,6 +176,7 @@ sl_example() {  # sl_example NAME -> an example value
     clusterMap)
       case "$WF_TEMPLATE" in
         tpg-scale-instance) echo "{aks-tpg-poc-01: {maxReadReplicas: 4, instances: {orders-db: {replicas: 3}, billing-db: {replicas: 0}}}, aks-tpg-poc-02: {maxReadReplicas: 2}}" ;;
+        tpg-restore) echo "[{sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {sourceBackupName: orders-db-full-20260914000000}}}}, targetClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {pitrEnabled: false, confirm: orders-db}}}}}]" ;;
         tpg-backup-expire) echo "{aks-tpg-poc-01: {instances: {orders-db: {backups: [orders-db-full-202609010100], includeDependents: true}, billing-db: {purgeBackups: true}}}}" ;;
         *) echo "{aks-tpg-poc-01: {instances: {orders-db: {postgresVersion: postgres-17.6, highAvailability: true}}}}" ;;
       esac ;;
@@ -223,12 +224,6 @@ sl_example() {  # sl_example NAME -> an example value
     backupFullRetention) echo "4 (count) or 30 (days with backupFullRetentionType=time)" ;;
     apps) echo '{"aks-tpg-poc-01": ["tpg-instances:orders-db", "tpg-instances:billing-db", "tpg-operator"]}' ;;
     confirm) echo "[aks-tpg-poc-01] (the same names as the targets)" ;;
-    targetTime) echo "2026-09-15T08:30:00Z" ;;
-    lsn) echo "0/3000060" ;;
-    xid) echo "12345" ;;
-    backupName) echo "orders-db-full-20260915" ;;
-    sourceCluster|targetCluster) echo "aks-tpg-poc-01" ;;
-    instance|targetInstance) echo "orders-db" ;;
     maxParallel) echo "2" ;;
     *Seconds) echo "1800" ;;
     components) echo "[cert-manager, vso] (or auto)" ;;
@@ -388,6 +383,14 @@ sl_map_validate() {  # sl_map_validate JSON -> 0 when clustermap.py accepts it f
   sl_registered > "$SL_TMP/registered"
   sl_flags_json > "$SL_TMP/flags.json"
   local reg=(); [[ -s "$SL_TMP/registered" ]] && reg=(--registered "$SL_TMP/registered")
+  if [[ "$WF_TEMPLATE" == tpg-restore ]]; then   # a list of pairs (Round 23): clustermap.py restore
+    if out="$(python3 "${SL_ROOT}/workflows/scripts/clustermap.py" restore --map "$SL_TMP/map.json" --keys "$SL_TMP/keys.json" ${reg[@]+"${reg[@]}"})"; then
+      return 0
+    fi
+    sl_err "clusterMap is not valid for ${WF_TEMPLATE}:"
+    printf '%s\n' "$out" | sed 's/^/  - /' >&2
+    return 1
+  fi
   if out="$(python3 "${SL_ROOT}/workflows/scripts/clustermap.py" validate --workflow "$(sl_wf_id "$WF_TEMPLATE")" \
       --map "$SL_TMP/map.json" --keys "$SL_TMP/keys.json" ${reg[@]+"${reg[@]}"} --flags "$SL_TMP/flags.json")"; then
     return 0

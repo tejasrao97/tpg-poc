@@ -61,6 +61,10 @@ types:
   lsn: {display: String (LSN), pattern: '^[0-9A-Fa-f]+/[0-9A-Fa-f]+$', describe: "a log sequence number such as 0/3000060"}
   map: {display: Map, pattern: '^\s*(\{|[^\s:#][^:]*:)', describe: "a Map (YAML or JSON)"}
   jsonMap: {display: Map (JSON), pattern: '^\s*\{', describe: "a JSON object"}
+  pairList: {display: List (pairs), pattern: '^\s*(\[|-\s)', describe: "a List of restore pairs (YAML or JSON), [{sourceClusterConfig: {..}, targetClusterConfig: {..}}] or - sourceClusterConfig: ..."}
+  # not an input type: the PostgresVersion names of the lite flavour, read by the restore matrix (a standard
+  # version cannot be restored into a lite one: RESTORE_FLAVOUR_UNSUPPORTED). One pattern, here.
+  liteVersion: {display: String (version), pattern: '-lite$', describe: "a PostgresVersion name that ends in -lite"}
   cidrList: {display: List (CIDRs), pattern: '^\s*\[\s*["\x27]?[0-9A-Fa-f:.]+/[0-9]{1,3}["\x27]?(\s*,\s*["\x27]?[0-9A-Fa-f:.]+/[0-9]{1,3}["\x27]?)*\s*\]\s*$', describe: "a List of CIDRs in brackets, for example [10.20.0.0/16] or [10.20.0.0/16, 10.30.0.0/24]"}
   fqdnList: {display: List (host names), pattern: '^\s*\[\s*["\x27]?(\*\.)?[a-z0-9.-]+\.[a-z]{2,}["\x27]?(\s*,\s*["\x27]?(\*\.)?[a-z0-9.-]+\.[a-z]{2,}["\x27]?)*\s*\]\s*$', describe: "a List of host names in brackets, for example [db.example.com, *.example.com]"}
   cron: {display: String (cron), pattern: '^\s*[0-9*/,A-Za-z-]+(\s+[0-9*/,A-Za-z-]+){4}\s*$', describe: "a cron schedule of 5 fields such as 0 0 * * 0"}
@@ -283,20 +287,15 @@ templates:
     toolsImage: {type: string}
 
   tpg-restore:
-    sourceCluster: {type: name, allowEmpty: true}
-    instance: {type: name, allowEmpty: true}
-    mode: {type: enum, values: [time, latest, backup, lsn, xid], allowEmpty: true}
-    targetTime: {type: timestamp, allowEmpty: true}
-    backupName: {type: k8sName, allowEmpty: true}
-    lsn: {type: lsn, allowEmpty: true}
-    xid: {type: integer, allowEmpty: true}
-    targetCluster: {type: name, allowEmpty: true}
-    targetInstance: {type: name, allowEmpty: true}
-    confirm: {type: name, allowEmpty: true}
+    clusterMap: {type: pairList, allowEmpty: true}
+    rolloutMode: {type: enum, values: [canary, batches, all]}
     pushMode: {type: enum, values: [direct, pr]}
-    bestEffort: {type: boolean}
+    dryRun: {type: boolean}
+    maxParallel: {type: posint}
     restoreTimeoutSeconds: {type: posint}
     prTimeoutSeconds: {type: posint}
+    patchFiles: {type: jsonMap, allowEmpty: true}
+    keepSourceLocation: {type: boolean}
     toolsImage: {type: string}
 
   tpg-rotate-credential:

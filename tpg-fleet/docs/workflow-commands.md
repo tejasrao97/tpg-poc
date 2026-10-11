@@ -74,6 +74,7 @@ tpg-scale-instance: cluster is not an input of tpg-scale-instance. See docs/work
 | `String (Vault token)` | A Vault wrapping token, as `tpg-aks-infra/scripts/vault-secret.sh wrap` prints it | `hvs.CAESIJ...` |
 | `List (CIDRs)` | A list of IPv4 or IPv6 networks with the host bits zero | `[10.20.0.0/16, 192.168.10.0/24]` |
 | `List (host names)` | A list of DNS names; `*.` in front matches every subdomain | `[api.example.com, *.example.org]` |
+| `List (pairs)` | tpg-restore `clusterMap` (section 15): a list of pairs, one restore each, `{sourceClusterConfig, targetClusterConfig}`, as a YAML block list or a JSON array. A map of clusters (the `clusterMap` of the other workflows) is refused | `- sourceClusterConfig: ...` |
 | `String` | Any text | `alpine/k8s:1.35.8` |
 | `String (name)` | One lowercase DNS label (a Kubernetes object name for `backupName`, `ferretSecretName` and `ferretReadOnlySecretName`) | `orders-db` |
 | `String (cron)` | A cron schedule of 5 fields: minute, hour, day of month, month, day of week (UTC) | `0 0 * * 0` |
@@ -94,10 +95,10 @@ Inputs used by several workflows:
 |---|---|---|---|
 | `clusters` | `List` | Registered clusters, or `all` where accepted | every workflow except restore |
 | `instances` | `List` | Declared instances, or `all` where accepted (new instances for create-instance) | day0, create-instance, upgrade, patch, scale, network-policy, backup, delete-instance |
-| `clusterMap` | `Map` | Targets with per-cluster and per-instance values (section 3); replaces `clusters` and `instances` | day0, create-instance, upgrade, patch, scale, network-policy, backup, delete-instance, delete-apps |
+| `clusterMap` | `Map` | Targets with per-cluster and per-instance values (section 3); replaces `clusters` and `instances`. tpg-restore takes a list of pairs instead (`List (pairs)`, section 15) | day0, create-instance, upgrade, patch, scale, network-policy, backup, delete-instance, delete-apps, restore |
 | `pushMode` | `Enum` | `direct`: push the `clusters/fleet.yaml` change to the fleet branch. `pr`: push a branch, open a GitHub pull request and continue once it is merged (`prTimeoutSeconds`, default 3600). tpg-patch syncs the pull request branch before the merge (section 7) | day0, create-instance, upgrade, patch, scale, network-policy, delete-apps, delete-instance, restore |
-| `dryRun` | `Boolean` | `true`: validate and record the plan; change nothing | day0, create-instance, upgrade, patch, scale, network-policy, delete-apps, helm-addons |
-| `rolloutMode` | `Enum` | `canary` (default): the wave-0 cluster alone, then the other waves in batches of `maxParallel`. `batches`: no canary, batches of `maxParallel` in wave order. `all`: every selected cluster in one batch | day0, create-instance, upgrade, patch, network-policy |
+| `dryRun` | `Boolean` | `true`: validate and record the plan; change nothing (tpg-restore and tpg-backup-expire: `true` is the default) | day0, create-instance, upgrade, patch, scale, network-policy, delete-apps, helm-addons, backup-expire, restore |
+| `rolloutMode` | `Enum` | `canary` (default): the wave-0 cluster alone, then the other waves in batches of `maxParallel`. `batches`: no canary, batches of `maxParallel` in wave order. `all`: every selected cluster in one batch. tpg-restore: the unit is a pair of `clusterMap` and the default is `all` (section 15) | day0, create-instance, upgrade, patch, network-policy, restore |
 
 - Put values that contain brackets (every list: `-p 'clusters=[aks-tpg-poc-01]'`; the shell reads `[...]` as a file pattern), spaces or JSON in single quotes.
 - `-p name=value` sets one input. `--parameter-file inputs.yaml` reads several from a file (examples in each section, for one cluster and for several with `clusterMap`). In a parameter file, quote `true`, `false` and numbers, write a list input either as a quoted string (`clusters: '[aks-tpg-poc-01, aks-tpg-poc-02]'`) or as a YAML sequence (`clusters: [aks-tpg-poc-01, aks-tpg-poc-02]`; the argo CLI sends it as the JSON text `["aks-tpg-poc-01","aks-tpg-poc-02"]`, which the workflow reads as the same list; `all` stays a plain word, `clusters: all`), and write `clusterMap` as a block (`clusterMap: |`). A `-p` after `--parameter-file` overrides the file (for example `-p dryRun=true`). Files of your machine that the parameter file names are packed into it with `scripts/submit/pack-patch-files.sh -o <parameter file>` (section 7).
@@ -1639,71 +1640,57 @@ The workflow unwraps the token once. Whoever unwraps it first gets the value, an
 
 ## 15. tpg-restore
 
-Restores one instance to a chosen recovery point. Four things are chosen independently: the source instance, the recovery point (`mode`), where it is restored to, and whether that target already exists.
+Restores Postgres instances from a list of pairs. Each pair is one restore: `sourceClusterConfig` names the instance to restore from and `targetClusterConfig` the instance to restore into, each as `<cluster>: <namespace>: <instance>: {keys}` with exactly one cluster, one namespace and one instance (namespaces are mandatory). The target is the source instance itself (in place), a new instance in another namespace of the cluster, or a new instance on another cluster (added to `clusters/fleet.yaml` and adopted by Argo CD). The recovery point is a named backup (`pitrEnabled: false`) or point-in-time recovery (`pitrEnabled: true`, `pitrConfig.type` `latest`, `time`, `lsn` or `transaction`). The flat inputs of earlier versions (`sourceCluster`, `instance`, `mode`, `targetTime`, `backupName`, `lsn`, `xid`, `targetCluster`, `targetInstance`, `confirm`, `bestEffort`) are gone; the admission policy refuses them as unknown inputs.
 
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
-| `sourceCluster` | `String (name)` | yes | | Registered cluster that runs the instance to restore from |
-| `instance` | `String (name)` | yes | | Source instance (its namespace from `clusters/fleet.yaml`, default `pg-<instance>`) |
-| `mode` | `Enum` | yes | | `time`, `latest`, `backup`, `lsn` or `xid` |
-| `targetTime` | `String (UTC time)` | with `mode=time` | | UTC timestamp, for example `2026-09-15T08:30:00Z` |
-| `backupName` | `String (name)` | with `mode=backup` | | A `PostgresBackup` name in the source namespace |
-| `lsn` | `String (LSN)` | with `mode=lsn` | | Log sequence number |
-| `xid` | `Integer` | with `mode=xid` | | Transaction ID |
-| `targetCluster` | `String (name)` | no | `sourceCluster` | Registered cluster to restore into |
-| `targetInstance` | `String (name)` | no | `<instance>-restore-<yyyymmddhhmm>` | Instance to restore into; the source instance name means in place |
-| `confirm` | `String (name)` | when the target instance exists | | Repeat the target instance name: the restore overwrites its data |
-| `pushMode` | `Enum` | no | `direct` | Cross-cluster restore to a new instance: how the `clusters/fleet.yaml` entry is published |
-| `bestEffort` | `Boolean` | no | `false` | Recover as far as the WAL allows instead of failing |
+| `clusterMap` | `List (pairs)` | yes | | The pairs (below). A map of clusters is refused |
+| `dryRun` | `Boolean` | no | `true` | `true`: each pair records its plan (source resolution, matrix, the PostgresRestore that would be created, preparation of the target) and nothing changes; `false`: restore |
+| `rolloutMode` | `Enum` | no | `all` | `all`: every pair at once; `batches`: `maxParallel` pairs at a time, in list order; `canary`: the first pair alone, a failed canary stops the run, then batches. The pairs are independent: a failed pair does not stop the others, and the run ends Failed when any pair failed |
+| `maxParallel` | `Integer` | no | `2` | Pairs per batch for `canary` and `batches` |
+| `pushMode` | `Enum` | no | `direct` | A new instance is added to `clusters/fleet.yaml`: `direct` pushes, `pr` opens a pull request |
+| `keepSourceLocation` | `Boolean` | no | `true` | Keep the copy of the source backup location that a restore into another namespace or cluster needs; `false` removes it after a successful restore |
+| `patchFiles` | `Map (JSON)` | with a local `targetInstanceSpecFilePath` | | The contents of the local spec files; `scripts/submit/pack-patch-files.sh -o <parameter file>` writes it |
 | `restoreTimeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `7200`, `3600` | Timeouts |
 
-| Target | What the workflow does |
-|---|---|
-| New instance, same cluster | A one-off clone in its own namespace, not managed by Argo CD. Delete it when the validation is done, or add it to `clusters/fleet.yaml` |
-| New instance, another cluster | The instance is added to `clusters/fleet.yaml` with the source settings (its backup scheduler included, `backupSchedule=operator` too; FerretDB is not copied: the `ferret` block is left out, and when a copied values patch turns FerretDB on, the entry gets `valuesOverride: {ferret: {enabled: false}}`, which wins over patch files; `ferret=true` on tpg-day0 or a tpg-patch values file that sets `ferret.enabled: true` lifts it), its Secrets (from Vault) and its own backup location are rendered from the chart, and the Argo CD Application adopts it after the restore (the operator backup schedules come with that sync) |
-| The same instance (in place) | Destructive; needs `confirm=<instance>` |
-| Another existing instance | Destructive; needs `confirm=<instance>` |
+Keys of a pair (`workflows/params/cluster-map-keys.yaml`, section `restore`; schema `workflows/params/schemas/clustermap-restore.schema.json`, example `clustermap-restore.example.yaml`):
 
-Before it starts, the workflow reads the source instance's backup location, stanza and Postgres version, and refuses a `targetTime` that is in the future or older than the oldest full backup (`OUTSIDE_RECOVERY_WINDOW`). For a restore into another namespace or cluster it creates a read-only copy of the source backup location there, so `backupSync` lists the source backups for the restore; `mode=backup` restores only inside the source namespace, because a `PostgresBackup` name is namespaced: it needs `targetInstance=<instance>` and `confirm=<instance>` (in place), and the validate step refuses it without them.
+| Side | Key | Meaning |
+|---|---|---|
+| source | `sourceBackupName` | The PostgresBackup to restore; mandatory with `pitrEnabled: false` (inside the source namespace only), optional with PITR (it only gives the backup location and stanza when the source instance is gone) |
+| target | `pitrEnabled` | Mandatory. `true`: point-in-time recovery; `false`: restore `sourceBackupName` |
+| target | `pitrConfig.type` | `latest`, `time`, `lsn` or `transaction` |
+| target | `pitrConfig.timestamp`, `pitrConfig.target` | `time`: a UTC time; `lsn`: a log sequence number; `transaction`: a transaction ID (mandatory for those types, refused for the others) |
+| target | `pitrConfig.sourceBackupConfig.srcBackupLocationName`, `srcStanzaName`, `srcBackupLabel` | The backup repository to recover from; location and stanza are optional where they can be derived; `srcBackupLabel` (a pgBackRest label) is refused with `latest` |
+| target | `bestEffort` | Mandatory for `time`, `lsn` and `transaction`, refused with `latest` and with `pitrEnabled: false` |
+| target | `targetInstanceSpecFilePath` | A new target only: one file with one `kind: Postgres` document, `[./orders-dr.yaml]` or `[repo:<path>]`; without it a new target copies the source's `clusters/fleet.yaml` entry |
+| target | `confirm` | The target instance name; mandatory for a real restore into an existing instance (in place or another one) |
+| target | `skipMinorVersionCheck`, `postRestoreBackup` | Flags, default `false`: the annotation `sql.tanzu.vmware.com/skip-minor-version-check: "true"` on the PostgresRestore; a full backup after the restore |
 
-```bash
-# 1. Point in time into a new instance on the same cluster
-argo submit --from workflowtemplate/tpg-restore \
-  -p sourceCluster=aks-tpg-poc-01 -p instance=orders-db \
-  -p mode=time -p targetTime=2026-09-15T08:30:00Z --watch
+The validate step checks everything that needs no cluster, and names the pair and the key path of each error, for example `clusterMap[1].targetClusterConfig.aks-tpg-poc-02.pg-orders-dr.orders-db-dr.bestEffort is required with pitrConfig.type: time`: the list shape, one cluster, namespace and instance per side, registered clusters, namespaces (a DNS label; the reserved namespaces of tpg-day0 are refused for a target), the key rules above, `[repo: x.yaml]` with a space (`repo:<file path> "check for white spaces in between"`), a target that is restored twice or is the source of another pair, and a restore of a named backup into another namespace or cluster (a `PostgresBackup` name is namespaced; use PITR for that). An in-place pair (same cluster, namespace and instance) needs `confirm` when `dryRun` is `false`; in place also needs `clusters.<cluster>.cluster.allowInPlaceRestore: true` in `clusters/fleet.yaml` (default `false`, `clusters/_template/cluster.yaml`).
 
-# 2. Latest recoverable point, in place (destructive)
-argo submit --from workflowtemplate/tpg-restore \
-  -p sourceCluster=aks-tpg-poc-01 -p instance=orders-db -p mode=latest \
-  -p targetInstance=orders-db -p confirm=orders-db --watch
-
-# 3. From one named backup, in place (mode=backup restores only inside the source
-#    namespace, so the target is the source instance; destructive)
-argo submit --from workflowtemplate/tpg-restore \
-  -p sourceCluster=aks-tpg-poc-01 -p instance=orders-db \
-  -p mode=backup -p backupName=orders-db-full-20260914000000 \
-  -p targetInstance=orders-db -p confirm=orders-db --watch
-
-# 4. Clone to another cluster, managed by Argo CD afterwards
-argo submit --from workflowtemplate/tpg-restore \
-  -p sourceCluster=aks-tpg-poc-01 -p instance=orders-db -p mode=latest \
-  -p targetCluster=aks-tpg-poc-02 -p targetInstance=orders-db-dr -p pushMode=direct --watch
-
-# 5. Up to a transaction ID, best effort
-argo submit --from workflowtemplate/tpg-restore \
-  -p sourceCluster=aks-tpg-poc-01 -p instance=orders-db \
-  -p mode=xid -p xid=987654 -p bestEffort=true --watch
-```
-
-Afterwards:
+Status of this section: phase 6a of Round 23 delivers the pairs, their validation, the batching and the template; the restore step itself (`restore-pair.sh`) records each planned pair as `SKIPPED` with the reason `PENDING_6B` until phase 6b replaces it, and phase 7 rewrites this section around the three methods and the matrix.
 
 ```bash
-kubectl --context aks-tpg-poc-01 -n pg-orders-db-restore-202609151030 get postgres,postgresrestore
-# The copy of the source backup location is kept on purpose. Delete it only when the
-# restore is validated: deleting it also removes the PostgresBackup objects that were
-# synced from the source repository into that namespace.
-kubectl --context aks-tpg-poc-01 -n pg-orders-db-restore-202609151030 \
-  get postgresbackuplocation -l tpg.fleet/restore-source
+# 1. Plan an in-place restore of a named backup (dryRun is true by default: nothing changes)
+cat > restore.yaml <<'EOF'
+clusterMap: |
+  - sourceClusterConfig:
+      aks-tpg-poc-01:
+        pg-orders:
+          orders-db:
+            sourceBackupName: orders-db-full-20260914000000
+    targetClusterConfig:
+      aks-tpg-poc-01:
+        pg-orders:
+          orders-db:
+            pitrEnabled: false
+            confirm: orders-db
+EOF
+argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file restore.yaml --watch
+
+# 2. The same pair for real
+argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file restore.yaml -p dryRun=false --watch
 ```
 
 ---

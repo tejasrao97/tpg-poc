@@ -1,0 +1,86 @@
+# clusterMap of tpg-restore: a list of pairs, one restore each (generated; see
+# workflows/params/schemas/clustermap-restore.schema.json). Each side is
+# <cluster>: <namespace>: <instance>: {keys}, exactly one of each. Local spec files are packed
+# into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
+# yaml-language-server: $schema=clustermap-restore.schema.json
+
+# 1. In place, from a named backup (no point-in-time recovery): the source and the target are the same
+#    instance; confirm repeats its name (needed when dryRun is false)
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        orders-db:
+          sourceBackupName: orders-db-full-20260914000000
+  targetClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        orders-db:
+          pitrEnabled: false
+          confirm: orders-db
+
+# 2. A copy in another namespace of the same cluster, up to the newest WAL (type latest takes no
+#    timestamp, target, bestEffort or srcBackupLabel); the source instance gives location and stanza
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-billing:
+        billing-db: {}
+  targetClusterConfig:
+    aks-tpg-poc-01:
+      pg-billing-copy:
+        billing-db-copy:
+          pitrEnabled: true
+          pitrConfig:
+            type: latest
+
+# 3. A new instance on another cluster at a point in time, from one chosen backup of the repository,
+#    with its own spec file (a local file of the submitting machine, or [repo:<path>])
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-reports:
+        reports-db:
+          sourceBackupName: reports-db-full-20260914000000
+  targetClusterConfig:
+    aks-tpg-poc-02:
+      pg-reports:
+        reports-db-dr:
+          pitrEnabled: true
+          bestEffort: true
+          pitrConfig:
+            type: time
+            timestamp: "2026-09-15T08:30:00Z"
+            sourceBackupConfig:
+              srcBackupLocationName: reports-db-backup-location
+              srcStanzaName: pg-reports-reports-db-0000
+              srcBackupLabel: 20260914-000000F
+          targetInstanceSpecFilePath: [./reports-db-dr.yaml]
+          skipMinorVersionCheck: true
+          postRestoreBackup: true
+
+# 4. In place, point-in-time recovery to a log sequence number (type lsn, or transaction with a
+#    transaction ID in target)
+- sourceClusterConfig:
+    aks-tpg-poc-02:
+      pg-shop:
+        shop-db: {}
+  targetClusterConfig:
+    aks-tpg-poc-02:
+      pg-shop:
+        shop-db:
+          pitrEnabled: true
+          bestEffort: false
+          pitrConfig:
+            type: lsn
+            target: 0/3000060
+          confirm: shop-db
+
+# 5. A named backup into a new instance of the same namespace
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        archive-db:
+          sourceBackupName: archive-db-full-20260914000000
+  targetClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        archive-db-restored:
+          pitrEnabled: false

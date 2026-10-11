@@ -1,0 +1,487 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/<org>/tpg-fleet/workflows/params/schemas/clustermap-restore.schema.json",
+  "title": "clusterMap of tpg-restore",
+  "description": "The clusterMap input of the WorkflowTemplate tpg-restore: a list of pairs, one restore each. Generated from the section restore of workflows/params/cluster-map-keys.yaml by workflows/params/clustermap_schema.py; the validate step of the workflow (workflows/scripts/clustermap.py restore) is the authority: registered clusters, the rules between the pairs (a target once, not the source of another pair), the source keys that depend on pitrEnabled of the target, and the rules that need the clusters.",
+  "type": "array",
+  "minItems": 1,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "sourceClusterConfig",
+      "targetClusterConfig"
+    ],
+    "properties": {
+      "sourceClusterConfig": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "propertyNames": {
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "propertyNames": {
+            "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 1,
+            "propertyNames": {
+              "pattern": "^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "sourceBackupName": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$",
+                  "description": "The PostgresBackup to restore, in the namespace of the source instance. Mandatory with pitrEnabled false (the restore uses that backup: PostgresRestore spec.sourceBackup.name, inside the source namespace only); with pitrEnabled true it only names the backup that gives the backup location and the stanza when the source instance no longer exists [String (name)]"
+                }
+              }
+            }
+          }
+        },
+        "description": "The instance to restore from: <cluster>: <namespace>: <instance>: {sourceBackupName}, exactly one of each"
+      },
+      "targetClusterConfig": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "propertyNames": {
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "additionalProperties": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+            "not": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "kube-system",
+                    "kube-public",
+                    "kube-node-lease",
+                    "default",
+                    "argocd",
+                    "argo",
+                    "vault",
+                    "vault-secrets-operator-system",
+                    "tpg-vault",
+                    "cert-manager",
+                    "monitoring",
+                    "tanzu-postgres-operator"
+                  ]
+                },
+                {
+                  "pattern": "^(kube-)"
+                }
+              ]
+            }
+          },
+          "additionalProperties": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 1,
+            "propertyNames": {
+              "pattern": "^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "pitrEnabled": {
+                  "enum": [
+                    true,
+                    false,
+                    "true",
+                    "false"
+                  ],
+                  "description": "Mandatory. true: point-in-time recovery from the backup repository (PostgresRestore spec.pitr; pitrConfig.type says to where); false: restore the backup named by sourceBackupName of the source (spec.sourceBackup) [Boolean]"
+                },
+                "pitrConfig": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "enum": [
+                        "latest",
+                        "time",
+                        "lsn",
+                        "transaction"
+                      ],
+                      "description": "pitrEnabled true, mandatory: latest (newest WAL), time (pitrConfig.timestamp), lsn or transaction (pitrConfig.target) [Enum]"
+                    },
+                    "target": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9]+$"
+                        },
+                        {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      ],
+                      "description": "type lsn: a log sequence number such as 0/3000060; type transaction: a transaction ID (a number); mandatory for those two types, refused for the others (spec.pitr.target) [String]"
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+                      "description": "type time, mandatory: a UTC time such as 2026-09-15T08:30:00Z (spec.pitr.timestamp); refused for the other types [String (UTC time)]"
+                    },
+                    "sourceBackupConfig": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "srcBackupLocationName": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$",
+                          "description": "The PostgresBackupLocation that holds the backups (spec.pitr.sourceBackupLocation.name). Optional: derived from the source instance, or from the backup sourceBackupName names; a difference from what the source reports is a warning. Mandatory when there is neither a live source instance nor a sourceBackupName [String (name)]"
+                        },
+                        "srcStanzaName": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][-A-Za-z0-9_.]{0,127}$",
+                          "description": "The pgBackRest stanza (spec.pitr.sourceBackupLocation.stanzaName). Optional and derived as srcBackupLocationName; mandatory under the same condition [String (stanza)]"
+                        },
+                        "srcBackupLabel": {
+                          "type": "string",
+                          "pattern": "^[0-9]{8}-[0-9]{6}F(_[0-9]{8}-[0-9]{6}[DI])?$",
+                          "description": "The pgBackRest backup to start the recovery from, such as 20260915-020000F or 20260916-010000I as in pgBackRest info (spec.pitr.sourceBackupLocation.set). Refused with type latest; empty: the newest backup before the recovery point [String (backup label)]"
+                        }
+                      },
+                      "description": "The backup repository to recover from; every key is optional where it can be derived"
+                    }
+                  },
+                  "description": "Point-in-time recovery: the type and what it needs (pitrEnabled true)"
+                },
+                "bestEffort": {
+                  "enum": [
+                    true,
+                    false,
+                    "true",
+                    "false"
+                  ],
+                  "description": "pitrEnabled true: mandatory for time, lsn and transaction (true: recover as far as the WAL allows when the target is invalid or not reached; false: fail instead), refused for latest and with pitrEnabled false (spec.pitr.bestEffort) [Boolean]"
+                },
+                "targetInstanceSpecFilePath": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^((/|~/)?((\\.\\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml|repo:([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\\.ya?ml)$",
+                    "not": {
+                      "pattern": "^repo:helm_artifacts/operator/(patches|overlays)/clusters/"
+                    }
+                  },
+                  "description": "A new target only: one file with exactly one kind: Postgres document, in brackets, [./orders-dr.yaml] (a file of the submitting machine, its contents in patchFiles) or [repo:<path>] in the fleet repository. It becomes the instance spec of the new target (spec.targetInstance.spec). Without it a new target copies the source instance's entry of clusters/fleet.yaml, and it is mandatory when the source is not in fleet.yaml. Refused for an existing target [List (one file path)]"
+                },
+                "confirm": {
+                  "type": "string",
+                  "pattern": "^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$",
+                  "description": "The target instance name, repeated. Mandatory for a real restore (dryRun false) into an existing instance, in place or another one: the restore overwrites its data. A name that is not the target instance is always refused [String (name)]"
+                },
+                "skipMinorVersionCheck": {
+                  "enum": [
+                    true,
+                    false,
+                    "true",
+                    "false"
+                  ],
+                  "description": "true writes the annotation sql.tanzu.vmware.com/skip-minor-version-check: \"true\" on the PostgresRestore (default false) [Boolean]"
+                },
+                "postRestoreBackup": {
+                  "enum": [
+                    true,
+                    false,
+                    "true",
+                    "false"
+                  ],
+                  "description": "true takes a full backup of the target once the restored instance runs (default false) [Boolean]"
+                }
+              },
+              "required": [
+                "pitrEnabled"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "required": [
+                      "pitrEnabled"
+                    ],
+                    "properties": {
+                      "pitrEnabled": {
+                        "enum": [
+                          false,
+                          "false"
+                        ]
+                      }
+                    }
+                  },
+                  "then": {
+                    "not": {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "pitrConfig"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "bestEffort"
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "pitrEnabled"
+                    ],
+                    "properties": {
+                      "pitrEnabled": {
+                        "enum": [
+                          true,
+                          "true"
+                        ]
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "pitrConfig"
+                    ],
+                    "properties": {
+                      "pitrConfig": {
+                        "required": [
+                          "type"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "pitrConfig"
+                    ],
+                    "properties": {
+                      "pitrConfig": {
+                        "required": [
+                          "type"
+                        ],
+                        "properties": {
+                          "type": {
+                            "const": "latest"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "then": {
+                    "not": {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "bestEffort"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "pitrConfig"
+                          ],
+                          "properties": {
+                            "pitrConfig": {
+                              "required": [
+                                "target"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "required": [
+                            "pitrConfig"
+                          ],
+                          "properties": {
+                            "pitrConfig": {
+                              "required": [
+                                "timestamp"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "required": [
+                            "pitrConfig"
+                          ],
+                          "properties": {
+                            "pitrConfig": {
+                              "required": [
+                                "sourceBackupConfig"
+                              ],
+                              "properties": {
+                                "sourceBackupConfig": {
+                                  "required": [
+                                    "srcBackupLabel"
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "pitrConfig"
+                    ],
+                    "properties": {
+                      "pitrConfig": {
+                        "required": [
+                          "type"
+                        ],
+                        "properties": {
+                          "type": {
+                            "const": "time"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "bestEffort"
+                    ],
+                    "properties": {
+                      "pitrConfig": {
+                        "required": [
+                          "timestamp"
+                        ],
+                        "not": {
+                          "required": [
+                            "target"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "pitrConfig"
+                    ],
+                    "properties": {
+                      "pitrConfig": {
+                        "required": [
+                          "type"
+                        ],
+                        "properties": {
+                          "type": {
+                            "const": "lsn"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "bestEffort"
+                    ],
+                    "properties": {
+                      "pitrConfig": {
+                        "required": [
+                          "target"
+                        ],
+                        "not": {
+                          "required": [
+                            "timestamp"
+                          ]
+                        },
+                        "properties": {
+                          "target": {
+                            "type": "string",
+                            "pattern": "^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "pitrConfig"
+                    ],
+                    "properties": {
+                      "pitrConfig": {
+                        "required": [
+                          "type"
+                        ],
+                        "properties": {
+                          "type": {
+                            "const": "transaction"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "bestEffort"
+                    ],
+                    "properties": {
+                      "pitrConfig": {
+                        "required": [
+                          "target"
+                        ],
+                        "not": {
+                          "required": [
+                            "timestamp"
+                          ]
+                        },
+                        "properties": {
+                          "target": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              {
+                                "type": "string",
+                                "pattern": "^[0-9]+$"
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "description": "The instance to restore into: <cluster>: <namespace>: <instance>: {keys}, exactly one of each. Namespaces are mandatory; a new target namespace follows the reserved list of tpg-day0"
+      }
+    }
+  }
+}

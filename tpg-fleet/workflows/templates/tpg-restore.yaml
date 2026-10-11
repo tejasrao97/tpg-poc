@@ -1,7 +1,41 @@
-# Day 1: restore a Postgres instance. Target: a new instance (same cluster: a one-off clone;
-# other cluster: added to clusters/fleet.yaml and managed by Argo CD) or an existing instance
-# (in place, or another instance: destructive, confirm required).
-# Recovery point: time, latest, a named backup, an LSN or a transaction ID.
+# Day 1: restore Postgres instances (Round 23, locked decision 7). clusterMap is a LIST of pairs, one
+# restore each: the source and the target, <cluster>: <namespace>: <instance>: {keys}, exactly one of
+# each side. The target is the instance itself (in place), a new instance in another namespace of the
+# source cluster, or a new instance on another cluster (added to clusters/fleet.yaml and adopted by
+# Argo CD). The recovery point is a named backup (pitrEnabled false) or point-in-time recovery
+# (pitrEnabled true, pitrConfig.type latest, time, lsn or transaction). The keys and their rules are
+# in workflows/params/cluster-map-keys.yaml (section restore) and the generated schema
+# workflows/params/schemas/clustermap-restore.schema.json.
+#
+# dryRun is true by default: each pair records its plan (source resolution, the matrix, the
+# PostgresRestore that would be created, the preparation of the target) and nothing changes. A real
+# restore needs dryRun=false, and confirm (the target instance name) for an existing target.
+#
+# rolloutMode: all (default) runs every pair at once; batches runs maxParallel pairs at a time, in
+# the order of the list; canary runs the first pair alone and stops the run when it fails. The
+# pairs are independent: a failed pair does not stop the others (except a failed canary), and the
+# run ends Failed when any pair FAILED, TIMED OUT or was BLOCKED.
+#
+# clusterMap example:
+#   - sourceClusterConfig:
+#       aks-tpg-poc-01:
+#         pg-orders:
+#           orders-db: {sourceBackupName: orders-db-full-20260914000000}
+#     targetClusterConfig:
+#       aks-tpg-poc-01:
+#         pg-orders:
+#           orders-db: {pitrEnabled: false, confirm: orders-db}        # in place
+#   - sourceClusterConfig:
+#       aks-tpg-poc-01:
+#         pg-orders:
+#           orders-db: {}
+#     targetClusterConfig:
+#       aks-tpg-poc-02:
+#         pg-orders-dr:
+#           orders-db-dr:                                              # a new instance on another cluster
+#             pitrEnabled: true
+#             bestEffort: true
+#             pitrConfig: {type: time, timestamp: 2026-09-15T08:30:00Z}
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -9,8 +43,10 @@ metadata:
   namespace: argo
   annotations:
     workflows.argoproj.io/description: >-
-      Day 1: restore one Postgres instance to a new or an existing instance, on the same or
-      another cluster, with mode time, latest, backup, lsn or xid.
+      Day 1: restore Postgres instances from a list of pairs (clusterMap: source and target, cluster, namespace
+      and instance each): in place, into another namespace or onto another cluster, from a named backup or with
+      point-in-time recovery (latest, time, lsn, transaction). dryRun=true (default) records the plan per pair;
+      rolloutMode all, batches or canary; the pairs are independent.
 spec:
   serviceAccountName: tpg-workflow
   # Vault Agent (injector on the hub) renders tpg/shared/broadcom-registry,
@@ -26,51 +62,43 @@ spec:
       vault.hashicorp.com/tls-secret: vault-ca
   entrypoint: main
   onExit: exit-handler
+  parallelism: 10
   arguments:
     parameters:
-    # ---- mandatory (no default; the validate step lists the valid choices)
-    - name: sourceCluster
-      description: "Registered cluster that runs the instance to restore from"
+    # ---- mandatory (no default; the validate step explains what is missing)
+    - name: clusterMap
+      description: >-
+        List of pairs (YAML or JSON), mandatory: - {sourceClusterConfig: {<cluster>: {<namespace>: {<instance>: {sourceBackupName}}}},
+        targetClusterConfig: {<cluster>: {<namespace>: {<instance>: {pitrEnabled, pitrConfig, bestEffort, targetInstanceSpecFilePath, confirm,
+        skipMinorVersionCheck, postRestoreBackup}}}}}. Example, in place from a named backup:
+        [{sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {sourceBackupName: orders-db-full-20260914000000}}}},
+        targetClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {pitrEnabled: false, confirm: orders-db}}}}}]
       value: ""
-    - name: instance
-      description: "Source Postgres instance (its namespace from clusters/fleet.yaml, default pg-<instance>)"
-      value: ""
-    - name: mode
-      description: "time (targetTime), latest (newest WAL), backup (a PostgresBackup name), lsn or xid"
-      value: ""
-      enum: ["", "time", "latest", "backup", "lsn", "xid"]
-    # ---- recovery point: the one that belongs to the chosen mode
-    - name: targetTime
-      description: "mode=time: UTC timestamp, for example 2026-09-01T10:30:00Z"
-      value: ""
-    - name: backupName
-      description: "mode=backup: PostgresBackup name in the source namespace (restores inside that namespace only)"
-      value: ""
-    - name: lsn
-      description: "mode=lsn: log sequence number"
-      value: ""
-    - name: xid
-      description: "mode=xid: transaction ID"
-      value: ""
-    # ---- target
-    - name: targetCluster
-      description: "Registered cluster to restore into (empty: sourceCluster)"
-      value: ""
-    - name: targetInstance
-      description: "Instance to restore into (empty: <instance>-restore-<yyyymmddhhmm>; the source instance name: in place)"
-      value: ""
-    - name: confirm
-      description: "Repeat the target instance name when that instance exists (in place or another existing instance): the restore overwrites its data"
-      value: ""
+    - name: dryRun
+      description: "true (default): record the plan of every pair and change nothing; false: restore (an existing target needs confirm)"
+      value: "true"
+      enum: ["true", "false"]
+    # ---- optional
+    - name: rolloutMode
+      description: "all (default): every pair at once; batches: maxParallel pairs at a time, in list order; canary: the first pair alone, a failed canary stops the run, then batches of maxParallel. The pairs are independent"
+      value: all
+      enum: ["canary", "batches", "all"]
+    - name: maxParallel
+      description: "Pairs per batch for rolloutMode canary and batches"
+      value: "2"
     - name: pushMode
-      description: "Cross-cluster restore to a new instance: how the clusters/fleet.yaml entry is published (direct or pr)"
+      description: "A new instance is added to clusters/fleet.yaml: direct pushes to the fleet branch; pr opens a pull request and continues once it is merged"
       value: "direct"
       enum: ["direct", "pr"]
-    - name: bestEffort
-      description: "pitr bestEffort: recover as far as the WAL allows instead of failing"
-      value: "false"
-      enum: ["false", "true"]
+    - name: keepSourceLocation
+      description: "true (default): the copy of the source PostgresBackupLocation that a restore into another namespace or cluster needs stays in the target namespace; false: remove it after a successful restore"
+      value: "true"
+      enum: ["true", "false"]
+    - name: patchFiles
+      description: "JSON map {\"<path>\": \"<base64 contents>\"} of the local files that targetInstanceSpecFilePath names; scripts/submit/pack-patch-files.sh -o <parameter file> writes it"
+      value: ""
     - name: restoreTimeoutSeconds
+      description: "How long to wait for one PostgresRestore, and for the restored instance to run"
       value: "7200"
     - name: prTimeoutSeconds
       value: "3600"
@@ -90,34 +118,142 @@ spec:
         templateRef:
           name: tpg-lib
           template: init-run
+    - - name: batches
+        templateRef:
+          name: tpg-lib
+          template: plan-batches
+        arguments:
+          parameters:
+            - name: requirePrecheck
+              value: "false"
+            - name: maxParallel
+              value: "{{workflow.parameters.maxParallel}}"
+            - name: rolloutMode
+              value: "{{workflow.parameters.rolloutMode}}"
+            - name: pairs
+              value: "{{steps.validate.outputs.parameters.pairs}}"
+    - - name: split
+        templateRef:
+          name: tpg-lib
+          template: split-first
+        arguments:
+          parameters:
+            - name: batches
+              value: "{{steps.batches.outputs.parameters.batches}}"
+    # canary: the first pair alone; when it fails this step fails and the later groups do not start.
+    # Otherwise the first batch runs and a failed pair does not stop the rest (the pairs are independent)
+    - - name: canary
+        template: restore-batch
+        when: "'{{workflow.parameters.rolloutMode}}' == 'canary'"
+        arguments:
+          parameters:
+            - name: items
+              value: "{{steps.split.outputs.parameters.first}}"
+      - name: first
+        template: restore-batch
+        when: "'{{workflow.parameters.rolloutMode}}' != 'canary'"
+        continueOn:
+          failed: true
+        arguments:
+          parameters:
+            - name: items
+              value: "{{steps.split.outputs.parameters.first}}"
+    - - name: rest
+        template: run-batches
+        when: "{{steps.split.outputs.parameters.hasRest}} == true"
+        arguments:
+          parameters:
+            - name: batches
+              value: "{{steps.split.outputs.parameters.rest}}"
+    # a FAILED, TIMEOUT or BLOCKED pair ends the run Failed after the others ran
+    - - name: gate
+        template: gate
+  # The batches after the first, one at a time; a failed pair does not stop the next batch
+  - name: run-batches
+    inputs:
+      parameters:
+        - name: batches
+    steps:
+    - - name: split
+        templateRef:
+          name: tpg-lib
+          template: split-first
+        arguments:
+          parameters:
+            - name: batches
+              value: "{{inputs.parameters.batches}}"
     - - name: restore
-        template: restore
+        template: restore-batch
+        continueOn:
+          failed: true
+        arguments:
+          parameters:
+            - name: items
+              value: "{{steps.split.outputs.parameters.first}}"
+    - - name: next
+        template: run-batches
+        when: "{{steps.split.outputs.parameters.hasRest}} == true"
+        arguments:
+          parameters:
+            - name: batches
+              value: "{{steps.split.outputs.parameters.rest}}"
+  # The pairs of one batch, in parallel (one at a time per target instance)
+  - name: restore-batch
+    inputs:
+      parameters:
+        - name: items
+    steps:
+    - - name: restore
+        template: restore-pair
+        arguments:
+          parameters:
+            - name: pair
+              value: "{{item.pair}}"
+            - name: cluster
+              value: "{{item.cluster}}"
+            - name: instance
+              value: "{{item.instance}}"
+            - name: method
+              value: "{{item.method}}"
+        withParam: "{{inputs.parameters.items}}"
   - name: validate
     metadata:
       annotations:
         vault.hashicorp.com/agent-inject: "false"
+    outputs:
+      parameters:
+        - name: pairs
+          valueFrom:
+            path: /tmp/pairs.json
+            default: "[]"
     container:
       image: "{{workflow.parameters.toolsImage}}"
       command: [bash, /scripts/validate-params.sh, restore]
       env:
-        - {name: P_SOURCE_CLUSTER, value: "{{workflow.parameters.sourceCluster}}"}
-        - {name: P_INSTANCE, value: "{{workflow.parameters.instance}}"}
-        - {name: P_MODE, value: "{{workflow.parameters.mode}}"}
-        - {name: P_TARGET_TIME, value: "{{workflow.parameters.targetTime}}"}
-        - {name: P_BACKUP_NAME, value: "{{workflow.parameters.backupName}}"}
-        - {name: P_LSN, value: "{{workflow.parameters.lsn}}"}
-        - {name: P_XID, value: "{{workflow.parameters.xid}}"}
-        - {name: P_TARGET_CLUSTER, value: "{{workflow.parameters.targetCluster}}"}
-        - {name: P_TARGET_INSTANCE, value: "{{workflow.parameters.targetInstance}}"}
-        - {name: P_CONFIRM, value: "{{workflow.parameters.confirm}}"}
+        - {name: P_WORKFLOW, value: "{{workflow.name}}"}
+        - {name: P_CLUSTER_MAP, value: "{{workflow.parameters.clusterMap}}"}
+        - {name: P_DRY_RUN, value: "{{workflow.parameters.dryRun}}"}
+        - {name: P_ROLLOUT_MODE, value: "{{workflow.parameters.rolloutMode}}"}
+        - {name: P_MAX_PARALLEL, value: "{{workflow.parameters.maxParallel}}"}
         - {name: P_PUSH_MODE, value: "{{workflow.parameters.pushMode}}"}
-        - {name: P_BEST_EFFORT, value: "{{workflow.parameters.bestEffort}}"}
+        - {name: P_KEEP_SOURCE_LOCATION, value: "{{workflow.parameters.keepSourceLocation}}"}
         - {name: P_TIMEOUT, value: "{{workflow.parameters.restoreTimeoutSeconds}}"}
         - {name: P_PR_TIMEOUT, value: "{{workflow.parameters.prTimeoutSeconds}}"}
       volumeMounts:
         - name: scripts
           mountPath: /scripts
-  - name: restore
+  # One pair: restore-pair.sh reads the normalized pair (P_PAIR, fields in the header of clustermap.py)
+  - name: restore-pair
+    inputs:
+      parameters:
+        - name: pair
+        - name: cluster
+        - name: instance
+        - name: method
+    # one restore at a time per target instance (the lock of the other workflows)
+    synchronization:
+      mutexes:
+        - name: "tpg-instance-{{inputs.parameters.cluster}}-{{inputs.parameters.instance}}"
     outputs:
       parameters:
         - name: result
@@ -127,36 +263,43 @@ spec:
     metrics:
       prometheus:
         - name: tpg_restore_result
-          help: "Restore result per target cluster"
+          help: "Restore result per target cluster and instance"
           labels:
             - key: cluster
-              value: "{{workflow.parameters.targetCluster}}"
+              value: "{{inputs.parameters.cluster}}"
             - key: instance_name
-              value: "{{workflow.parameters.instance}}"
+              value: "{{inputs.parameters.instance}}"
             - key: mode
-              value: "{{workflow.parameters.mode}}"
+              value: "{{inputs.parameters.method}}"
             - key: result
               value: "{{outputs.parameters.result}}"
           counter:
             value: "1"
     container:
       image: "{{workflow.parameters.toolsImage}}"
-      command: [bash, /scripts/restore.sh]
+      command: [bash, /scripts/restore-pair.sh]
       args:
         - "{{workflow.name}}"
       env:
-        # One of the four is set (validated); the others are empty
-        - {name: P_SOURCE_CLUSTER, value: "{{workflow.parameters.sourceCluster}}"}
-        - {name: P_INSTANCE, value: "{{workflow.parameters.instance}}"}
-        - {name: P_MODE, value: "{{workflow.parameters.mode}}"}
-        - {name: P_TARGET, value: "{{workflow.parameters.targetTime}}{{workflow.parameters.backupName}}{{workflow.parameters.lsn}}{{workflow.parameters.xid}}"}
-        - {name: P_TARGET_CLUSTER, value: "{{workflow.parameters.targetCluster}}"}
-        - {name: P_TARGET_INSTANCE, value: "{{workflow.parameters.targetInstance}}"}
-        - {name: P_CONFIRM, value: "{{workflow.parameters.confirm}}"}
+        - {name: P_PAIR, value: "{{inputs.parameters.pair}}"}
+        - {name: P_DRY_RUN, value: "{{workflow.parameters.dryRun}}"}
         - {name: P_PUSH_MODE, value: "{{workflow.parameters.pushMode}}"}
-        - {name: P_BEST_EFFORT, value: "{{workflow.parameters.bestEffort}}"}
+        - {name: P_KEEP_SOURCE_LOCATION, value: "{{workflow.parameters.keepSourceLocation}}"}
         - {name: P_TIMEOUT, value: "{{workflow.parameters.restoreTimeoutSeconds}}"}
         - {name: P_PR_TIMEOUT, value: "{{workflow.parameters.prTimeoutSeconds}}"}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+  - name: gate
+    metadata:
+      annotations:
+        vault.hashicorp.com/agent-inject: "false"
+    container:
+      image: "{{workflow.parameters.toolsImage}}"
+      command: [bash, /scripts/blocked-gate.sh]
+      args:
+        - "{{workflow.name}}"
+        - failed
       volumeMounts:
         - name: scripts
           mountPath: /scripts

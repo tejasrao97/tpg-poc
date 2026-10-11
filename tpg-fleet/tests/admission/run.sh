@@ -161,8 +161,25 @@ wf tpg-patch "$(params patchMode=append)"
 rejected "tpg-patch: patchMode takes apply or clear" 'patchMode="append" must be one of apply, clear'
 wf tpg-patch "$(params patchFiles=not-json)"
 rejected "tpg-patch: patchFiles must be a JSON object" 'patchFiles="not-json" must be a JSON object'
-wf tpg-restore "$(params sourceCluster=aks-tpg-poc-01 instance=orders-db mode=time targetTime=2026-09-15)"
-rejected "tpg-restore: targetTime without the time of day is refused" 'targetTime="2026-09-15" must be a UTC time'
+# Round 23 phase 6a: tpg-restore takes a list of pairs; the flat inputs are gone
+RMAP='- sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {}}}}
+  targetClusterConfig: {aks-tpg-poc-02: {pg-orders-dr: {orders-db-dr: {pitrEnabled: true, pitrConfig: {type: latest}}}}}'
+wf tpg-restore "$(params "clusterMap=$RMAP" dryRun=false rolloutMode=canary maxParallel=1 pushMode=pr keepSourceLocation=false restoreTimeoutSeconds=600 prTimeoutSeconds=900 'patchFiles={}')"
+accepted "R23: tpg-restore takes a YAML list of pairs and its inputs"
+wf tpg-restore "$(params 'clusterMap=[{"sourceClusterConfig": {"c1": {"pg-a": {"a": {}}}}, "targetClusterConfig": {"c2": {"pg-b": {"b": {"pitrEnabled": false}}}}}]')"
+accepted "R23: tpg-restore takes a JSON list of pairs"
+wf tpg-restore "$(params)"
+accepted "R23: tpg-restore with every default is accepted (dryRun true, rolloutMode all)"
+wf tpg-restore "$(params 'clusterMap=aks-tpg-poc-01: {instances: {orders-db: {}}}')"
+rejected "R23: tpg-restore refuses a map of clusters as clusterMap" 'clusterMap="aks-tpg-poc-01: {instances: {orders-db: {}}}" must be a List of restore pairs'
+wf tpg-restore "$(params "clusterMap=$RMAP" rolloutMode=fast)"
+rejected "R23: tpg-restore rolloutMode takes canary, batches or all" 'rolloutMode="fast" must be one of canary, batches, all'
+wf tpg-restore "$(params "clusterMap=$RMAP" dryRun=maybe)"
+rejected "R23: tpg-restore dryRun is a Boolean" 'dryRun="maybe" must be a Boolean (true or false)'
+for flat in sourceCluster=aks-tpg-poc-01 instance=orders-db mode=time targetTime=2026-09-15T08:30:00Z backupName=b1 lsn=0/3000060 xid=987 targetCluster=aks-tpg-poc-02 targetInstance=orders-db-dr confirm=orders-db bestEffort=true; do
+  wf tpg-restore "$(params "clusterMap=$RMAP" "$flat")"
+  rejected "R23: the removed flat input ${flat%%=*} is refused as unknown" "${flat%%=*} is not an input of tpg-restore"
+done
 wf tpg-upgrade "$(params component=operator targetVersion=4.5.1 clusters=all pushMode=direct operatorPatches=keep)"
 rejected "tpg-upgrade: operatorPatches is gone with the manifest patches (Round 14)" 'operatorPatches is not an input of tpg-upgrade'
 wf tpg-scale-instance "$(params 'clusters=[aks-tpg-poc-01]' maxReadReplicas=0 rolloutMode=canary)"

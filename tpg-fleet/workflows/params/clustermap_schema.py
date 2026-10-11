@@ -9,6 +9,8 @@ Writes, per workflow W of cluster-map-keys.yaml:
   workflows/params/schemas/clustermap-W.schema.json   JSON Schema (draft 2020-12)
   workflows/params/schemas/clustermap-W.schema.yaml   the same schema as YAML
   workflows/params/schemas/clustermap-W.example.yaml  a map that uses every key W takes
+and the same three files for W = restore (Round 23, phase 6): the clusterMap of tpg-restore is a list
+of pairs, described by the section "restore" of cluster-map-keys.yaml (restore_schema, RESTORE_EXAMPLE).
 and the key reference of docs/workflow-commands.md, section 3, between
   <!-- BEGIN GENERATED: clustermap-keys --> and <!-- END GENERATED: clustermap-keys -->
 
@@ -47,6 +49,7 @@ DISPLAY = {
     "patchFile": "List (one file path)", "patchFileList": "List (file paths)", "caFile": "List (one file path)",
     "kindList": "List (kinds)", "nameList": "List", "k8sNameList": "List (names)", "cidrList": "List (CIDRs)", "fqdnList": "List (host names)",
     "stringMap": "Map", "cron": "String (cron)",
+    "timestamp": "String (UTC time)", "lsn": "String (LSN)", "stanzaName": "String (stanza)", "backupLabel": "String (backup label)",
 }
 
 # Example values: every key a workflow takes appears in its example map. Where two
@@ -124,6 +127,14 @@ def value_schema(spec):
         if prefixes:
             out["not"] = {"anyOf": [out["not"], {"pattern": "^(" + "|".join(prefixes) + ")"}]}
         return out
+    if t == "timestamp":
+        return {"type": "string", "pattern": _p(cm.TIMESTAMP)}
+    if t == "lsn":
+        return {"type": "string", "pattern": _p(cm.LSN)}
+    if t == "stanzaName":
+        return {"type": "string", "pattern": _p(cm.STANZA)}
+    if t == "backupLabel":
+        return {"type": "string", "pattern": _p(cm.BACKUP_LABEL)}
     if t == "boolean":
         return {"enum": [True, False, "true", "false"]}
     if t in ("integer", "posint"):
@@ -257,6 +268,198 @@ def example_of(keys, wf):
     return "\n".join(lines) + "\n"
 
 
+# ---- tpg-restore: a list of pairs (Round 23, phase 6)
+# The example shows every restore key and the three kinds of target (in place, another namespace,
+# another cluster), with and without point-in-time recovery. The pairs use different instances, because
+# a target is restored once per run and is not the source of another pair. Timestamps are quoted, so
+# that no YAML parser turns them into dates.
+RESTORE_EXAMPLE = """\
+# clusterMap of tpg-restore: a list of pairs, one restore each (generated; see
+# workflows/params/schemas/clustermap-restore.schema.json). Each side is
+# <cluster>: <namespace>: <instance>: {keys}, exactly one of each. Local spec files are packed
+# into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
+# yaml-language-server: $schema=clustermap-restore.schema.json
+
+# 1. In place, from a named backup (no point-in-time recovery): the source and the target are the same
+#    instance; confirm repeats its name (needed when dryRun is false)
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        orders-db:
+          sourceBackupName: orders-db-full-20260914000000
+  targetClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        orders-db:
+          pitrEnabled: false
+          confirm: orders-db
+
+# 2. A copy in another namespace of the same cluster, up to the newest WAL (type latest takes no
+#    timestamp, target, bestEffort or srcBackupLabel); the source instance gives location and stanza
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-billing:
+        billing-db: {}
+  targetClusterConfig:
+    aks-tpg-poc-01:
+      pg-billing-copy:
+        billing-db-copy:
+          pitrEnabled: true
+          pitrConfig:
+            type: latest
+
+# 3. A new instance on another cluster at a point in time, from one chosen backup of the repository,
+#    with its own spec file (a local file of the submitting machine, or [repo:<path>])
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-reports:
+        reports-db:
+          sourceBackupName: reports-db-full-20260914000000
+  targetClusterConfig:
+    aks-tpg-poc-02:
+      pg-reports:
+        reports-db-dr:
+          pitrEnabled: true
+          bestEffort: true
+          pitrConfig:
+            type: time
+            timestamp: "2026-09-15T08:30:00Z"
+            sourceBackupConfig:
+              srcBackupLocationName: reports-db-backup-location
+              srcStanzaName: pg-reports-reports-db-0000
+              srcBackupLabel: 20260914-000000F
+          targetInstanceSpecFilePath: [./reports-db-dr.yaml]
+          skipMinorVersionCheck: true
+          postRestoreBackup: true
+
+# 4. In place, point-in-time recovery to a log sequence number (type lsn, or transaction with a
+#    transaction ID in target)
+- sourceClusterConfig:
+    aks-tpg-poc-02:
+      pg-shop:
+        shop-db: {}
+  targetClusterConfig:
+    aks-tpg-poc-02:
+      pg-shop:
+        shop-db:
+          pitrEnabled: true
+          bestEffort: false
+          pitrConfig:
+            type: lsn
+            target: 0/3000060
+          confirm: shop-db
+
+# 5. A named backup into a new instance of the same namespace
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        archive-db:
+          sourceBackupName: archive-db-full-20260914000000
+  targetClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        archive-db-restored:
+          pitrEnabled: false
+"""
+
+
+def _restore_tree(specs):
+    """{'pitrConfig': {'type': ('leaf', spec), ...}, 'bestEffort': ('leaf', spec)} from the dotted key paths."""
+    tree = {}
+    for path, spec in specs.items():
+        parts = path.split(".")
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = ("leaf", spec)
+    return tree
+
+
+def _restore_object(tree, doc_of):
+    props = {}
+    for k, v in tree.items():
+        if isinstance(v, tuple):
+            spec = v[1]
+            sch = value_schema(spec)
+            sch["description"] = f"{spec.get('doc', '')} [{DISPLAY[spec['type']]}]".strip()
+        else:
+            sch = _restore_object(v, doc_of)
+            sch["description"] = doc_of.get(k, "")
+        props[k] = sch
+    return {"type": "object", "additionalProperties": False, "properties": props}
+
+
+def restore_schema(keys):
+    src, tgt = cm.restore_specs(keys)
+    ns = keys["instance"]["namespace"]
+
+    def one(inner, names):
+        return {"type": "object", "minProperties": 1, "maxProperties": 1, "propertyNames": names, "additionalProperties": inner}
+
+    def side(instance_schema, ns_names):
+        return one(one(one(instance_schema, {"pattern": _p(cm.NAME)}), ns_names), {"pattern": _p(cm.CLUSTER_NAME)})
+
+    source = _restore_object(_restore_tree(src), {})
+    target = _restore_object(_restore_tree(tgt), {"pitrConfig": "Point-in-time recovery: the type and what it needs (pitrEnabled true)",
+                                                  "sourceBackupConfig": "The backup repository to recover from; every key is optional where it can be derived"})
+    target["required"] = ["pitrEnabled"]
+
+    def pitr(on):
+        return {"required": ["pitrEnabled"], "properties": {"pitrEnabled": {"enum": [True, "true"] if on else [False, "false"]}}}
+
+    def typ(t):
+        return {"required": ["pitrConfig"], "properties": {"pitrConfig": {"required": ["type"], "properties": {"type": {"const": t}}}}}
+
+    def has(*path):
+        """The key path is present: {required: [a], properties: {a: {required: [b], ...}}}."""
+        node = {"required": [path[-1]]}
+        for k in reversed(path[:-1]):
+            node = {"required": [k], "properties": {k: node}}
+        return node
+
+    # the rules between the keys that a schema can say; the validate step (clustermap.py restore) has all of them
+    target["allOf"] = [
+        {"if": pitr(False), "then": {"not": {"anyOf": [has("pitrConfig"), has("bestEffort")]}}},
+        {"if": pitr(True), "then": {"required": ["pitrConfig"], "properties": {"pitrConfig": {"required": ["type"]}}}},
+        {"if": typ("latest"), "then": {"not": {"anyOf": [has("bestEffort"), has("pitrConfig", "target"), has("pitrConfig", "timestamp"),
+                                                           has("pitrConfig", "sourceBackupConfig", "srcBackupLabel")]}}},
+        {"if": typ("time"), "then": {"required": ["bestEffort"], "properties": {"pitrConfig": {"required": ["timestamp"], "not": has("target")}}}},
+        {"if": typ("lsn"), "then": {"required": ["bestEffort"], "properties": {"pitrConfig": {
+            "required": ["target"], "not": has("timestamp"), "properties": {"target": {"type": "string", "pattern": _p(cm.LSN)}}}}}},
+        {"if": typ("transaction"), "then": {"required": ["bestEffort"], "properties": {"pitrConfig": {
+            "required": ["target"], "not": has("timestamp"), "properties": {"target": {"anyOf": [
+                {"type": "integer", "minimum": 0}, {"type": "string", "pattern": _p(cm.TRANSACTION_ID)}]}}}}}},
+    ]
+    # pitrConfig.target is an LSN or a transaction ID: the type decides (above), here both forms
+    target["properties"]["pitrConfig"]["properties"]["target"] = {
+        "anyOf": [{"type": "string", "pattern": _p(cm.LSN)}, {"type": "string", "pattern": _p(cm.TRANSACTION_ID)}, {"type": "integer", "minimum": 0}],
+        "description": tgt["pitrConfig.target"]["doc"] + " [String]"}
+    pair = {
+        "type": "object", "additionalProperties": False, "required": ["sourceClusterConfig", "targetClusterConfig"],
+        "properties": {
+            "sourceClusterConfig": dict(side(source, {"pattern": _p(cm.NAMESPACE)}),
+                                        description="The instance to restore from: <cluster>: <namespace>: <instance>: {sourceBackupName}, exactly one of each"),
+            "targetClusterConfig": dict(side(target, value_schema(ns)),
+                                        description="The instance to restore into: <cluster>: <namespace>: <instance>: {keys}, exactly one of each. "
+                                                    "Namespaces are mandatory; a new target namespace follows the reserved list of tpg-day0"),
+        },
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/<org>/tpg-fleet/workflows/params/schemas/clustermap-restore.schema.json",
+        "title": "clusterMap of tpg-restore",
+        "description": ("The clusterMap input of the WorkflowTemplate tpg-restore: a list of pairs, one restore each. Generated from "
+                        "the section restore of workflows/params/cluster-map-keys.yaml by workflows/params/clustermap_schema.py; the "
+                        "validate step of the workflow (workflows/scripts/clustermap.py restore) is the authority: registered clusters, "
+                        "the rules between the pairs (a target once, not the source of another pair), the source keys that depend on "
+                        "pitrEnabled of the target, and the rules that need the clusters."),
+        "type": "array",
+        "minItems": 1,
+        "items": pair,
+    }
+
+
+
 def md_cell(s):
     return s.replace("|", "\\|")
 
@@ -305,6 +508,12 @@ def outputs():
         files[base + ".schema.yaml"] = ("# generated by workflows/params/clustermap_schema.py; do not edit\n"
                                         + yaml.safe_dump(sch, sort_keys=False, width=1000, allow_unicode=True))
         files[base + ".example.yaml"] = example_of(keys, wf)
+    sch = restore_schema(keys)
+    base = os.path.join(OUT_DIR, "clustermap-restore")
+    files[base + ".schema.json"] = json.dumps(sch, indent=2) + "\n"
+    files[base + ".schema.yaml"] = ("# generated by workflows/params/clustermap_schema.py; do not edit\n"
+                                    + yaml.safe_dump(sch, sort_keys=False, width=1000, allow_unicode=True))
+    files[base + ".example.yaml"] = RESTORE_EXAMPLE
     doc = open(DOC).read()
     if doc.count(BEGIN) != 1 or doc.count(END) != 1:
         raise SystemExit(f"{DOC}: the markers {BEGIN} and {END} must appear once each")

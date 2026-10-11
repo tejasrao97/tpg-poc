@@ -76,6 +76,9 @@ spec:
         - name: maxParallel
         - name: rolloutMode
           value: canary
+        # tpg-restore: the normalized pairs (JSON); the batches then hold pairs, not clusters
+        - name: pairs
+          value: ""
     outputs:
       parameters:
         - name: batches
@@ -94,6 +97,8 @@ spec:
         - "{{inputs.parameters.requirePrecheck}}"
         - "{{inputs.parameters.maxParallel}}"
         - "{{inputs.parameters.rolloutMode}}"
+      env:
+        - {name: P_PAIRS, value: "{{inputs.parameters.pairs}}"}
       volumeMounts:
         - name: scripts
           mountPath: /scripts
