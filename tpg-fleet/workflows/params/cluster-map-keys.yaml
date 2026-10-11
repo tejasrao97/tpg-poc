@@ -62,6 +62,18 @@
 # are read by the step script of each workflow that lists them.
 #
 # renamed: keys that were renamed (Round 15); the old name is refused with the new one.
+#
+# restore (Round 23, phase 6): the clusterMap of tpg-restore is not a map of clusters but a LIST of
+# pairs, so it has its own section at the end of this file and is not one of "workflows" above.
+# Each pair is {sourceClusterConfig, targetClusterConfig}, and each side is
+# <cluster>: <namespace>: <instance>: {keys}, exactly one of each. "source" and "target" list the
+# keys of the instance level of each side; a key written "a.b.c" sits under a, then b (pitrConfig:
+# {type: ...}). Each entry has type (as above, plus timestamp, lsn, stanzaName and backupLabel), doc
+# and optionally values. The rules between the keys (which key is required, refused or restricted
+# by pitrEnabled and pitrConfig.type, one file, confirm, ...) are in clustermap.py restore
+# (process_restore) and, where a schema can say them, in the generated
+# workflows/params/schemas/clustermap-restore.schema.json; the namespace of the target follows the
+# namespace key above (reserved, reservedPrefixes).
 version: 1
 
 renamed:
@@ -485,3 +497,48 @@ instance:
     workflows: {day0: optional, create-instance: optional, network-policy: optional}
     fleet: [.network.egressToFqdns]
     format: list
+
+restore:
+  source:
+    sourceBackupName:
+      doc: "The PostgresBackup to restore, in the namespace of the source instance. Mandatory with pitrEnabled false (the restore uses that backup: PostgresRestore spec.sourceBackup.name, inside the source namespace only); with pitrEnabled true it only names the backup that gives the backup location and the stanza when the source instance no longer exists"
+      type: k8sName
+  target:
+    pitrEnabled:
+      doc: "Mandatory. true: point-in-time recovery from the backup repository (PostgresRestore spec.pitr; pitrConfig.type says to where); false: restore the backup named by sourceBackupName of the source (spec.sourceBackup)"
+      type: boolean
+    pitrConfig.type:
+      doc: "pitrEnabled true, mandatory: latest (newest WAL), time (pitrConfig.timestamp), lsn or transaction (pitrConfig.target)"
+      type: enum
+      values: [latest, time, lsn, transaction]
+    pitrConfig.target:
+      doc: "type lsn: a log sequence number such as 0/3000060; type transaction: a transaction ID (a number); mandatory for those two types, refused for the others (spec.pitr.target)"
+      type: string
+    pitrConfig.timestamp:
+      doc: "type time, mandatory: a UTC time such as 2026-09-15T08:30:00Z (spec.pitr.timestamp); refused for the other types"
+      type: timestamp
+    pitrConfig.sourceBackupConfig.srcBackupLocationName:
+      doc: "The PostgresBackupLocation that holds the backups (spec.pitr.sourceBackupLocation.name). Optional: derived from the source instance, or from the backup sourceBackupName names; a difference from what the source reports is a warning. Mandatory when there is neither a live source instance nor a sourceBackupName"
+      type: k8sName
+    pitrConfig.sourceBackupConfig.srcStanzaName:
+      doc: "The pgBackRest stanza (spec.pitr.sourceBackupLocation.stanzaName). Optional and derived as srcBackupLocationName; mandatory under the same condition"
+      type: stanzaName
+    pitrConfig.sourceBackupConfig.srcBackupLabel:
+      doc: "The pgBackRest backup to start the recovery from, such as 20260915-020000F or 20260916-010000I as in pgBackRest info (spec.pitr.sourceBackupLocation.set). Refused with type latest; empty: the newest backup before the recovery point"
+      type: backupLabel
+    bestEffort:
+      doc: "pitrEnabled true: mandatory for time, lsn and transaction (true: recover as far as the WAL allows when the target is invalid or not reached; false: fail instead), refused for latest and with pitrEnabled false (spec.pitr.bestEffort)"
+      type: boolean
+    targetInstanceSpecFilePath:
+      doc: "A new target only: one file with exactly one kind: Postgres document, in brackets, [./orders-dr.yaml] (a file of the submitting machine, its contents in patchFiles) or [repo:<path>] in the fleet repository. It becomes the instance spec of the new target (spec.targetInstance.spec). Without it a new target copies the source instance's entry of clusters/fleet.yaml, and it is mandatory when the source is not in fleet.yaml. Refused for an existing target"
+      type: patchFile
+      repoDir: ""
+    confirm:
+      doc: "The target instance name, repeated. Mandatory for a real restore (dryRun false) into an existing instance, in place or another one: the restore overwrites its data. A name that is not the target instance is always refused"
+      type: name
+    skipMinorVersionCheck:
+      doc: "true writes the annotation sql.tanzu.vmware.com/skip-minor-version-check: \"true\" on the PostgresRestore (default false)"
+      type: boolean
+    postRestoreBackup:
+      doc: "true takes a full backup of the target once the restored instance runs (default false)"
+      type: boolean
