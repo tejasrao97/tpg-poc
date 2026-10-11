@@ -509,6 +509,23 @@ restore_map_validate() {   # clustermap.py restore on the pairs of clusterMap; w
   cp "$WORK/pairs.json" /tmp/pairs.json
   jq -c '[.[] | .source.cluster, .target.cluster] | unique' "$WORK/pairs.json" > /tmp/clusters.json
 }
+restore_inplace_check() {  # tpg-restore: an in-place pair on a cluster whose clusters.<c>.cluster.allowInPlaceRestore is not
+  # true refuses the WHOLE RUN before any pair starts (IN_PLACE_NOT_ALLOWED); dryRun does not skip it. The setting is read
+  # from clusters/fleet.yaml (override), else clusters/_template/cluster.yaml (false), of the fleet repository.
+  local rows c labels
+  rows="$(jq -r '[.[] | select(.inPlace)] | group_by(.target.cluster)[]
+    | [.[0].target.cluster, (map("clusterMap[" + (.index | tostring) + "] " + .label) | join("; "))] | @tsv' "$WORK/pairs.json")"
+  [[ -n "$rows" ]] || return 0
+  if ! git_clone "$WORK/repo" >/dev/null 2>&1; then
+    err "in-place restore: clusters/fleet.yaml could not be read to check clusters.<cluster>.cluster.allowInPlaceRestore (IN_PLACE_NOT_ALLOWED: the run is refused while the setting cannot be read); retry, or restore into a new instance"
+    return
+  fi
+  while IFS=$'\t' read -r c labels; do
+    [[ -n "$c" ]] || continue
+    [[ "$(fleet_cluster_value "$WORK/repo" "$c" '.cluster.allowInPlaceRestore' false)" == "true" ]] \
+      || err "IN_PLACE_NOT_ALLOWED: ${labels} restores in place on cluster ${c}, which does not allow it: set clusters.${c}.cluster.allowInPlaceRestore: true in clusters/fleet.yaml (default false, clusters/_template/cluster.yaml), merge it, and submit again. The whole run is refused before any pair starts (dryRun does not skip this check); to restore without overwriting, name another instance as the target"
+  done <<<"$rows"
+}
 map_each_instance() {  # map_each_instance JQ_FILTER MESSAGE: an error for every instance entry where FILTER is false
   # FILTER sees {cluster, instance, v: <instance keys>}
   local bad
@@ -796,6 +813,8 @@ case "$MODE" in
     oneof pushMode "${P_PUSH_MODE:-direct}" direct pr
     bool dryRun "${P_DRY_RUN:-true}"; bool keepSourceLocation "${P_KEEP_SOURCE_LOCATION:-true}"
     posint restoreTimeoutSeconds "${P_TIMEOUT:-7200}"; posint prTimeoutSeconds "${P_PR_TIMEOUT:-3600}"
+    # an in-place pair needs allowInPlaceRestore on its cluster: the whole run is refused here (Round 23, phase 6a follow-up)
+    [[ ! -s "$WORK/pairs.json" ]] || restore_inplace_check
     [[ "${#ERRORS[@]}" -gt 0 ]] || patch_files_check
     ;;
   delete-instance)

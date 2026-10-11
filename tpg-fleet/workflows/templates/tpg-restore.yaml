@@ -217,9 +217,8 @@ spec:
               value: "{{item.method}}"
         withParam: "{{inputs.parameters.items}}"
   - name: validate
-    metadata:
-      annotations:
-        vault.hashicorp.com/agent-inject: "false"
+    # Vault Agent (the workflow default): the validate step reads clusters/fleet.yaml to check
+    # clusters.<cluster>.cluster.allowInPlaceRestore when a pair restores in place
     outputs:
       parameters:
         - name: pairs

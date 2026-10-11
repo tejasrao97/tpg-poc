@@ -48,6 +48,9 @@ tpg-fleet/
                                      documents of an instance) and <name>-<uid>.yaml (values), stored by
                                      tpg-patch, read by the chart with .Files.Get on top of the overlays;
                                      team files named with repo:helm_artifacts/instance/tpg-instance/patches/<file>
+      restore-specs/                 instance spec files (one kind: Postgres document each) that tpg-restore
+                                     reads for a new target, repo:helm_artifacts/instance/tpg-instance/restore-specs/<file>;
+                                     the chart never reads them (.helmignore)
     instance/crd-reference/          reference chart of every Tanzu Postgres kind (generated defaults, examples)
     operator/overlays/               operator values overlay files (Round 22), stored by tpg-day0 as <name>-<uid>.yaml
       clusters/<cluster>.yaml        the copy of a cluster's current overlay that the tpg-operator Application reads first

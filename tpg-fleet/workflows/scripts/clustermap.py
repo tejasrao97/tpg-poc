@@ -42,7 +42,7 @@ normalized pair, one JSON object per pair, is what the restore steps read (docum
 all always present; a missing text is "", a missing flag false):
   index                  position in the list, from 0
   label                  "<cluster>/<namespace>/<instance> -> <cluster>/<namespace>/<instance>"
-  method                 backup (pitrEnabled false) | latest | time | lsn | transaction
+  method                 backup (pitrEnabled false, also when pitrEnabled is absent) | latest | time | lsn | transaction
   inPlace                source and target are the same cluster, namespace and instance
   sameCluster            same cluster on both sides
   sameNamespace          same cluster and namespace on both sides
@@ -52,9 +52,15 @@ all always present; a missing text is "", a missing flag false):
   pitr                   {enabled, type, timestamp, target, bestEffort, backupLocation, stanza,
                           backupLabel}   backupLocation, stanza, backupLabel: pitrConfig.sourceBackupConfig
                           srcBackupLocationName, srcStanzaName, srcBackupLabel (never derived here)
-Booleans are JSON booleans. What needs the clusters (a live source, whether the target exists,
-allowInPlaceRestore, derived location and stanza, the recovery window, the matrix) is checked by the
-restore steps.
+pitrEnabled defaults to false, so a target without it restores the named backup and the source then needs
+sourceBackupName. A named backup is valid into the same namespace, another namespace and another cluster
+(Round 23, phase 6a follow-up); the normalized pair did not need a new field for it (method backup,
+inPlace, sameCluster and sameNamespace say where). targetInstanceSpecFilePath as repo:<path> is limited to
+helm_artifacts/instance/tpg-instance/restore-specs/ (repoDir of the key; one .yaml or .yml file, no .., no
+absolute or empty segment, the README of the folder is not a .yaml file).
+Booleans are JSON booleans. What needs the clusters (a live source, whether the target exists, derived
+location and stanza, the recovery window, the matrix) is checked by the restore steps; allowInPlaceRestore
+(clusters/fleet.yaml) is read by validate-params.sh, which refuses the whole run (IN_PLACE_NOT_ALLOWED).
 
 Lists are strict (Round 23): in the map a key of a list type is a YAML/JSON sequence,
 also with one value ([tpg-poc-01]); a single-file key (patchFile, caFile) is a
@@ -685,23 +691,21 @@ def restore_pair_errors(i, pair, keys, registered, confirm_required):
     in_place = same_ns and si == ti
 
     en = tv.get("pitrEnabled")
-    if en is None and "pitrEnabled" not in tentry:
-        errors.append(f"{tw}.pitrEnabled is required (true: point-in-time recovery, pitrConfig says to where; "
-                      "false: restore the backup the source names, sourceBackupName)")
+    # pitrEnabled defaults to false: a pair that does not say is a named-backup restore
+    implied = "pitrEnabled" not in tentry
+    if implied:
+        en = "false"
     typ = tv.get("pitrConfig.type")
     if en == "false":
+        how = "pitrEnabled: false" + (" (pitrEnabled is absent and defaults to false)" if implied else "")
         if "pitrConfig" in tentry and any(p.startswith("pitrConfig") for p in tv):
-            errors.append(f"{tw}.pitrConfig: not allowed with pitrEnabled: false (the restore uses the backup "
-                          "sourceBackupName names; remove pitrConfig, or set pitrEnabled: true)")
+            errors.append(f"{tw}.pitrConfig: not allowed with {how}: the restore uses the backup "
+                          "sourceBackupName names; remove pitrConfig, or set pitrEnabled: true")
         if "bestEffort" in tv:
-            errors.append(f"{tw}.bestEffort: not allowed with pitrEnabled: false (it belongs to a point-in-time recovery)")
+            errors.append(f"{tw}.bestEffort: not allowed with {how} (it belongs to a point-in-time recovery; "
+                          "set pitrEnabled: true)")
         if "sourceBackupName" not in sv:
-            errors.append(f"{sw}.sourceBackupName is required with pitrEnabled: false (the backup to restore)")
-        if not same_ns:
-            errors.append(f"{w}.targetClusterConfig: pitrEnabled: false restores inside the source namespace only "
-                          f"(spec.sourceBackup names a PostgresBackup of the namespace the restore runs in): the source is "
-                          f"{sc}/{sns}, the target {tc}/{tns}; use pitrEnabled: true (pitrConfig.type latest, time, lsn or "
-                          "transaction) to restore into another namespace or cluster")
+            errors.append(f"{sw}.sourceBackupName is required with {how}: give sourceBackupName, or set pitrEnabled: true with pitrConfig (point-in-time recovery)")
     elif en == "true":
         if "pitrConfig" not in tentry:
             errors.append(f"{tw}.pitrConfig is required with pitrEnabled: true (at least pitrConfig: {{type: latest}})")

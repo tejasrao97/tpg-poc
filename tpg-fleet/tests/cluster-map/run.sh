@@ -47,6 +47,8 @@ clusters:
   aks-tpg-poc-01:
     operator:
       version: v4.5.0
+    cluster:
+      allowInPlaceRestore: true   # tpg-restore: the in-place pair below (validate-params.sh reads it)
     instances:
       orders-db:
         instance:
@@ -287,7 +289,7 @@ invalid "delete-instance: a confirm that differs is refused" "confirm must repea
 RESTORE_BACKUP_MAP='- sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {sourceBackupName: orders-db-full-1}}}}
   targetClusterConfig: {aks-tpg-poc-02: {pg-orders: {orders-db-dr: {pitrEnabled: false}}}}'
 vp restore P_CLUSTER_MAP="$RESTORE_BACKUP_MAP"
-invalid "restore: a named backup into another cluster is refused before the run" "pitrEnabled: false restores inside the source namespace only"
+valid "restore: a named backup into another cluster is valid (Round 23 phase 6a follow-up)"
 vp restore P_CLUSTER_MAP='- sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {sourceBackupName: orders-db-full-1}}}}
   targetClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {pitrEnabled: false, confirm: orders-db}}}}' P_DRY_RUN=false
 valid "restore: a named backup in place with confirm is valid"

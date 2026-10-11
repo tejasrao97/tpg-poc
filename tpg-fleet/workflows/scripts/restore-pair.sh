@@ -12,9 +12,9 @@
 # STUB of phase 6a: it makes the template, the validation and the batching testable end to end. It
 # records the planned pair as SKIPPED (reason PENDING_6B) and changes nothing, whatever dryRun says.
 # Phase 6b replaces the body: it resolves the source (instance or backup; stanza, location, version and
-# flavour), checks the matrix (RESTORE_FLAVOUR_UNSUPPORTED, RESTORE_VERSION_LOWER) and the in-place
-# rule (clusters.<cluster>.cluster.allowInPlaceRestore in clusters/fleet.yaml, default false, with
-# confirm), prepares the target (namespace, fleet entry, backup location and its Secret), renders the
+# flavour), checks the matrix (RESTORE_FLAVOUR_UNSUPPORTED, RESTORE_VERSION_LOWER; the in-place rule,
+# clusters.<cluster>.cluster.allowInPlaceRestore, is checked earlier, by the validate step, which refuses
+# the whole run), prepares the target (namespace, fleet entry, backup location and its Secret), renders the
 # PostgresRestore, stops there for a dry run, and otherwise applies it and waits for the restore and for
 # the instance to run. The result key stays result.<target cluster>.<target instance>.
 WF="$1"

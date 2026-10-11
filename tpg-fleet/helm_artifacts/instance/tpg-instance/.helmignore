@@ -1,0 +1,3 @@
+# Files the chart does not package or render. restore-specs/ holds the spec files of tpg-restore
+# (README.md there); the chart never reads them.
+restore-specs/

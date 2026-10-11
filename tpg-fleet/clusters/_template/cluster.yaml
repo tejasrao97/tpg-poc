@@ -9,7 +9,8 @@ cluster:
   # Round 23: may tpg-restore overwrite an instance of this cluster in place (the target of a pair is
   # the source instance itself)? false refuses it however the pair is
   # confirmed; set true under clusters.<name>.cluster in clusters/fleet.yaml for the clusters where an
-  # in-place restore is wanted. Read on the hub by the restore step, not rendered. The pair still needs
+  # in-place restore is wanted. Read on the hub by the validate step of tpg-restore, which refuses the
+  # whole run (IN_PLACE_NOT_ALLOWED) when a pair restores in place on a cluster without it; not rendered. The pair still needs
   # confirm (the instance name) for a real restore (dryRun=false). Restoring into another instance or
   # namespace is not in place and needs no flag.
   allowInPlaceRestore: false

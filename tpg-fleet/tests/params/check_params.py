@@ -388,12 +388,18 @@ if jsonschema is not None:
         out["pitrConfig"].update(kw)
         return out
 
+    RSD = "helm_artifacts/instance/tpg-instance/restore-specs/"
     good = {
         "latest": [rp(None, LATEST)], "time": [rp(None, TIME)], "lsn": [rp(None, LSN)], "transaction": [rp(None, XID)],
         "a named backup in the same namespace": [rp({"sourceBackupName": "b-full"}, {"pitrEnabled": False}, tgt=("c1", "pg-a", "b"), src=("c1", "pg-a", "a"))],
+        "a named backup into another namespace": [rp({"sourceBackupName": "b-full"}, {"pitrEnabled": False}, tgt=("c1", "pg-b", "b"), src=("c1", "pg-a", "a"))],
+        "a named backup into another cluster": [rp({"sourceBackupName": "b-full"}, {"pitrEnabled": False})],
+        "a named backup with pitrEnabled absent (the default is false)": [rp({"sourceBackupName": "b-full"}, {})],
+        "a named backup with pitrEnabled absent and other keys": [rp({"sourceBackupName": "b-full"}, {"confirm": "b", "postRestoreBackup": True})],
         "in place": [rp(None, with_(LATEST, confirm="a"), src=("c1", "pg-a", "a"), tgt=("c1", "pg-a", "a"))],
         "a spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.yaml"]))],
-        "a repo spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:clusters/a.yaml"]))],
+        "a repo spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:" + RSD + "a.yaml"]))],
+        "a repo spec file in a subfolder, .yml": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:" + RSD + "team/a.yml"]))],
         "a label, location and stanza": [rp(None, with_cfg(TIME, sourceBackupConfig={"srcBackupLabel": "20260915-020000F_20260916-010000I",
                                                                                   "srcBackupLocationName": "loc", "srcStanzaName": "pg-a-a-0000"}))],
         "flags as strings": [rp(None, with_(LATEST, skipMinorVersionCheck="true", postRestoreBackup=False))],
@@ -412,7 +418,8 @@ if jsonschema is not None:
         "an unknown source key": [rp({"sourceBackup": "x"}, LATEST)],
         "an unknown target key": [rp(None, with_(LATEST, pitrEnable=True))],
         "an unknown pitrConfig key": [rp(None, with_cfg(LATEST, taget="x"))],
-        "no pitrEnabled": [rp(None, {"pitrConfig": {"type": "latest"}})],
+        "pitrConfig with pitrEnabled absent (the default is false)": [rp({"sourceBackupName": "b-full"}, {"pitrConfig": {"type": "latest"}})],
+        "bestEffort with pitrEnabled absent (the default is false)": [rp({"sourceBackupName": "b-full"}, {"bestEffort": True})],
         "pitrEnabled not a boolean": [rp(None, with_(LATEST, pitrEnabled="maybe"))],
         "pitrEnabled false with pitrConfig": [rp(None, {"pitrEnabled": False, "pitrConfig": {"type": "latest"}})],
         "pitrEnabled false with bestEffort": [rp(None, {"pitrEnabled": False, "bestEffort": True})],
@@ -439,6 +446,12 @@ if jsonschema is not None:
         "a spec file that is a string": [rp(None, with_(LATEST, targetInstanceSpecFilePath="./a.yaml"))],
         "two spec files": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.yaml", "./b.yaml"]))],
         "a spec file that is not yaml": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.txt"]))],
+        "a repo spec file outside restore-specs": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:clusters/a.yaml"]))],
+        "a repo spec file in the patches folder": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:helm_artifacts/instance/tpg-instance/patches/a.yaml"]))],
+        "a repo spec file with ..": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:" + RSD + "../patches/a.yaml"]))],
+        "an absolute repo spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:/" + RSD + "a.yaml"]))],
+        "a repo spec file with //": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:" + RSD + "/a.yaml"]))],
+        "the README of restore-specs as spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:" + RSD + "README.md"]))],
         "a spec file entry YAML reads as a mapping ([repo: x.yaml])": [rp(None, with_(LATEST, targetInstanceSpecFilePath=[{"repo": "a.yaml"}]))],
         "a confirm that is not a name": [rp(None, with_(LATEST, confirm="Bad_Name"))],
         "postRestoreBackup not a boolean": [rp(None, with_(LATEST, postRestoreBackup="yes please"))],
@@ -448,6 +461,15 @@ if jsonschema is not None:
     }
     for ns_ in list(keys["instance"]["namespace"]["reserved"]) + ["kube-other"]:
         bad[f"the reserved target namespace {ns_}"] = [rp(None, LATEST, tgt=("c2", ns_, "b"))]
+    # refused by the validator only: the schema cannot relate the two sides of a pair
+    vbad = {
+        "a named backup (pitrEnabled false) without sourceBackupName": [rp(None, {"pitrEnabled": False})],
+        "a named backup (pitrEnabled absent) without sourceBackupName": [rp(None, {})],
+        "a spec file for an in-place restore": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.yaml"]), src=("c1", "pg-a", "a"), tgt=("c1", "pg-a", "a"))],
+    }
+    for what, m in vbad.items():
+        if not restore_validate(m):
+            problems.append(f"clustermap.py restore accepts {what}")
     for what, m in good.items():
         for e in rv.iter_errors(m):
             problems.append(f"clustermap-restore.schema.json refuses {what}: {e.message}")

@@ -37,7 +37,7 @@ items:
               sourceBackupName:
                 type: string
                 pattern: ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$
-                description: 'The PostgresBackup to restore, in the namespace of the source instance. Mandatory with pitrEnabled false (the restore uses that backup: PostgresRestore spec.sourceBackup.name, inside the source namespace only); with pitrEnabled true it only names the backup that gives the backup location and the stanza when the source instance no longer exists [String (name)]'
+                description: 'The PostgresBackup to restore, in the namespace of the source instance. Mandatory when the target restores a named backup (pitrEnabled false, which is the default when pitrEnabled is absent): PostgresRestore spec.sourceBackup.name, into the same namespace, another namespace or another cluster (the workflow re-creates the source PostgresBackupLocation in the target namespace, and the operator syncs the backups of that name there). With pitrEnabled true it only names the backup that gives the backup location and the stanza when the source instance no longer exists [String (name)]'
       description: 'The instance to restore from: <cluster>: <namespace>: <instance>: {sourceBackupName}, exactly one of each'
     targetClusterConfig:
       type: object
@@ -84,7 +84,8 @@ items:
                 - false
                 - 'true'
                 - 'false'
-                description: 'Mandatory. true: point-in-time recovery from the backup repository (PostgresRestore spec.pitr; pitrConfig.type says to where); false: restore the backup named by sourceBackupName of the source (spec.sourceBackup) [Boolean]'
+                description: 'Default false. true: point-in-time recovery from the backup repository (PostgresRestore spec.pitr; pitrConfig.type says to where); false, or absent: restore the backup named by sourceBackupName of the source (spec.sourceBackup), which is then mandatory [Boolean]'
+                default: false
               pitrConfig:
                 type: object
                 additionalProperties: false
@@ -140,10 +141,10 @@ items:
                 maxItems: 1
                 items:
                   type: string
-                  pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
+                  pattern: ^((/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml|repo:helm_artifacts/instance/tpg-instance/restore-specs/([A-Za-z0-9_@+][A-Za-z0-9_.@+-]*/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)$
                   not:
                     pattern: ^repo:helm_artifacts/operator/(patches|overlays)/clusters/
-                description: 'A new target only: one file with exactly one kind: Postgres document, in brackets, [./orders-dr.yaml] (a file of the submitting machine, its contents in patchFiles) or [repo:<path>] in the fleet repository. It becomes the instance spec of the new target (spec.targetInstance.spec). Without it a new target copies the source instance''s entry of clusters/fleet.yaml, and it is mandatory when the source is not in fleet.yaml. Refused for an existing target [List (one file path)]'
+                description: 'A new target only: one file with exactly one kind: Postgres document, in brackets, [./orders-dr.yaml] (a file of the submitting machine, its contents in patchFiles) or [repo:helm_artifacts/instance/tpg-instance/restore-specs/<file>] in the fleet repository (that folder only). It becomes the instance spec of the new target (spec.targetInstance.spec). Without it a new target copies the source instance''s entry of clusters/fleet.yaml, and it is mandatory when the source is not in fleet.yaml. Refused for an existing target [List (one file path)]'
               confirm:
                 type: string
                 pattern: ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$
@@ -162,17 +163,16 @@ items:
                 - 'true'
                 - 'false'
                 description: true takes a full backup of the target once the restored instance runs (default false) [Boolean]
-            required:
-            - pitrEnabled
             allOf:
             - if:
-                required:
-                - pitrEnabled
-                properties:
-                  pitrEnabled:
-                    enum:
-                    - false
-                    - 'false'
+                not:
+                  required:
+                  - pitrEnabled
+                  properties:
+                    pitrEnabled:
+                      enum:
+                      - true
+                      - 'true'
               then:
                 not:
                   anyOf:

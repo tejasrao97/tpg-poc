@@ -501,11 +501,11 @@ instance:
 restore:
   source:
     sourceBackupName:
-      doc: "The PostgresBackup to restore, in the namespace of the source instance. Mandatory with pitrEnabled false (the restore uses that backup: PostgresRestore spec.sourceBackup.name, inside the source namespace only); with pitrEnabled true it only names the backup that gives the backup location and the stanza when the source instance no longer exists"
+      doc: "The PostgresBackup to restore, in the namespace of the source instance. Mandatory when the target restores a named backup (pitrEnabled false, which is the default when pitrEnabled is absent): PostgresRestore spec.sourceBackup.name, into the same namespace, another namespace or another cluster (the workflow re-creates the source PostgresBackupLocation in the target namespace, and the operator syncs the backups of that name there). With pitrEnabled true it only names the backup that gives the backup location and the stanza when the source instance no longer exists"
       type: k8sName
   target:
     pitrEnabled:
-      doc: "Mandatory. true: point-in-time recovery from the backup repository (PostgresRestore spec.pitr; pitrConfig.type says to where); false: restore the backup named by sourceBackupName of the source (spec.sourceBackup)"
+      doc: "Default false. true: point-in-time recovery from the backup repository (PostgresRestore spec.pitr; pitrConfig.type says to where); false, or absent: restore the backup named by sourceBackupName of the source (spec.sourceBackup), which is then mandatory"
       type: boolean
     pitrConfig.type:
       doc: "pitrEnabled true, mandatory: latest (newest WAL), time (pitrConfig.timestamp), lsn or transaction (pitrConfig.target)"
@@ -530,9 +530,9 @@ restore:
       doc: "pitrEnabled true: mandatory for time, lsn and transaction (true: recover as far as the WAL allows when the target is invalid or not reached; false: fail instead), refused for latest and with pitrEnabled false (spec.pitr.bestEffort)"
       type: boolean
     targetInstanceSpecFilePath:
-      doc: "A new target only: one file with exactly one kind: Postgres document, in brackets, [./orders-dr.yaml] (a file of the submitting machine, its contents in patchFiles) or [repo:<path>] in the fleet repository. It becomes the instance spec of the new target (spec.targetInstance.spec). Without it a new target copies the source instance's entry of clusters/fleet.yaml, and it is mandatory when the source is not in fleet.yaml. Refused for an existing target"
+      doc: "A new target only: one file with exactly one kind: Postgres document, in brackets, [./orders-dr.yaml] (a file of the submitting machine, its contents in patchFiles) or [repo:helm_artifacts/instance/tpg-instance/restore-specs/<file>] in the fleet repository (that folder only). It becomes the instance spec of the new target (spec.targetInstance.spec). Without it a new target copies the source instance's entry of clusters/fleet.yaml, and it is mandatory when the source is not in fleet.yaml. Refused for an existing target"
       type: patchFile
-      repoDir: ""
+      repoDir: helm_artifacts/instance/tpg-instance/restore-specs/
     confirm:
       doc: "The target instance name, repeated. Mandatory for a real restore (dryRun false) into an existing instance, in place or another one: the restore overwrites its data. A name that is not the target instance is always refused"
       type: name

@@ -149,11 +149,25 @@ invalid "a misspelled target key is refused with the closest key" "unknown key p
 rm_run "$(X 'sourceBackupName: Bad_Name' "$LATEST")"
 invalid "a source backup name that is not a Kubernetes name is refused" "clusterMap[0].sourceClusterConfig.aks-tpg-poc-01.pg-orders.orders-db.sourceBackupName" "Kubernetes object name"
 rm_run "$(X '' $'pitrConfig:\n  type: latest')"
-invalid "pitrEnabled is mandatory" "clusterMap[0].targetClusterConfig.aks-tpg-poc-02.pg-orders-dr.orders-db-dr.pitrEnabled is required"
+invalid "pitrConfig without pitrEnabled is refused (pitrEnabled defaults to false)" "orders-db-dr.pitrConfig: not allowed with pitrEnabled: false (pitrEnabled is absent and defaults to false)" "set pitrEnabled: true"
 rm_run "$(X '' $'pitrEnabled: maybe\npitrConfig:\n  type: latest')"
 invalid "pitrEnabled is true or false" "pitrEnabled: 'maybe' must be true or false"
 rm_run "$(X '' '')"
-invalid "a target without keys is refused" "pitrEnabled is required"
+invalid "a target without keys is a named-backup restore, so sourceBackupName is required (both ways out named)" \
+  "clusterMap[0].sourceClusterConfig.aks-tpg-poc-01.pg-orders.orders-db.sourceBackupName is required with pitrEnabled: false (pitrEnabled is absent and defaults to false)" \
+  "give sourceBackupName" "set pitrEnabled: true with pitrConfig"
+rm_run "$(X "$SRCB" '')"
+valid "a target without keys and a sourceBackupName is a named-backup restore (pitrEnabled defaults to false)"
+field "pitrEnabled absent: the method is backup" '.method' "backup"
+field "pitrEnabled absent: the backup name" '.source.backupName' "orders-db-full-20260914000000"
+field "pitrEnabled absent: pitr is off" '.pitr.enabled' "false"
+rm_run "$(X "$SRCB" 'confirm: orders-db-dr')"
+valid "other keys without pitrEnabled keep the default (named backup)"
+field "pitrEnabled absent with other keys: the method is backup" '.method' "backup"
+rm_run "$(X "$SRCB" 'bestEffort: true')"
+invalid "bestEffort without pitrEnabled is refused (named backup by default)" "orders-db-dr.bestEffort: not allowed with pitrEnabled: false (pitrEnabled is absent and defaults to false)"
+rm_run "$(X '' 'confirm: orders-db-dr')"
+invalid "an absent pitrEnabled without sourceBackupName is refused" "sourceBackupName is required with pitrEnabled: false (pitrEnabled is absent" "give sourceBackupName, or set pitrEnabled: true with pitrConfig"
 
 echo "== 1. pitrEnabled false: the backup the source names"
 rm_run "$(X "$SRCB" "$BACKUP" | sed 's/aks-tpg-poc-02/aks-tpg-poc-01/; s/pg-orders-dr/pg-orders/')"
@@ -168,9 +182,20 @@ invalid "pitrEnabled false with pitrConfig is refused" "targetClusterConfig.aks-
 rm_run "$(X "$SRCB" $'pitrEnabled: false\nbestEffort: true' | sed 's/aks-tpg-poc-02/aks-tpg-poc-01/; s/pg-orders-dr/pg-orders/')"
 invalid "pitrEnabled false with bestEffort is refused" "orders-db-dr.bestEffort: not allowed with pitrEnabled: false"
 rm_run "$(X "$SRCB" "$BACKUP")"
-invalid "a named backup into another cluster is refused" "pitrEnabled: false restores inside the source namespace only" "pitrEnabled: true"
+valid "a named backup into another namespace of another cluster is accepted"
+field "named backup, other cluster: the method" '.method' "backup"
+field "named backup, other cluster: the scope" '[.inPlace, .sameCluster, .sameNamespace] | @csv' "false,false,false"
+field "named backup, other cluster: the backup name" '.source.backupName' "orders-db-full-20260914000000"
 rm_run "$(X "$SRCB" "$BACKUP" | sed 's/aks-tpg-poc-02/aks-tpg-poc-01/')"
-invalid "a named backup into another namespace is refused" "pitrEnabled: false restores inside the source namespace only"
+valid "a named backup into another namespace of the same cluster is accepted"
+field "named backup, other namespace: the scope" '[.inPlace, .sameCluster, .sameNamespace] | @csv' "false,true,false"
+rm_run "$(X "$SRCB" "$BACKUP" | sed 's/pg-orders-dr/pg-orders/')"
+valid "a named backup into the same namespace of another cluster is accepted"
+field "named backup, same namespace name on another cluster: not the same namespace" '[.sameCluster, .sameNamespace] | @csv' "false,false"
+rm_run "$(X "$SRCB" "$BACKUP")"
+[[ "$OUT" != *"restores inside the source namespace only"* ]] && ok "the static refusal of a named backup into another namespace or cluster is gone" || bad "the refusal text is still produced" "$OUT"
+rm_run "$(X '' "$BACKUP")"
+invalid "a named backup into another cluster still needs sourceBackupName" "orders-db.sourceBackupName is required with pitrEnabled: false"
 rm_run "$(X "$SRCB" "$BACKUP" | sed 's/aks-tpg-poc-02/aks-tpg-poc-01/; s/pg-orders-dr/pg-orders/')"
 valid "a named backup into a new instance of the source namespace is accepted"
 
@@ -261,9 +286,36 @@ echo "== 1. targetInstanceSpecFilePath, confirm and the flags"
 rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [./orders-dr.yaml]')"
 valid "one local spec file in brackets is accepted"
 field "the spec file" '.target.specFile' "./orders-dr.yaml"
+RSD=helm_artifacts/instance/tpg-instance/restore-specs
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:'"$RSD"$'/orders-dr.yaml]')"
+valid "one repo: spec file in the restore-specs folder is accepted"
+field "the repo: spec file" '.target.specFile' "repo:$RSD/orders-dr.yaml"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:'"$RSD"$'/team/orders-dr.yml]')"
+valid "a .yml spec file in a subfolder of restore-specs is accepted"
+rm_run "$(X "$SRCB" "$BACKUP"$'\ntargetInstanceSpecFilePath: [repo:'"$RSD"$'/orders-dr.yaml]')"
+valid "a spec file with a named-backup restore into another namespace is accepted"
 rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:clusters/restore/orders-dr.yaml]')"
-valid "one repo: spec file is accepted"
-field "the repo: spec file" '.target.specFile' "repo:clusters/restore/orders-dr.yaml"
+invalid "a repo: spec file outside the restore-specs folder is refused" "must be a file under $RSD/ of the fleet repository"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/patches/orders-dr.yaml]')"
+invalid "a spec file in the patches folder is refused" "must be a file under $RSD/ of the fleet repository"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specsx/orders-dr.yaml]')"
+invalid "a folder that only starts like restore-specs is refused" "must be a file under $RSD/ of the fleet repository"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:'"$RSD"$'/../patches/orders-dr.yaml]')"
+invalid "a repo: spec file with .. is refused" "(no leading /, no ..)"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:/'"$RSD"$'/orders-dr.yaml]')"
+invalid "an absolute repo: spec file is refused" "(no leading /, no ..)"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance//restore-specs/orders-dr.yaml]')"
+invalid "a repo: spec file with // is refused" "(no leading /, no ..)"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:'"$RSD"$'//orders-dr.yaml]')"
+invalid "a repo: spec file with // inside the folder is refused" "(no leading /, no ..)"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:'"$RSD"$'/README.md]')"
+invalid "the README of the restore-specs folder is not a spec file" "must be repo:<path of a .yaml or .yml file"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:'"$RSD"$'/orders-dr.json]')"
+invalid "a repo: spec file that is not .yaml or .yml is refused" "must be repo:<path of a .yaml or .yml file"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:'"$RSD"$'/]')"
+invalid "the restore-specs folder itself is refused" "must be repo:<path of a .yaml or .yml file"
+rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:helm_artifacts/operator/patches/clusters/aks-tpg-poc-01/x.yaml]')"
+invalid "a per-cluster operator copy is refused too" "restore-specs"
 rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: ./orders-dr.yaml')"
 invalid "a spec file that is not in brackets is refused with the list syntax" "targetInstanceSpecFilePath: './orders-dr.yaml' is not a list" "[./orders-dr.yaml]"
 rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo: clusters/restore/orders-dr.yaml]')"
@@ -343,10 +395,16 @@ fi
 exit 0
 STUB
 chmod +x "$TMP/bin/kubectl"
+# the fleet repository the validate step clones to read clusters.<c>.cluster.allowInPlaceRestore
+mkdir -p "$TMP/fleetrepo/clusters/_template"
+cp "$ROOT/clusters/_template/cluster.yaml" "$TMP/fleetrepo/clusters/_template/cluster.yaml"
+fleet() { printf '%s\n' "$1" > "$TMP/fleetrepo/clusters/fleet.yaml"; }
+fleet $'clusters:\n  aks-tpg-poc-01:\n    cluster:\n      allowInPlaceRestore: true\n    instances: {}\n  aks-tpg-poc-02:\n    instances: {}'
 sed -e "s#source /scripts/lib.sh#source $ROOT/workflows/scripts/lib.sh#" \
+    -e "/^source .*lib.sh\$/a git_clone() { [[ ! -f $TMP/clone-fails ]] || return 128; echo clone >> $TMP/clones; rm -rf \"\$1\"; cp -r $TMP/fleetrepo \"\$1\"; }" \
     "$ROOT/workflows/scripts/validate-params.sh" > "$TMP/validate.sh"
 vp() {  # vp VAR=VALUE... -> runs validate-params.sh restore; output in $OUT, status in $RC; /tmp/pairs.json is read back
-  rm -rf "$TMP/work"; rm -f /tmp/pairs.json
+  rm -rf "$TMP/work"; rm -f /tmp/pairs.json "$TMP/clones"
   RC=0; OUT="$(cd "$TMP" && env -i PATH="$TMP/bin:$PATH" HOME="$TMP" TPG_WORK="$TMP/work" "$@" \
     bash "$TMP/validate.sh" restore 2>&1)" || RC=$?
 }
@@ -365,6 +423,8 @@ vp P_CLUSTER_MAP=""
 vinvalid "restore: clusterMap is mandatory" "clusterMap is mandatory" "sourceClusterConfig"
 vp P_CLUSTER_MAP='aks-tpg-poc-01: {instances: {orders-db: {}}}'
 vinvalid "restore: a map of clusters is refused with the pair syntax" "clusterMap must be a list of pairs"
+vp P_CLUSTER_MAP="$MAP"
+[[ ! -e "$TMP/clones" ]] && ok "restore: a run without an in-place pair does not clone the fleet repository" || bad "restore: cloned without an in-place pair"
 vp P_CLUSTER_MAP="$MAP" P_ROLLOUT_MODE=fast
 vinvalid "restore: rolloutMode takes canary, batches or all" "rolloutMode must be one of: canary batches all"
 vp P_CLUSTER_MAP="$MAP" P_ROLLOUT_MODE=canary P_MAX_PARALLEL=3 P_PUSH_MODE=pr P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false P_TIMEOUT=600 P_PR_TIMEOUT=900
@@ -385,6 +445,42 @@ vp P_CLUSTER_MAP="$(IP "$SRCB" "$BACKUP")" P_DRY_RUN=false
 vinvalid "restore: an in-place pair without confirm is refused when dryRun is false" "orders-db.confirm is required"
 vp P_CLUSTER_MAP="$(IP "$SRCB" "$BACKUP"$'\nconfirm: orders-db')" P_DRY_RUN=false
 vvalid "restore: an in-place pair with confirm is accepted when dryRun is false"
+# the in-place guard: clusters.<c>.cluster.allowInPlaceRestore (fleet.yaml override, else the template's false)
+IPC="$(IP "$SRCB" "$BACKUP"$'\nconfirm: orders-db')"
+vp P_CLUSTER_MAP="$IPC"
+vvalid "restore: an in-place pair on a cluster with allowInPlaceRestore: true is accepted (dryRun true)"
+[[ -e "$TMP/clones" ]] && ok "restore: the fleet repository was read to check it" || bad "restore: no clone for an in-place pair"
+vp P_CLUSTER_MAP="$IPC" P_DRY_RUN=false
+vvalid "restore: an in-place pair on a cluster with allowInPlaceRestore: true is accepted (dryRun false)"
+IP2="$(pair aks-tpg-poc-02 pg-orders orders-db "$SRCB" aks-tpg-poc-02 pg-orders orders-db $'pitrEnabled: false\nconfirm: orders-db')"
+vp P_CLUSTER_MAP="$IP2"
+vinvalid "restore: an in-place pair on a cluster without the setting (template default false) refuses the run, also in a dry run" \
+  "IN_PLACE_NOT_ALLOWED" "cluster aks-tpg-poc-02" "clusters.aks-tpg-poc-02.cluster.allowInPlaceRestore: true in clusters/fleet.yaml" "clusterMap[0]" "before any pair starts"
+vp P_CLUSTER_MAP="$IP2" P_DRY_RUN=false
+vinvalid "restore: the same refusal with dryRun false" "IN_PLACE_NOT_ALLOWED" "clusters.aks-tpg-poc-02.cluster.allowInPlaceRestore: true"
+fleet $'clusters:\n  aks-tpg-poc-01:\n    cluster:\n      allowInPlaceRestore: false\n    instances: {}'
+vp P_CLUSTER_MAP="$IPC"
+vinvalid "restore: allowInPlaceRestore: false in fleet.yaml refuses the run" "IN_PLACE_NOT_ALLOWED" "cluster aks-tpg-poc-01" "clusters.aks-tpg-poc-01.cluster.allowInPlaceRestore: true"
+fleet $'clusters:\n  aks-tpg-poc-02:\n    instances: {}'
+vp P_CLUSTER_MAP="$IPC"
+vinvalid "restore: a cluster without an entry in fleet.yaml refuses the run" "IN_PLACE_NOT_ALLOWED" "cluster aks-tpg-poc-01"
+fleet $'clusters:\n  aks-tpg-poc-01:\n    cluster:\n      allowInPlaceRestore: "yes"\n    instances: {}'
+vp P_CLUSTER_MAP="$IPC"
+vinvalid "restore: only true allows it (any other value refuses)" "IN_PLACE_NOT_ALLOWED"
+fleet $'clusters:\n  aks-tpg-poc-01:\n    cluster:\n      allowInPlaceRestore: true\n    instances: {}\n  aks-tpg-poc-02:\n    instances: {}'
+vp P_CLUSTER_MAP="$( { printf '%s\n' "$IPC"; printf '%s\n' "$IP2"; } )"
+vinvalid "restore: one pair of two on a cluster without the setting refuses the whole run" "IN_PLACE_NOT_ALLOWED" "cluster aks-tpg-poc-02" "clusterMap[1]"
+grep -qF "aks-tpg-poc-01" <<<"$(grep -F IN_PLACE_NOT_ALLOWED <<<"$OUT")" && bad "restore: the allowed cluster is named in the refusal" "$OUT" || ok "restore: only the cluster without the setting is named"
+vp P_CLUSTER_MAP="$( { printf '%s\n' "$IPC"; pair aks-tpg-poc-01 pg-x x-db '' aks-tpg-poc-02 pg-x x-db2 "$LATEST"; } )"
+vvalid "restore: a not-in-place pair next to an allowed in-place pair is accepted"
+vp P_CLUSTER_MAP="$(X "$SRCB" "$BACKUP" | sed 's/aks-tpg-poc-02/aks-tpg-poc-01/; s/pg-orders-dr/pg-orders/')"
+vvalid "restore: a named backup into a new instance of the source namespace needs no allowInPlaceRestore"
+touch "$TMP/clone-fails"
+vp P_CLUSTER_MAP="$IPC"
+vinvalid "restore: an unreadable fleet repository refuses the run (fail closed)" "IN_PLACE_NOT_ALLOWED" "clusters/fleet.yaml could not be read"
+vp P_CLUSTER_MAP="$MAP"
+vvalid "restore: an unreadable fleet repository does not matter without an in-place pair"
+rm -f "$TMP/clone-fails"
 vp P_CLUSTER_MAP="$(X '' "$LATEST"$'\npitrConfig2: 1')"
 vinvalid "restore: a bad key is reported with the pair and the key path" "clusterMap[0].targetClusterConfig.aks-tpg-poc-02.pg-orders-dr.orders-db-dr: unknown key pitrConfig2"
 vp P_CLUSTER_MAP="$MAP" P_SOURCE_CLUSTER=aks-tpg-poc-01
@@ -404,7 +500,7 @@ vp P_CLUSTER_MAP="$SPEC_MAP" P_PATCH_FILES="$PF_KIND"
 vinvalid "restore: a spec file of another kind is refused" "exactly one kind: Postgres document"
 vp P_CLUSTER_MAP="$MAP" P_PATCH_FILES="$PF_OK"
 vinvalid "restore: patchFiles that no spec file key names are refused" "patchFiles carries orders-dr.yaml, which no path input or clusterMap key names"
-vp P_CLUSTER_MAP="$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:clusters/restore/orders-dr.yaml]')"
+vp P_CLUSTER_MAP="$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:'"$RSD"$'/orders-dr.yaml]')"
 vvalid "restore: a repo: spec file needs nothing in patchFiles (the plan step reads the repository)"
 
 # ---- part 3: pack-patch-files.sh packs the spec file of a pair
@@ -416,7 +512,7 @@ RC=0; OUT="$(cd "$TMP/pack" && TPG_FLEET_DIR="$ROOT" bash "$ROOT/scripts/submit/
 if [[ "$RC" -eq 0 ]] && yq -r '.patchFiles' "$TMP/pack/params.yaml" | jq -e 'keys == ["./orders-dr.yaml"] or keys == ["orders-dr.yaml"]' >/dev/null; then
   ok "pack: the spec file named by a pair of the clusterMap is packed into patchFiles"
 else bad "pack: spec file" "$OUT"; fi
-{ printf 'clusterMap: |\n'; X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo: clusters/restore/orders-dr.yaml]' | sed 's/^/  /'; } > "$TMP/pack/ws.yaml"
+{ printf 'clusterMap: |\n'; X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo: '"$RSD"$'/orders-dr.yaml]' | sed 's/^/  /'; } > "$TMP/pack/ws.yaml"
 RC=0; OUT="$(cd "$TMP/pack" && TPG_FLEET_DIR="$ROOT" bash "$ROOT/scripts/submit/pack-patch-files.sh" -o ws.yaml 2>&1)" || RC=$?
 [[ "$RC" -ne 0 ]] && grep -qF 'targetInstanceSpecFilePath: repo:<file path> "check for white spaces in between"' <<<"$OUT" \
   && ok "pack: [repo: x.yaml] in a pair gets the whitespace message" || bad "pack: whitespace" "$OUT"

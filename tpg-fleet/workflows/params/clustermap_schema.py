@@ -281,7 +281,8 @@ RESTORE_EXAMPLE = """\
 # yaml-language-server: $schema=clustermap-restore.schema.json
 
 # 1. In place, from a named backup (no point-in-time recovery): the source and the target are the same
-#    instance; confirm repeats its name (needed when dryRun is false)
+#    instance; confirm repeats its name (needed when dryRun is false), and the cluster must allow it:
+#    clusters.aks-tpg-poc-01.cluster.allowInPlaceRestore: true in clusters/fleet.yaml
 - sourceClusterConfig:
     aks-tpg-poc-01:
       pg-orders:
@@ -349,7 +350,7 @@ RESTORE_EXAMPLE = """\
             target: 0/3000060
           confirm: shop-db
 
-# 5. A named backup into a new instance of the same namespace
+# 5. A named backup into a new instance of the same namespace (pitrEnabled is false when absent)
 - sourceClusterConfig:
     aks-tpg-poc-01:
       pg-orders:
@@ -358,8 +359,22 @@ RESTORE_EXAMPLE = """\
   targetClusterConfig:
     aks-tpg-poc-01:
       pg-orders:
-        archive-db-restored:
+        archive-db-restored: {}
+
+# 6. A named backup into another namespace of another cluster (pitrEnabled false, spelled out here), with
+#    the spec of the new instance from a file of the fleet repository (repo: paths are limited to
+#    helm_artifacts/instance/tpg-instance/restore-specs/)
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-invoices:
+        invoices-db:
+          sourceBackupName: invoices-db-full-20260914000000
+  targetClusterConfig:
+    aks-tpg-poc-02:
+      pg-invoices-dr:
+        invoices-db-dr:
           pitrEnabled: false
+          targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/invoices-db-dr.yaml]
 """
 
 
@@ -402,10 +417,11 @@ def restore_schema(keys):
     source = _restore_object(_restore_tree(src), {})
     target = _restore_object(_restore_tree(tgt), {"pitrConfig": "Point-in-time recovery: the type and what it needs (pitrEnabled true)",
                                                   "sourceBackupConfig": "The backup repository to recover from; every key is optional where it can be derived"})
-    target["required"] = ["pitrEnabled"]
+    # pitrEnabled is not required: absent means false, a named-backup restore
+    target["properties"]["pitrEnabled"]["default"] = False
 
-    def pitr(on):
-        return {"required": ["pitrEnabled"], "properties": {"pitrEnabled": {"enum": [True, "true"] if on else [False, "false"]}}}
+    def pitr_on():
+        return {"required": ["pitrEnabled"], "properties": {"pitrEnabled": {"enum": [True, "true"]}}}
 
     def typ(t):
         return {"required": ["pitrConfig"], "properties": {"pitrConfig": {"required": ["type"], "properties": {"type": {"const": t}}}}}
@@ -419,8 +435,8 @@ def restore_schema(keys):
 
     # the rules between the keys that a schema can say; the validate step (clustermap.py restore) has all of them
     target["allOf"] = [
-        {"if": pitr(False), "then": {"not": {"anyOf": [has("pitrConfig"), has("bestEffort")]}}},
-        {"if": pitr(True), "then": {"required": ["pitrConfig"], "properties": {"pitrConfig": {"required": ["type"]}}}},
+        {"if": {"not": pitr_on()}, "then": {"not": {"anyOf": [has("pitrConfig"), has("bestEffort")]}}},
+        {"if": pitr_on(), "then": {"required": ["pitrConfig"], "properties": {"pitrConfig": {"required": ["type"]}}}},
         {"if": typ("latest"), "then": {"not": {"anyOf": [has("bestEffort"), has("pitrConfig", "target"), has("pitrConfig", "timestamp"),
                                                            has("pitrConfig", "sourceBackupConfig", "srcBackupLabel")]}}},
         {"if": typ("time"), "then": {"required": ["bestEffort"], "properties": {"pitrConfig": {"required": ["timestamp"], "not": has("target")}}}},
