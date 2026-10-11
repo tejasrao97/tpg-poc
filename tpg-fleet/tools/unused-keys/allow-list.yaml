@@ -10,8 +10,8 @@ chart:
     reason: the cap tpg-day0, tpg-create-instance and tpg-scale-instance apply to readReplicas; read on the hub, not rendered
     readBy: workflows/scripts/discover.sh
   cluster.allowInPlaceRestore:
-    reason: whether tpg-restore may overwrite an instance of the cluster in place (default false); read on the hub by the restore step, not rendered
-    readBy: workflows/scripts/restore-pair.sh
+    reason: whether tpg-restore may overwrite an instance of the cluster in place (default false); read on the hub by the validate step of tpg-restore, which refuses the whole run (IN_PLACE_NOT_ALLOWED), not rendered
+    readBy: workflows/scripts/validate-params.sh
   cluster.name:
     reason: set by the tpg-instances ApplicationSet; selects the instance's entry of clusters/fleet.yaml when the chart reads the current patch files
     readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl

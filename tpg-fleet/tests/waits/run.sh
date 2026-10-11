@@ -72,7 +72,7 @@ RC="$ROOT/workflows/scripts/rotate-cluster.sh"
 grep -q "jq -r \"\$expr\" 2>/dev/null | sha" "$RC" && bad "rotate-cluster.sh still compares with jq -r" || ok "rotate-cluster.sh does not compare with jq -r"
 grep -q "check_namespaces regsecret" "$RC" && grep -q "check_namespaces backup-storage" "$RC" && ok "rotate-cluster.sh checks regsecret and backup-storage with the logged wait" || bad "check_namespaces"
 grep -q "tanzu-postgres-operator\" { print \"0 \"" "$RC" && ok "the operator namespace is checked first" || bad "namespace order"
-grep -q "wait_logged" "$ROOT/workflows/scripts/day0-deploy.sh" "$ROOT/workflows/scripts/restore.sh" "$ROOT/workflows/scripts/rotate-hub.sh" && ok "day0, restore and rotate-hub wait with wait_logged" || bad "other scripts"
+grep -q "wait_logged" "$ROOT/workflows/scripts/day0-deploy.sh" "$ROOT/workflows/scripts/restore-pair.sh" "$ROOT/workflows/scripts/rotate-hub.sh" && ok "day0, restore and rotate-hub wait with wait_logged" || bad "other scripts"
 
 echo
 echo "tests/waits: ${PASS} passed, ${FAIL} failed"

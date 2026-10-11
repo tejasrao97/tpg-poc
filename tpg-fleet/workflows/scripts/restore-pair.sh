@@ -24,6 +24,8 @@
 #  3 PITR: location and stanza come from the live source, else from the source PostgresBackup; a given value
 #    that differs is a WARNING (the given value wins); with neither a live source nor a readable
 #    sourceBackupName they are mandatory (PITR_SOURCE_UNKNOWN). srcBackupLabel is spec.pitr.sourceBackupLocation.set.
+#    (An in-place pair is only possible on a cluster with clusters.<cluster>.cluster.allowInPlaceRestore: true;
+#    the validate step refuses the whole run otherwise, IN_PLACE_NOT_ALLOWED, so no pair gets here without it.)
 #  4 Matrix: standard -> lite is BLOCKED (RESTORE_FLAVOUR_UNSUPPORTED); a lower minor version is BLOCKED
 #    (RESTORE_VERSION_LOWER; with skipMinorVersionCheck a warning), a lower or higher major version is BLOCKED.
 #    Only this pair.

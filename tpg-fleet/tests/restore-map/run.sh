@@ -521,7 +521,7 @@ RC=0; OUT="$(cd "$TMP/pack" && TPG_FLEET_DIR="$ROOT" bash "$ROOT/scripts/submit/
 [[ "$RC" -ne 0 ]] && grep -qF "exactly one kind: Postgres document" <<<"$OUT" \
   && ok "pack: a spec file of another kind is refused before the run" || bad "pack: other kind" "$OUT"
 
-# ---- part 4: the WorkflowTemplate, the gate and the stub entry point
+# ---- part 4: the WorkflowTemplate, the gate and the entry point (the pair itself: tests/restore)
 echo "== 4. template, gate, restore-pair.sh"
 TPL="$ROOT/workflows/templates/tpg-restore.yaml"
 inputs="$(yq -r '.spec.arguments.parameters[].name' "$TPL" | sort | paste -sd' ')"
@@ -559,7 +559,7 @@ LIB
 sed "s#source /scripts/lib.sh#source $TMP/gate/lib.sh#" "$ROOT/workflows/scripts/blocked-gate.sh" > "$TMP/gate/gate.sh"
 rec() { jq -cn --arg k "$1" --arg s "$2" --arg r "$3" '{($k): ({status: $s, reason: $r} | tojson)}'; }
 gate() { RC=0; OUT="$(RECORDS="$1" bash "$TMP/gate/gate.sh" wf ${2:+"$2"} 2>&1)" || RC=$?; }
-gate "$(jq -cn --argjson a "$(rec result.c2.b SUCCEEDED '')" --argjson b "$(rec result.c2.c SKIPPED PENDING_6B)" '$a + $b')" failed
+gate "$(jq -cn --argjson a "$(rec result.c2.b SUCCEEDED '')" --argjson b "$(rec result.c2.c SKIPPED SKIPPED_IN_PROGRESS)" '$a + $b')" failed
 [[ "$RC" -eq 0 ]] && ok "gate failed: SUCCEEDED and SKIPPED pairs pass" || bad "gate pass" "$OUT"
 gate "$(jq -cn --argjson a "$(rec result.c2.b FAILED RESTORE_FAILED)" --argjson b "$(rec result.c2.c SUCCEEDED '')" '$a + $b')" failed
 [[ "$RC" -ne 0 ]] && grep -q "c2.b FAILED RESTORE_FAILED" <<<"$OUT" && ok "gate failed: a FAILED pair fails the run and is named" || bad "gate FAILED" "$OUT"
@@ -577,10 +577,6 @@ record() { printf 'RECORD %s|%s|%s|%s\n' "$1" "$2" "${3:-}" "${4:-}"; }
 result_guard() { :; }
 LIB
 sed "s#source /scripts/lib.sh#source $TMP/stub/lib.sh#" "$ROOT/workflows/scripts/restore-pair.sh" > "$TMP/stub/pair.sh"
-rm_run "$(X '' "$LATEST")"
-RC=0; OUT="$(P_PAIR="$(jq -c '.[0]' "$TMP/out.json")" bash "$TMP/stub/pair.sh" wf 2>&1)" || RC=$?
-[[ "$RC" -eq 0 ]] && grep -q "^RECORD result.aks-tpg-poc-02.orders-db-dr|SKIPPED|PENDING_6B|" <<<"$OUT" \
-  && ok "restore-pair.sh (6a stub) records the planned pair as SKIPPED PENDING_6B under result.<target cluster>.<target instance>" || bad "stub" "$OUT"
 RC=0; OUT="$(P_PAIR='not json' bash "$TMP/stub/pair.sh" wf 2>&1)" || RC=$?
 [[ "$RC" -ne 0 ]] && grep -q "INVALID_PAIR" <<<"$OUT" && ok "restore-pair.sh refuses an input that is not a normalized pair" || bad "stub invalid" "$OUT"
 

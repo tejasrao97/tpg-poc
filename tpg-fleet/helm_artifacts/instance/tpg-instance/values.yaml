@@ -115,7 +115,7 @@ ferret:
 # Values merged after the values patch files (tpg.ctx), so they win over them.
 # Written by tpg-restore only: an instance restored to another cluster copies
 # the source entry with its patch references but gets no FerretDB (D71), so
-# restore.sh writes valuesOverride.ferret.enabled false when a copied values
+# restore-pair.sh writes valuesOverride.ferret.enabled false when a copied values
 # patch turns FerretDB on. A values patch may not set it.
 valuesOverride: {}
 

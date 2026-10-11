@@ -30,7 +30,7 @@ PostgresFerretDocumentDB.
 | PostgresBackupSchedule | `helm_artifacts/instance/tpg-instance`, only with `backup.operatorSchedules` (input `backupSchedule=operator`, D70) |
 | PostgresFerretDocumentDB | `helm_artifacts/instance/tpg-instance`, only with `ferret.enabled` (input `ferret=true`, D71) |
 | PostgresBackup | `workflows/scripts/backup-instance.sh` (inline), and the operator from a PostgresBackupSchedule |
-| PostgresRestore, and the source PostgresBackupLocation copy | `workflows/scripts/restore.sh` (inline) |
+| PostgresRestore, and the source PostgresBackupLocation copy | `workflows/scripts/restore-pair.sh`, rendered through this chart (`helm template ref helm_artifacts/instance/crd-reference`: tpg.prune leaves the zero defaults out) |
 | PostgresVersionUpgrade | `workflows/scripts/postgres-upgrade.sh` (inline) |
 | PostgresVersion | The operator chart (the `tpg-operator` Application) |
 | PostgresMigration | Nothing in the fleet |

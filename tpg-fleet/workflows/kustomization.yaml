@@ -67,7 +67,6 @@ configMapGenerator:
       - scripts/scale-instance.sh
       - scripts/backup-instance.sh
       - scripts/backup-expire.sh
-      - scripts/restore.sh
       - scripts/restore-pair.sh
       - scripts/rotate-cluster.sh
       - scripts/rotate-hub.sh

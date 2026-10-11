@@ -11,8 +11,10 @@
 #                required objects kept; FerretDB readOnly {replicas: 0} dropped
 #                whole; the Postgres spec embedded in PostgresRestore
 #   parity       the objects the workflow scripts write inline (backup-instance.sh,
-#                postgres-upgrade.sh, restore.sh) equal what the reference template
-#                renders for the same spec: they carry no zero default
+#                postgres-upgrade.sh) equal what the reference template renders for the
+#                same spec: they carry no zero default. restore-pair.sh writes none inline:
+#                it renders the PostgresRestore and the location copy through this chart
+#                (checked below; tests/restore checks the rendered objects)
 #   schemas      every reference render and inline object passes kubeconform
 #                -strict against the live CRD schemas (when kubeconform is installed)
 # Requires: helm, yq (mikefarah), python3 with PyYAML; skipped without them.
@@ -157,25 +159,13 @@ heredoc postgres-upgrade.sh 'apply -f - >/dev/null <<YAML || { ifail CREATE_FAIL
 [[ -s "$TMP/pvu.tpl" ]] || bad "postgres-upgrade.sh: the PostgresVersionUpgrade heredoc was not found"
 name=orders-db-upgrade WF=tpg-upgrade-abc i=orders-db TARGET=postgres-18.1 expand "$TMP/pvu.tpl" > "$TMP/pvu.yaml"
 parity "postgres-upgrade.sh" postgresVersionUpgrade "$TMP/pvu.yaml"
-heredoc restore.sh 'tk -n "$DST_NS" apply -f - >/dev/null <<YAML || fail SOURCE_LOCATION_FAILED' > "$TMP/srcbl.tpl"
-for SSL in false true; do
-  SRC_BL=restore-src-c1-orders-db DST_NS=pg-orders-copy SRC_C=c1 I=orders-db WF=tpg-restore-abc SRC_CONTAINER=pg-backups-c1 \
-    SRC_REPO_PATH=/pg-orders-db SRC_ENDPOINT=blob.core.windows.net SRC_SSL="$SSL" expand "$TMP/srcbl.tpl" > "$TMP/srcbl.yaml"
-  parity "restore.sh source backup location (enableSSL ${SSL})" postgresBackupLocation "$TMP/srcbl.yaml"
-done
-# the PostgresRestore block of restore.sh, run with the variables of each mode
-awk '/^NAME="\$\{T\}-restore-/ {on=1} on {print} on && /^\} > "\$WORK\/restore.yaml"$/ {exit}' "$ROOT/workflows/scripts/restore.sh" \
-  | sed 's#> "$WORK/restore.yaml"#> "$OUTFILE"#' > "$TMP/restore-block.sh"
-grep -q 'OUTFILE' "$TMP/restore-block.sh" || bad "restore.sh: the PostgresRestore block was not found"
-printf 'cluster: {name: c2}\ninstance: {name: t, postgresVersion: postgres-17.6, highAvailability: {enabled: false, readReplicas: 0}}\nbackup: {container: pg-backups-c2}\n' > "$TMP/tv.yaml"
-helm template t "$ROOT/helm_artifacts/instance/tpg-instance" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" -f "$TMP/tv.yaml" -n pg-t > "$TMP/target-render.yaml"
-mkdir -p "$TMP/work"; cp "$TMP/target-render.yaml" "$TMP/work/target-render.yaml"
-for row in "time 2026-09-20T08:00:00Z false c1" "latest - true c2" "lsn 0/3000060 false c2" "xid 791 true c1" "backup orders-db-full-1 false c1"; do
-  read -r MODE TARGET BEST DST_C <<<"$row"; [[ "$TARGET" != "-" ]] || TARGET=""
-  ( T=t WF=tpg-restore-abc MODE="$MODE" TARGET="$TARGET" BEST="$BEST" SRC_BL=bl STANZA=pg-orders-db-0000 TARGET_EXISTS=false \
-    SRC_C=c1 DST_C="$DST_C" PGV=postgres-17.6 WORK="$TMP/work" OUTFILE="$TMP/restore.yaml" bash "$TMP/restore-block.sh" )
-  parity "restore.sh PostgresRestore (mode ${MODE}, bestEffort ${BEST}, $( [[ "$DST_C" == c1 ]] && echo same cluster || echo other cluster))" postgresRestore "$TMP/restore.yaml"
-done
+# restore-pair.sh (tpg-restore) has no inline object: it renders the PostgresRestore and the copy of the source
+# backup location through this reference chart, so tpg.prune is the one place that leaves zero defaults out
+RP="$ROOT/workflows/scripts/restore-pair.sh"
+[[ "$(grep -c 'helm template ref "\$REPO/helm_artifacts/instance/crd-reference"' "$RP")" -ge 1 ]] \
+  && grep -q 'render_obj PostgresRestore' "$RP" && grep -q 'render_obj PostgresBackupLocation' "$RP" \
+  && ok "restore-pair.sh renders the PostgresRestore and the source location copy through the reference chart" || bad "restore-pair.sh does not render through crd-reference"
+! grep -qE '^kind: (PostgresRestore|PostgresBackupLocation)' "$RP" && ok "restore-pair.sh writes no PostgresRestore or PostgresBackupLocation inline" || bad "restore-pair.sh still writes an inline object"
 
 echo
 echo "crd-reference: ${PASS} passed, ${FAIL} failed"
