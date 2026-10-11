@@ -1606,9 +1606,11 @@ busy_operations() {
 # in the CRD; _backup_expire_state is the one place that reads it. Verify it on the lab cluster (a lab item of Round 23):
 #   - does the operator keep the object after an expire (phase Expired or Expiring) or delete it? A kept object
 #     with spec.expire=true is not an unfinished operation (busy_operations leaves it out)
-#   - does it write conditions with observedGeneration? _backup_expire_state trusts only conditions whose
-#     observedGeneration is at least metadata.generation: an older Expired=False (a re-run where spec.expire is
-#     already true) is no answer, and without a fresh signal the step waits and times out like for any expire
+#   - does it write conditions with observedGeneration or lastTransitionTime? _backup_expire_state trusts a
+#     condition with observedGeneration only when it is at least metadata.generation; one without it only when its
+#     lastTransitionTime is not older than the patch (BE_SINCE, less 2 minutes for clock skew), or, with neither
+#     field, only when this run set spec.expire. An older Expired=False (a re-run where spec.expire is already
+#     true) is no answer, and without a fresh signal the step waits and times out like for any expire
 BACKUP_EXPIRE_OUTCOME=""; BACKUP_EXPIRE_DETAIL=""
 
 backup_list() {
@@ -1650,12 +1652,16 @@ _backup_expire_state() {
   # _backup_expire_state < POSTGRESBACKUP_JSON -> "EXPIRED", "DECLINED <message>" or "PENDING": what the object
   # says after spec.expire was set. A condition (or the phase) that names expire decides: true or an Expired
   # phase is EXPIRED, false or a failed phase is DECLINED with the operator's message. Only conditions the
-  # operator wrote for the current generation of the object count (observedGeneration at least
-  # metadata.generation; a condition without one is as old as generation 0): an Expired=False of an earlier
-  # generation, still on the object when spec.expire was already true, is not read as a refusal. LAB ITEM (see above)
-  jq -r '
+  # operator wrote after this run's patch count: observedGeneration at least metadata.generation; without it,
+  # lastTransitionTime not older than BE_SINCE (the patch time less 2 minutes, empty when spec.expire was already
+  # true); with neither field, only when BE_SINCE is set. An Expired=False of an earlier generation, still on the
+  # object when spec.expire was already true, is not read as a refusal. LAB ITEM (see above)
+  jq -r --arg since "${BE_SINCE:-}" '
     (.metadata.generation // 0) as $gen
-    | def fresh: ((.observedGeneration // 0) >= $gen);
+    | def fresh: if has("observedGeneration") then (.observedGeneration >= $gen)
+        elif $since == "" then false
+        elif (.lastTransitionTime // "") == "" then true
+        else (.lastTransitionTime >= $since) end;
     def conds: [.status.conditions[]? | select(fresh) | select(((.type // "") + " " + (.reason // "")) | test("expire"; "i"))];
     def msg: ([.status.conditions[]? | select(fresh) | select(.status == "False" or ((.reason // "") | test("fail|declin|error"; "i"))) | .message] | map(select(. != "")) | join("; "));
     if ((.status.phase // "") | test("^expired$"; "i")) or (conds | any(.status == "True" and ((.reason // "") | test("fail|declin|error"; "i") | not))) then "EXPIRED"
@@ -1697,6 +1703,10 @@ backup_expire() {
     BACKUP_EXPIRE_OUTCOME=ERROR; BACKUP_EXPIRE_DETAIL="PostgresBackup ${name} cannot be read: $(head -c 200 <<<"$j")"; return 1
   fi
   if [[ -z "$j" ]]; then BACKUP_EXPIRE_OUTCOME=MISSING; BACKUP_EXPIRE_DETAIL="no PostgresBackup ${name} in ${ns}"; return 1; fi
+  # BE_SINCE: which conditions count as this run's answer (_backup_expire_state); none by time on a re-run
+  if [[ "$(jq -r '.spec.expire // false' <<<"$j")" == true ]]; then BE_SINCE=""
+  else BE_SINCE="$(date -u -d '-2 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2M +%Y-%m-%dT%H:%M:%SZ)"; fi
+  export BE_SINCE
   log_cmd "kubectl -n ${ns} patch postgresbackup ${name} --type merge -p '{\"spec\":{\"expire\":true}}'"
   if ! j="$(tk -n "$ns" patch postgresbackup "$name" --type merge -p '{"spec":{"expire":true}}' 2>&1)"; then
     BACKUP_EXPIRE_OUTCOME=ERROR; BACKUP_EXPIRE_DETAIL="spec.expire of ${name} cannot be set: $(head -c 300 <<<"$j")"; return 1

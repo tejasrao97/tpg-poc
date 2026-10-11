@@ -323,6 +323,18 @@ NO_GEN='{"metadata":{"generation":2},"spec":{"expire":true},"status":{"phase":"S
 [[ "$(state "$NEW_FALSE")" == "DECLINED fresh refusal" ]] && ok "expire state: the same condition for the current generation is DECLINED with the operator's message" || bad "fresh false" "$(state "$NEW_FALSE")"
 [[ "$(state "$NEW_TRUE")" == EXPIRED ]] && ok "expire state: Expired=True for the current generation is EXPIRED" || bad "fresh true" "$(state "$NEW_TRUE")"
 [[ "$(state "$NO_GEN")" == PENDING ]] && ok "expire state: a condition without observedGeneration on an object at generation 2 is not trusted" || bad "no observedGeneration" "$(state "$NO_GEN")"
+# without observedGeneration: lastTransitionTime against the patch time (BE_SINCE), or this run set spec.expire
+# shellcheck disable=SC2030  # BE_SINCE is meant to stay inside the subshell of one check
+sstate() { printf '%s' "$2" | ( BE_SINCE="$1"; source "$TMP/prelude.sh"; _backup_expire_state ); }
+LTT() { printf '{"metadata":{"generation":2},"spec":{"expire":true},"status":{"phase":"Succeeded","conditions":[{"type":"Expired","status":"%s","reason":"%s","message":"m","lastTransitionTime":"%s"}]}}' "$1" "$2" "$3"; }
+[[ "$(sstate 2026-10-11T10:00:00Z "$(LTT True Expired 2026-10-11T10:05:00Z)")" == EXPIRED ]] \
+  && ok "expire state: no observedGeneration, Expired=True after the patch time is EXPIRED (no wait for the timeout)" || bad "ltt true" "$(sstate 2026-10-11T10:00:00Z "$(LTT True Expired 2026-10-11T10:05:00Z)")"
+[[ "$(sstate 2026-10-11T10:00:00Z "$(LTT False ExpireFailed 2026-10-11T09:00:00Z)")" == PENDING ]] \
+  && ok "expire state: no observedGeneration, an Expired=False older than the patch time is not trusted" || bad "ltt old" "$(sstate 2026-10-11T10:00:00Z "$(LTT False ExpireFailed 2026-10-11T09:00:00Z)")"
+[[ "$(sstate 2026-10-11T10:00:00Z "$NO_GEN")" == "DECLINED no generation" ]] \
+  && ok "expire state: neither observedGeneration nor lastTransitionTime counts when this run set spec.expire" || bad "first run no fields" "$(sstate 2026-10-11T10:00:00Z "$NO_GEN")"
+[[ "$(sstate "" "$(LTT True Expired 2026-10-11T10:05:00Z)")" == PENDING ]] \
+  && ok "expire state: on a re-run (spec.expire already true, no BE_SINCE) a condition without observedGeneration is not trusted" || bad "rerun ltt" "$(sstate "" "$(LTT True Expired 2026-10-11T10:05:00Z)")"
 [[ "$(state '{"metadata":{"generation":2},"status":{"phase":"Expired","conditions":[{"type":"Expired","status":"False","observedGeneration":1}]}}')" == EXPIRED ]] \
   && ok "expire state: the phase Expired is EXPIRED whatever an older condition says" || bad "phase expired"
 reset
