@@ -146,13 +146,15 @@ keys = yaml.safe_load(open(os.path.join(ROOT, "workflows/params/cluster-map-keys
 tmpl = {"scale": "tpg-scale-instance"}
 known_types = {"string", "name", "namespace", "azureName", "boolean", "integer", "posint", "quantity", "enum", "operatorVersion",
                "postgresVersion", "patchFile", "patchFileList", "kindList", "caFile", "nameList", "cidrList", "fqdnList", "stringMap",
-               "cron", "k8sName"}
+               "cron", "k8sName", "k8sNameList"}
 # tpg-upgrade takes the default of operatorVersion and postgresVersion from
 # targetVersion (validate-params.sh upgrade), not from inputs of those names
 # maxReadReplicas: the input of that name exists on tpg-scale-instance only;
 # tpg-day0 and tpg-create-instance take the map key alone (Round 14)
+# purgeBackups: the input of that name exists on the delete workflows; tpg-backup-expire takes the map key alone (Round 23)
 flag_exceptions = {("tpg-upgrade", "operatorVersion"), ("tpg-upgrade", "postgresVersion"),
-                   ("tpg-day0", "maxReadReplicas"), ("tpg-create-instance", "maxReadReplicas")}
+                   ("tpg-day0", "maxReadReplicas"), ("tpg-create-instance", "maxReadReplicas"),
+                   ("tpg-backup-expire", "purgeBackups")}
 for w in keys["workflows"]:
     t = tmpl.get(w, "tpg-" + w)
     if "clusterMap" not in templates.get(t, {}):

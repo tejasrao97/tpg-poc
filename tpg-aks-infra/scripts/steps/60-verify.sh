@@ -256,7 +256,7 @@ for pol in tpg-workflow-parameters tpg-application-sync tpg-credential-writer; d
   exists "ValidatingAdmissionPolicy ${pol}" "$HUB" "" "validatingadmissionpolicy/${pol}"
   exists "ValidatingAdmissionPolicyBinding ${pol}" "$HUB" "" "validatingadmissionpolicybinding/${pol}"
 done
-for t in tpg-lib tpg-day0 tpg-create-instance tpg-upgrade tpg-patch tpg-scale-instance tpg-backup tpg-restore tpg-rotate-credential tpg-delete-instance tpg-delete-apps tpg-helm-addons tpg-network-policy; do
+for t in tpg-lib tpg-day0 tpg-create-instance tpg-upgrade tpg-patch tpg-scale-instance tpg-backup tpg-backup-expire tpg-restore tpg-rotate-credential tpg-delete-instance tpg-delete-apps tpg-helm-addons tpg-network-policy; do
   exists "WorkflowTemplate $t" "$HUB" argo "workflowtemplate/$t"
 done
 exists "ServiceAccount argo/tpg-workflow" "$HUB" argo sa/tpg-workflow

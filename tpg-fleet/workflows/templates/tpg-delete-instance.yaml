@@ -1,8 +1,11 @@
 # Day 2: guarded delete of Postgres instances. Targets: clusterMap (purgePvcs,
-# purgeNamespace and finalBackup per instance) or the instances list on every cluster
+# purgeNamespace, purgeBackups and finalBackup per instance) or the instances list on every cluster
 # of the clusters list. Per instance: a final backup, removal from clusters/fleet.yaml,
 # removal of the Application without cascading, deletion of the Postgres objects;
 # volumes, namespace and the backup repository are kept unless purge options are set.
+# purgeBackups=true (needs finalBackup=false): every backup is expired while the instance runs and the
+# blobs left under its container and repoPath are deleted after it is gone; a repoPath that another
+# backup location uses keeps its blobs.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -12,7 +15,8 @@ metadata:
     workflows.argoproj.io/description: >-
       Day 2: guarded delete of Postgres instances on one or more clusters (clusterMap, or clusters
       and instances lists). Final backup, fleet.yaml removal, non-cascading Application removal,
-      CR delete; PVCs and namespace kept unless purged. The backup repository is never deleted.
+      CR delete; PVCs and namespace kept unless purged. The backup repository is kept unless purgeBackups=true
+      (every backup expired, then the blobs under its repoPath deleted; shared repoPaths keep their blobs).
 spec:
   serviceAccountName: tpg-workflow
   # Vault Agent (injector on the hub) renders tpg/shared/broadcom-registry,
@@ -38,7 +42,7 @@ spec:
       description: "List: instances to delete, in brackets, [orders-db], on every listed cluster; each must be declared there (without clusterMap)"
       value: ""
     - name: clusterMap
-      description: "Map (YAML or JSON): cluster -> {instances: {instance -> {purgePvcs, purgeNamespace, finalBackup}}}; the inputs below are the defaults"
+      description: "Map (YAML or JSON): cluster -> {instances: {instance -> {purgePvcs, purgeNamespace, purgeBackups, finalBackup}}}; the inputs below are the defaults"
       value: ""
     # ---- mandatory
     - name: confirm
@@ -58,6 +62,10 @@ spec:
       enum: ["false", "true"]
     - name: purgeNamespace
       description: "Delete the instance namespace (needs purgePvcs=true; refused while another instance uses the namespace)"
+      value: "false"
+      enum: ["false", "true"]
+    - name: purgeBackups
+      description: "true: expire every PostgresBackup of the instance while it runs, then delete the blobs left under its container and repoPath (irreversible; refused with finalBackup true or required; a repoPath another backup location uses keeps its blobs)"
       value: "false"
       enum: ["false", "true"]
     - name: pushMode
@@ -142,6 +150,7 @@ spec:
         - {name: P_FORCE_DELETE_STUCK, value: "{{workflow.parameters.forceDeleteStuckApps}}"}
         - {name: P_PURGE_PVCS, value: "{{workflow.parameters.purgePvcs}}"}
         - {name: P_PURGE_NS, value: "{{workflow.parameters.purgeNamespace}}"}
+        - {name: P_PURGE_BACKUPS, value: "{{workflow.parameters.purgeBackups}}"}
         - {name: P_PUSH_MODE, value: "{{workflow.parameters.pushMode}}"}
         - {name: P_TIMEOUT, value: "{{workflow.parameters.timeoutSeconds}}"}
         - {name: P_PR_TIMEOUT, value: "{{workflow.parameters.prTimeoutSeconds}}"}
@@ -188,10 +197,11 @@ spec:
         - "{{workflow.parameters.purgePvcs}}"
         - "{{workflow.parameters.purgeNamespace}}"
         - "{{workflow.parameters.timeoutSeconds}}"
+        - "{{workflow.parameters.purgeBackups}}"
       env:
         - {name: PUSH_MODE, value: "{{workflow.parameters.pushMode}}"}
         - {name: PR_TIMEOUT_SECONDS, value: "{{workflow.parameters.prTimeoutSeconds}}"}
-        # finalBackup, purgePvcs and purgeNamespace per instance from clusterMap
+        # finalBackup, purgePvcs, purgeNamespace and purgeBackups per instance from clusterMap
         - {name: P_CLUSTER_MAP, value: "{{workflow.parameters.clusterMap}}"}
         - {name: DELETE_FROM_MAP, value: "true"}
       volumeMounts:

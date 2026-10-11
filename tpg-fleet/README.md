@@ -88,7 +88,7 @@ tpg-fleet/
       clustermap.py                  clusterMap validation and normalization
     vault-agent/                     Vault Agent templates (ConfigMap tpg-vault-agent) for the workflow pods
     templates/                       tpg-lib, tpg-day0, tpg-create-instance, tpg-upgrade, tpg-patch,
-                                     tpg-scale-instance, tpg-network-policy, tpg-backup,
+                                     tpg-scale-instance, tpg-network-policy, tpg-backup, tpg-backup-expire,
                                      tpg-restore, tpg-rotate-credential,
                                      tpg-delete-instance, tpg-delete-apps, tpg-helm-addons
     cron/                            tpg-backup-full (Sun 00:00 UTC), tpg-backup-incr (Mon-Sat 00:00 UTC)
@@ -290,10 +290,11 @@ Inputs are typed: a Workflow whose inputs do not match their types is rejected w
 | `tpg-patch` | Apply patch files (of your machine or the repository) to deployed instances (Postgres, backup location, backup schedules, FerretDB, chart values, CA bundle) and operators (chart values of an allow-list), per cluster through a pull request synced before the merge (or a direct commit), with a revert on failure | `clusters` (or `clusterMap`), a patch file, CA bundle source or `clearKinds`, `patchFiles` for local files, `instances` for instance files, `pushMode` |
 | `tpg-scale-instance` | Set read replicas of the listed instances on the listed clusters (0: single node) and the cap `maxReadReplicas`, cluster by cluster (`rolloutMode`, default all) | `clusters` and `instances` (or `clusterMap`), `replicas` (input or map key), or `maxReadReplicas` alone; `pushMode` |
 | `tpg-network-policy` | Apply, update or remove the network policy of instances, then check WAL archiving and client access | `clusters` and `instances` (or `clusterMap`), `mode`, `pushMode` |
-| `tpg-delete-apps` | Delete instances and/or the operator and its CRDs per cluster | `clusters` and `apps` (or `clusterMap`), `confirm`, `dryRun`, `purgePvcs`, `purgeNamespace`, `pushMode` |
-| `tpg-delete-instance` | Guarded delete of the listed instances on the listed clusters | `clusters` and `instances` (or `clusterMap`), `confirm` |
+| `tpg-delete-apps` | Delete instances and/or the operator and its CRDs per cluster | `clusters` and `apps` (or `clusterMap`), `confirm`, `dryRun`, `purgePvcs`, `purgeNamespace`, `pushMode` (`purgeBackups`: expire every backup, then delete the blobs under the instance's `repoPath`) |
+| `tpg-delete-instance` | Guarded delete of the listed instances on the listed clusters | `clusters` and `instances` (or `clusterMap`), `confirm` (`purgeBackups`: as `tpg-delete-apps`) |
 | `tpg-helm-addons` | cert-manager, the Vault Secrets Operator and the standalone monitoring agent Helm releases on targets | `clusters` |
 | `tpg-backup` | On-demand backups, full or incremental (CronWorkflows run it on a schedule) | none (`backupType`, `clusters` default; `instances` or `clusterMap` narrow it) |
+| `tpg-backup-expire` | Expire PostgresBackups (named, or all of an instance; dependents need `includeDependents`); blobs are never deleted; dry run by default | `clusterMap` (`backups` or `purgeBackups` per instance), `dryRun`, `confirm` |
 | `tpg-restore` | Restore an instance: point in time, latest, a named backup, an LSN or a transaction ID, into a new or an existing instance on the same or another cluster | `sourceCluster`, `instance`, `mode` and the recovery point of that mode |
 | `tpg-rotate-credential` | Write a new registry, storage, Git or remote-write credential, a CA bundle or a team secret to Vault from a wrapping token, and verify it everywhere it is used | `secretType` (`secretName` for `ca-bundle` and `custom`) |
 
@@ -360,7 +361,7 @@ argo submit -n argo --from workflowtemplate/tpg-delete-apps \
   -p 'confirm=[aks-tpg-poc-03]' -p dryRun=true -p purgePvcs=false -p purgeNamespace=false -p pushMode=direct --watch
 ```
 
-Instances leave `clusters/fleet.yaml` (a copy goes to `clusters/deleted/<cluster>/`), the Applications are removed without cascading (`preserveResourcesOnDeletion`), and the workflow deletes the objects in order. With `tpg-operator` it also deletes the operator and the `sql.tanzu.vmware.com` CRDs, refusing while other Postgres instances exist unless `force=true`. The backup repository is never deleted. An Application that cannot be rendered (`ComparisonError`, for example the Broadcom registry token expired and the chart download answers 401) stays in `Deleting` with its Argo CD finalizer; with `forceDeleteStuckApps=true` (default) the delete workflows log the condition after the wait, remove the finalizer, clean up the leftovers as usual and report `FORCED: Application removed without rendering (...)`; with `false` they fail `APPLICATION_NOT_REMOVED` (Round 22).
+Instances leave `clusters/fleet.yaml` (a copy goes to `clusters/deleted/<cluster>/`), the Applications are removed without cascading (`preserveResourcesOnDeletion`), and the workflow deletes the objects in order. With `tpg-operator` it also deletes the operator and the `sql.tanzu.vmware.com` CRDs, refusing while other Postgres instances exist unless `force=true`. The backup repository is kept unless `purgeBackups` is true (every backup is expired and the blobs under the instance's `repoPath` are deleted; a `repoPath` another backup location uses keeps its blobs). An Application that cannot be rendered (`ComparisonError`, for example the Broadcom registry token expired and the chart download answers 401) stays in `Deleting` with its Argo CD finalizer; with `forceDeleteStuckApps=true` (default) the delete workflows log the condition after the wait, remove the finalizer, clean up the leftovers as usual and report `FORCED: Application removed without rendering (...)`; with `false` they fail `APPLICATION_NOT_REMOVED` (Round 22).
 
 ## Workflow logs
 

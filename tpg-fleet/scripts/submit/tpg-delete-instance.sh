@@ -25,4 +25,14 @@ tpg_submit_lib() {
 TPG_SUBMIT_LIB="$(tpg_submit_lib)" || exit 1
 # shellcheck source=scripts/submit/submit-lib.sh
 source "$TPG_SUBMIT_LIB"
+# purgeBackups deletes every backup, the final one included: it needs finalBackup=false (with clusterMap
+# the validate step checks the per-instance keys)
+sl_hook_check() {
+  local f
+  if [[ "${SL_MAP:-0}" -eq 0 && "$(sl_val purgeBackups)" == "true" ]]; then
+    f="$(sl_val finalBackup)"; f="${f:-true}"
+    [[ "$f" == "false" ]] || { sl_err "purgeBackups=true needs finalBackup=false (finalBackup is ${f}): set finalBackup to false, or purgeBackups to false"; return 1; }
+  fi
+  return 0
+}
 sl_main "$@"

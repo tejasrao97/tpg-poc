@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# delete-instance.sh WORKFLOW CLUSTER INSTANCE CONFIRM FINAL_BACKUP PURGE_PVCS PURGE_NAMESPACE TIMEOUT
+# delete-instance.sh WORKFLOW CLUSTER INSTANCE CONFIRM FINAL_BACKUP PURGE_PVCS PURGE_NAMESPACE TIMEOUT [PURGE_BACKUPS]
 # Guarded delete of one Postgres instance (README: Day 2: delete).
 #   1 guards      confirm == instance, instance declared in clusters/fleet.yaml (ALLOW_UNTRACKED=true:
 #                 may be missing there), no backup/restore/upgrade in progress
@@ -11,7 +11,21 @@
 #                 the ApplicationSet removes the Application without touching resources
 #   4 delete      Postgres CR (operator removes pods, services, secrets) and backup location CR
 #   5 purge       optional: PVCs and their Retain PVs/disks; optional: the namespace
-# The Azure Blob backup repository is never deleted by this workflow.
+# The Azure Blob backup repository is kept unless purgeBackups=true (Round 23, locked decision 4):
+#   - before the delete (2b2), while the operator runs: every PostgresBackup of the instance is expired
+#     (spec.expire=true, newest first, lib.sh backup_expire_all); what pgBackRest declines is reported, not a
+#     failure; no answer in time fails the run before anything is deleted (BACKUP_EXPIRE_TIMEOUT)
+#   - after the instance and its backup location are gone (4b): every blob under the container and repoPath of
+#     the location is deleted (Azure Blob REST, the storage key from Vault, lib.sh blob_delete_prefix)
+#   - a repoPath that another PostgresBackupLocation on ANY registered cluster also uses (also a folder inside
+#     or around it; a cluster that cannot be scanned counts as sharing) is only expired: the blobs stay and the
+#     result and a warning say so
+#   - refused before anything changes: finalBackup true or required (the final backup would be deleted at once:
+#     INVALID_OPTIONS), a location that cannot be read (PURGE_LOCATION_UNKNOWN), the repository root as repoPath
+#     (PURGE_REPOPATH_REFUSED), no storage key in Vault (NO_VAULT_SECRET), a location on another storage
+#     account than the fleet's (PURGE_ACCOUNT_MISMATCH)
+#   - the container and repoPath are copied into the audit copy (deleted.backupLocation), so a re-run finds them
+#     after the location object is gone
 # Namespace (Round 23): the instance's namespace is read from clusters/fleet.yaml (instance.namespace,
 # default pg-<instance>; the copy in clusters/deleted/ when the entry is gone). Instances may share a
 # namespace, and then
@@ -36,7 +50,7 @@
 # DELETE_FROM_MAP=true (tpg-delete-instance, tpg-delete-apps): finalBackup,
 # purgePvcs and purgeNamespace come from clusterMap (P_CLUSTER_MAP) when set for
 # the instance, and the clusterMap postgresVersion guard applies.
-WF="$1"; C="$2"; I="$3"; CONFIRM="$4"; FINAL_BACKUP="${5:-true}"; PURGE_PVCS="${6:-false}"; PURGE_NS="${7:-false}"; TIMEOUT="${8:-1800}"
+WF="$1"; C="$2"; I="$3"; CONFIRM="$4"; FINAL_BACKUP="${5:-true}"; PURGE_PVCS="${6:-false}"; PURGE_NS="${7:-false}"; TIMEOUT="${8:-1800}"; PURGE_BACKUPS="${9:-false}"
 # shellcheck source=workflows/scripts/lib.sh
 source /scripts/lib.sh
 
@@ -49,11 +63,14 @@ if [[ "${DELETE_FROM_MAP:-false}" == "true" ]]; then
   FINAL_BACKUP="$(cmap_ival "$C" "$I" finalBackup "$FINAL_BACKUP")"
   PURGE_PVCS="$(cmap_ival "$C" "$I" purgePvcs "$PURGE_PVCS")"
   PURGE_NS="$(cmap_ival "$C" "$I" purgeNamespace "$PURGE_NS")"
+  PURGE_BACKUPS="$(cmap_ival "$C" "$I" purgeBackups "$PURGE_BACKUPS")"
 fi
 
 # ---- 1 guards
 [[ "$CONFIRM" == "$I" ]] || fail NOT_CONFIRMED "set confirm=${I}"
 [[ "$PURGE_NS" != "true" || "$PURGE_PVCS" == "true" ]] || fail INVALID_OPTIONS "purgeNamespace=true needs purgePvcs=true"
+[[ "$PURGE_BACKUPS" != "true" || "$FINAL_BACKUP" == "false" ]] \
+  || fail INVALID_OPTIONS "purgeBackups=true needs finalBackup=false: the final backup (finalBackup=${FINAL_BACKUP}) would be expired and deleted with the others"
 git_clone "$WORK/repo"
 fleet_materialize "$WORK/repo"
 f="$WORK/fleet/${C}/${I}.yaml"
@@ -107,6 +124,38 @@ if [[ "$EXISTS" == "true" ]]; then
   [[ -z "$busy" ]] || fail OPERATION_IN_PROGRESS "$busy"
 fi
 
+# ---- 1b the backup repository (Round 23): where the instance's backups are, for the audit copy and for
+#      purgeBackups; everything that can refuse a purge is decided here, before anything changes
+LOC="${I}-backup-location"
+LOC_KNOWN=false; LOC_CONT=""; LOC_PATH=""; LOC_EP=""
+if location_repo "$NS" "$LOC"; then
+  LOC_KNOWN=true; LOC_CONT="$BL_CONTAINER"; LOC_PATH="$BL_PATH"; LOC_EP="$BL_ENDPOINT"; LOC_SECRET="$BL_SECRET"
+elif acopy="$(deleted_copy "$WORK/repo" "$C" "$I")" && [[ -n "$(yq -r '.deleted.backupLocation.container // ""' "$acopy")" ]]; then
+  # a re-run: the location object is gone, the audit copy of the first run has what it pointed to
+  LOC_KNOWN=true; LOC_CONT="$(yq -r '.deleted.backupLocation.container' "$acopy")"; LOC_PATH="$(yq -r '.deleted.backupLocation.repoPath // "/"' "$acopy")"
+  LOC_EP="$(yq -r '.deleted.backupLocation.endpoint // "blob.core.windows.net"' "$acopy")"; LOC_SECRET="backup-storage"
+fi
+PURGE_BLOBS=false; REPO_NOTE=""
+if [[ "$PURGE_BACKUPS" == "true" ]]; then
+  [[ "$LOC_KNOWN" == "true" ]] \
+    || fail PURGE_LOCATION_UNKNOWN "PostgresBackupLocation ${NS}/${LOC} does not exist and no audit copy in clusters/deleted/${C} records its container and repoPath, so the backups cannot be found; set purgeBackups=false (the blobs stay), or delete them by hand"
+  [[ "$(repo_norm "$LOC_PATH")" != "/" ]] \
+    || fail PURGE_REPOPATH_REFUSED "the repoPath of ${LOC} is the root of container ${LOC_CONT}; purgeBackups never deletes a whole container (set purgeBackups=false and delete the blobs by hand)"
+  LOC_ACCT="$(_secret_account "$NS" "${LOC_SECRET:-backup-storage}")"
+  if repo_shared "$C" "$NS" "$LOC" "$LOC_CONT" "$LOC_PATH" "$LOC_EP" "$LOC_ACCT"; then
+    REPO_NOTE="repository ${LOC_CONT}${LOC_PATH} is also used by ${REPO_SHARED_WITH}"
+  else
+    PURGE_BLOBS=true
+    ST_ACCOUNT="$(vault_secret backup-storage accountName)" \
+      || fail NO_VAULT_SECRET "backup-storage (tpg/shared/backup-storage): the storage account is needed to delete the blobs of ${LOC_CONT}${LOC_PATH}"
+    vault_secret backup-storage accountKey >/dev/null \
+      || fail NO_VAULT_SECRET "backup-storage (tpg/shared/backup-storage): the storage key is needed to delete the blobs of ${LOC_CONT}${LOC_PATH}"
+    [[ -z "$LOC_ACCT" || "$LOC_ACCT" == "$ST_ACCOUNT" ]] \
+      || fail PURGE_ACCOUNT_MISMATCH "the Secret ${LOC_SECRET:-backup-storage} in ${NS} names storage account ${LOC_ACCT}, the key in Vault is the fleet's account ${ST_ACCOUNT}; the blobs are not deleted"
+  fi
+  notes+=("purgeBackups: ${LOC_CONT}${LOC_PATH}")
+fi
+
 # ---- 2 final backup
 if [[ "$EXISTS" == "true" && "$FINAL_BACKUP" != "false" ]]; then
   if [[ "$(pg_state "$I")" == "Running" ]]; then
@@ -139,6 +188,29 @@ if [[ "$EXISTS" == "true" ]]; then
   done
 fi
 
+# ---- 2b2 purgeBackups (Round 23): expire every PostgresBackup while the operator runs. The Postgres is still
+#      there (the entry only leaves Git below), so the operator can run pgBackRest expire for each backup set.
+#      What pgBackRest declines is reported; no answer in time stops the run before the delete
+if [[ "$PURGE_BACKUPS" == "true" ]]; then
+  if [[ "$EXISTS" != "true" ]]; then
+    notes+=("no backups expired: Postgres ${I} does not run (the operator cannot expire)")
+  elif [[ "$(pg_state "$I")" != "Running" ]]; then
+    # the operator expires only while the instance runs. Its blobs go anyway when the repository is its own;
+    # a repository another location uses would keep backups of this instance that nobody can expire any more
+    [[ "$PURGE_BLOBS" == "true" ]] \
+      || fail BACKUP_EXPIRE_IMPOSSIBLE "currentState=$(pg_state "$I"): the operator cannot expire backups, and ${REPO_NOTE:-the repository is shared}; nothing was deleted"
+    notes+=("no backups expired: currentState=$(pg_state "$I") (the blobs are deleted anyway)")
+  elif backup_expire_all "$NS" "$I" "$TIMEOUT"; then
+    notes+=("${BE_EXPIRED} backups expired$([[ "$BE_SKIPPED" -eq 0 ]] || echo ", ${BE_SKIPPED} without a pgBackRest label skipped")")
+    if [[ "${#BE_DECLINED[@]}" -gt 0 ]]; then
+      notes+=("pgBackRest declined to expire ${#BE_DECLINED[@]}: $(printf '%s; ' "${BE_DECLINED[@]}" | sed 's/; $//')")
+      record_entry "warning.${C}.${I}" WARNING BACKUP_EXPIRE_DECLINED "$(printf '%s; ' "${BE_DECLINED[@]}" | sed 's/; $//')"
+    fi
+  else
+    fail BACKUP_EXPIRE_TIMEOUT "nothing was deleted; $(printf '%s; ' "${BE_FAILED[@]}" | sed 's/; $//')"
+  fi
+fi
+
 # ---- 2c shared namespace (Round 23): when other instances of the namespace stay, the Secrets they
 #      share move to one of them before this entry leaves Git (lib.sh ns_handover: commit the owner
 #      flags, sync the successor, check the Argo CD tracking annotation moved - one owner at any moment)
@@ -160,6 +232,9 @@ if [[ -f "$f" ]]; then
   drel="clusters/deleted/${C}/${I}-$(date -u +%Y%m%d%H%M).yaml"
   C="$C" I="$I" yq '.clusters[strenv(C)].instances[strenv(I)]' "$WORK/repo/$FLEET_REL" > "$WORK/repo/$drel"
   W="$WF" T="$(date -u +%Y-%m-%dT%H:%M:%SZ)" S="$stanza" yq -i '.deleted = {"workflow": strenv(W), "time": strenv(T), "stanzaName": strenv(S)}' "$WORK/repo/$drel"
+  # where the backups are (Round 23): a re-run with purgeBackups finds the repository here after the location object is gone
+  [[ "$LOC_KNOWN" != "true" ]] || BC="$LOC_CONT" BP="$LOC_PATH" BE="${LOC_EP:-blob.core.windows.net}" \
+    yq -i '.deleted.backupLocation = {"container": strenv(BC), "repoPath": strenv(BP), "endpoint": strenv(BE)}' "$WORK/repo/$drel"
   C="$C" I="$I" yq -i 'del(.clusters[strenv(C)].instances[strenv(I)])' "$WORK/repo/$FLEET_REL"
   rm -rf "$WORK/fleet"   # nothing to write back: the entry is gone
   git_commit_push "$WORK/repo" "delete ${C}/${I} (${WF})" "$FLEET_REL" "$drel" || fail GIT_PUSH_FAILED "pushMode=${PUSH_MODE:-direct}"
@@ -179,6 +254,26 @@ if [[ "$EXISTS" == "true" ]]; then
   done
 fi
 tk -n "$NS" delete postgresbackuplocation "${I}-backup-location" --ignore-not-found --wait=true >/dev/null || notes+=("backup location CR not deleted")
+
+# ---- 4b purgeBackups (Round 23): the instance and its location are gone; delete every blob left under its
+#      container and repoPath (unless another location uses the repository: then the blobs stay)
+if [[ "$PURGE_BACKUPS" == "true" ]]; then
+  if [[ "$PURGE_BLOBS" == "true" ]]; then
+    # the storage key lives in this shell only (Vault Agent file -> variable -> python3 environment); it is
+    # not logged, not recorded and not in an argument
+    ST_KEY="$(vault_secret backup-storage accountKey)" || fail NO_VAULT_SECRET "backup-storage (tpg/shared/backup-storage)"
+    if blob_delete_prefix "$ST_ACCOUNT" "$ST_KEY" "$LOC_CONT" "$LOC_PATH" "$LOC_EP"; then
+      ST_KEY=""
+      notes+=("${BLOB_DELETED} blobs deleted under ${LOC_CONT}${LOC_PATH}")
+    else
+      ST_KEY=""
+      fail BLOB_PURGE_FAILED "${BLOB_ERROR} (${BLOB_DELETED} deleted); the instance is deleted, run tpg-delete-instance again with purgeBackups=true to finish"
+    fi
+  else
+    notes+=("backups expired, blobs KEPT: ${REPO_NOTE}")
+    record_entry "warning.${C}.${I}.repo" WARNING BACKUP_REPO_SHARED "${REPO_NOTE}: the blobs under ${LOC_CONT}${LOC_PATH} were not deleted"
+  fi
+fi
 
 # ---- 5 optional purge
 # a namespace that other instances use: only the PVCs of this instance (label postgres-instance)
@@ -207,6 +302,6 @@ elif [[ "$DEFER_NS" == "true" ]]; then
   printf '%s\n' "$NS" >> "${NS_PURGE_FILE:-$WORK/ns-purge}"
   notes+=("namespace ${NS} is deleted after the last instance of it (${OTHERS//$'\n'/, })")
 fi
-notes+=("backup repository kept: stanza ${stanza:-unknown}")
+[[ "$PURGE_BACKUPS" == "true" ]] || notes+=("backup repository kept: stanza ${stanza:-unknown}")
 detail="$(printf '%s; ' "${notes[@]}")"
 record "$key" SUCCEEDED "" "${detail%; }"

@@ -245,6 +245,7 @@ templates:
     forceDeleteStuckApps: {type: boolean}
     purgePvcs: {type: boolean}
     purgeNamespace: {type: boolean}
+    purgeBackups: {type: boolean}
     pushMode: {type: enum, values: [direct, pr]}
     timeoutSeconds: {type: posint}
     prTimeoutSeconds: {type: posint}
@@ -258,12 +259,20 @@ templates:
     dryRun: {type: boolean}
     purgePvcs: {type: boolean, allowEmpty: true}
     purgeNamespace: {type: boolean, allowEmpty: true}
+    purgeBackups: {type: boolean}
     pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
     force: {type: boolean}
     forceDeleteStuckApps: {type: boolean}
     finalBackup: {type: enum, values: ["true", "false", required]}
     timeoutSeconds: {type: posint}
     prTimeoutSeconds: {type: posint}
+    toolsImage: {type: string}
+
+  tpg-backup-expire:
+    clusterMap: {type: map, allowEmpty: true}
+    dryRun: {type: boolean}
+    confirm: {type: list, allowEmpty: true}
+    timeoutSeconds: {type: posint}
     toolsImage: {type: string}
 
   tpg-helm-addons:
@@ -332,3 +341,8 @@ rules:
     - when: {highAvailability: "false", ferretReadOnlyReplicas: "0*[1-9][0-9]*"}
       message: "ferretReadOnlyReplicas above 0 needs highAvailability=true (the read-only FerretDB proxies connect to the standby)"
   tpg-create-instance: *instanceRules
+  # Round 23: a final backup is a backup the purge expires and deletes at once
+  tpg-delete-instance: &purgeRules
+    - when: {purgeBackups: "true", finalBackup: "true|required"}
+      message: "purgeBackups=true needs finalBackup=false (a final backup would be expired and its blobs deleted at once)"
+  tpg-delete-apps: *purgeRules

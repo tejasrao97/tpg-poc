@@ -225,6 +225,26 @@ wf tpg-delete-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-
 rejected "R23: confirm as a bare name is refused" 'confirm="orders-db" must be a List in brackets'
 wf tpg-delete-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-db]' 'confirm=[orders-db]')"
 accepted "R23: confirm as a list is accepted"
+wf tpg-delete-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-db]' 'confirm=[orders-db]' purgeBackups=true finalBackup=false)"
+accepted "R23: tpg-delete-instance purgeBackups=true with finalBackup=false is accepted"
+wf tpg-delete-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-db]' 'confirm=[orders-db]' purgeBackups=true finalBackup=true)"
+rejected "R23: tpg-delete-instance purgeBackups=true with finalBackup=true is refused" 'purgeBackups=true needs finalBackup=false'
+wf tpg-delete-instance "$(params 'clusters=[aks-tpg-poc-01]' 'instances=[orders-db]' 'confirm=[orders-db]' purgeBackups=true finalBackup=required)"
+rejected "R23: tpg-delete-instance purgeBackups=true with finalBackup=required is refused" 'purgeBackups=true needs finalBackup=false'
+wf tpg-delete-apps "$(params 'clusters=[aks-tpg-poc-01]' purgeBackups=true finalBackup=required)"
+rejected "R23: tpg-delete-apps purgeBackups=true with finalBackup=required is refused" 'purgeBackups=true needs finalBackup=false'
+wf tpg-delete-apps "$(params 'clusters=[aks-tpg-poc-01]' purgeBackups=true finalBackup=false)"
+accepted "R23: tpg-delete-apps purgeBackups=true with finalBackup=false is accepted"
+wf tpg-delete-instance "$(params 'clusters=[aks-tpg-poc-01]' purgeBackups=maybe)"
+rejected "R23: purgeBackups must be a Boolean" 'purgeBackups="maybe" must be a Boolean'
+wf tpg-backup-expire "$(params 'clusterMap={aks-tpg-poc-01: {instances: {orders-db: {purgeBackups: true}}}}' dryRun=false 'confirm=[aks-tpg-poc-01]' timeoutSeconds=300)"
+accepted "R23: tpg-backup-expire takes clusterMap, dryRun, confirm and timeoutSeconds"
+wf tpg-backup-expire "$(params 'confirm=aks-tpg-poc-01')"
+rejected "R23: tpg-backup-expire confirm as a bare name is refused" 'confirm="aks-tpg-poc-01" must be a List in brackets'
+wf tpg-backup-expire "$(params 'clusters=[aks-tpg-poc-01]')"
+rejected "R23: tpg-backup-expire has no clusters input (clusterMap only)" 'clusters is not an input of tpg-backup-expire'
+wf tpg-backup-expire "$(params dryRun=maybe)"
+rejected "R23: tpg-backup-expire dryRun must be a Boolean" 'dryRun="maybe" must be a Boolean'
 wf tpg-backup "$(params 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' 'instances=[orders-db]')"
 accepted "R23: tpg-backup takes lists of clusters and instances"
 wf tpg-rotate-credential "$(params secretType=ca-bundle secretName=azure-storage 'caBundleFile=./azure.pem')"

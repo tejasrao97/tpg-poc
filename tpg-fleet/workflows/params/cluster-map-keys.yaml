@@ -2,7 +2,8 @@
 #
 # clusterMap is optional on tpg-day0, tpg-create-instance, tpg-upgrade,
 # tpg-patch, tpg-backup, tpg-scale-instance,
-# tpg-delete-instance, tpg-delete-apps and tpg-network-policy. It selects the targets (clusters and the instances on each)
+# tpg-delete-instance, tpg-delete-apps and tpg-network-policy, and the only input of
+# tpg-backup-expire (Round 23). It selects the targets (clusters and the instances on each)
 # and carries per-cluster and per-instance values:
 #
 #   <cluster>:                     a registered cluster
@@ -28,7 +29,7 @@
 #                repo:<path>, .pem, .crt or .cer) |
 #              kindList (Postgres, PostgresBackupLocation, PostgresBackupSchedule,
 #                PostgresFerretDocumentDB, postgresValues, operatorValues, or all) |
-#              nameList (DNS labels) | cidrList (IPv4/IPv6 CIDRs) |
+#              nameList (DNS labels) | k8sNameList (Kubernetes object names, as PostgresBackup names) | cidrList (IPv4/IPv6 CIDRs) |
 #              fqdnList (host names, * allowed as the first label) |
 #              stringMap (annotation or label keys to string values) |
 #              cron (5 fields; allowNone: true also takes none or an empty value) |
@@ -77,6 +78,7 @@ workflows:
   - delete-instance
   - delete-apps
   - network-policy
+  - backup-expire
 
 cluster:
   operatorVersion:
@@ -390,6 +392,20 @@ instance:
     type: enum
     values: ["true", "false", required]
     workflows: {delete-instance: optional, delete-apps: optional}
+  purgeBackups:
+    doc: "Round 23. tpg-delete-instance, tpg-delete-apps: as the input - expire every PostgresBackup of the instance while it runs, then delete every blob left under its container and repoPath after it is gone (irreversible; needs finalBackup false; a repoPath another PostgresBackupLocation on any registered cluster uses is expired only, blobs kept and reported). tpg-backup-expire: true expires every backup of the instance and never deletes blobs; not together with backups"
+    type: boolean
+    workflows: {delete-instance: optional, delete-apps: optional, backup-expire: optional}
+  backups:
+    doc: "Round 23, tpg-backup-expire: the PostgresBackup names to expire (a list in brackets, [orders-db-full-202609010100]). A full backup that has dependent differential or incremental backups needs includeDependents: true (else the instance is BLOCKED and the dependents are listed). Not together with purgeBackups"
+    type: k8sNameList
+    flag: ""
+    workflows: {backup-expire: optional}
+  includeDependents:
+    doc: "Round 23, tpg-backup-expire: true also expires the differential and incremental backups that depend on the listed ones (dependents first); required to expire a backup that has dependents. With backups only"
+    type: boolean
+    flag: ""
+    workflows: {backup-expire: optional}
   # ---- exposure (design decision D64): how the instance's Services are
   # published. The chart turns exposure into spec.serviceType and the Azure
   # load balancer annotations; serviceAnnotations are added as given.

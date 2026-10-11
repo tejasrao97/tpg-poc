@@ -176,9 +176,11 @@ sl_example() {  # sl_example NAME -> an example value
     clusterMap)
       case "$WF_TEMPLATE" in
         tpg-scale-instance) echo "{aks-tpg-poc-01: {maxReadReplicas: 4, instances: {orders-db: {replicas: 3}, billing-db: {replicas: 0}}}, aks-tpg-poc-02: {maxReadReplicas: 2}}" ;;
+        tpg-backup-expire) echo "{aks-tpg-poc-01: {instances: {orders-db: {backups: [orders-db-full-202609010100], includeDependents: true}, billing-db: {purgeBackups: true}}}}" ;;
         *) echo "{aks-tpg-poc-01: {instances: {orders-db: {postgresVersion: postgres-17.6, highAvailability: true}}}}" ;;
       esac ;;
     highAvailability) echo "true" ;;
+    backups) echo "[orders-db-full-202609010100, orders-db-incr-202609020100] (PostgresBackup names)" ;;
     operatorVersion) echo "v4.5.0" ;;
     postgresVersion) echo "postgres-17.6" ;;
     targetVersion) echo "v4.5.1 (component=operator) or postgres-17.9 (component=postgres)" ;;
@@ -397,7 +399,7 @@ sl_map_validate() {  # sl_map_validate JSON -> 0 when clustermap.py accepts it f
 sl_key_prompt() {  # sl_key_prompt LEVEL KEY -> SL_LINE (the value; lists and maps as JSON)
   local lvl="$1" k="$2" t vals req
   t="$(L="$lvl" K="$k" yq -r '.[strenv(L)][strenv(K)].type' "$SL_KEYS")"
-  SL_JSON=0; case "$t" in stringMap|nameList|cidrList|fqdnList|patchFileList|kindList|patchFile|caFile) SL_JSON=1 ;; esac
+  SL_JSON=0; case "$t" in stringMap|nameList|k8sNameList|cidrList|fqdnList|patchFileList|kindList|patchFile|caFile) SL_JSON=1 ;; esac
   vals="$(L="$lvl" K="$k" yq -r '.[strenv(L)][strenv(K)].values // [] | join(",")' "$SL_KEYS")"
   req="$(L="$lvl" K="$k" W="$(sl_wf_id "$WF_TEMPLATE")" yq -r '.[strenv(L)][strenv(K)].workflows[strenv(W)] // ""' "$SL_KEYS")"
   sl_say "  ${C_B}${k}${C_0} (${req}; type ${t}$( [[ -n "$vals" ]] && printf ': %s' "${vals//,/, }"))  example: $(sl_example "$k")"
@@ -407,7 +409,7 @@ sl_key_prompt() {  # sl_key_prompt LEVEL KEY -> SL_LINE (the value; lists and ma
       if [[ "$t" == boolean ]]; then choices=(true false); else IFS=',' read -r -a choices <<<"$vals"; fi
       sl_menu "  ${k}:" "${choices[@]}"; SL_LINE="${choices[$SL_PICK]}" ;;
     stringMap) sl_read_map "$k" ;;
-    nameList|cidrList|fqdnList|patchFileList|kindList)
+    nameList|k8sNameList|cidrList|fqdnList|patchFileList|kindList)
       sl_read "  ${k} (names separated by commas, or [a, b]; sent as a YAML sequence): "
       # a clusterMap list is a sequence, also with one value; a kindList takes the bare word all
       SL_LINE="$(jq -cn --arg v "$SL_LINE" --arg t "$t" '($v | gsub("^\\s*\\[|\\]\\s*$"; "") | split(",") | map(gsub("^\\s+|\\s+$"; "") | gsub("^[\"\u0027]|[\"\u0027]$"; "")) | map(select(length > 0))) as $l
@@ -493,6 +495,10 @@ sl_clustermap() {  # -> SL_LINE, 1 to ask again
 # ------------------------------------------------------------------ flow
 sl_targets() {  # the target inputs: clusterMap or the lists named in TARGET_LISTS
   local l
+  if [[ "${TARGETS:-lists}" == "map" ]]; then   # clusterMap only (tpg-backup-expire)
+    sl_prompt clusterMap mandatory
+    SL_MAP=1; return 0
+  fi
   if sl_has clusterMap && [[ "${TARGETS:-lists}" == "map-or-lists" ]]; then
     sl_menu "Targets of ${WF_TEMPLATE}:" "clusterMap: each cluster with its own instances and values" \
       "Lists: ${TARGET_LISTS:-} (every instance on every listed cluster)"

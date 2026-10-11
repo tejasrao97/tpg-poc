@@ -18,6 +18,7 @@ resources:
   - templates/tpg-patch.yaml
   - templates/tpg-scale-instance.yaml
   - templates/tpg-backup.yaml
+  - templates/tpg-backup-expire.yaml
   - templates/tpg-restore.yaml
   - templates/tpg-rotate-credential.yaml
   - templates/tpg-delete-instance.yaml
@@ -63,6 +64,7 @@ configMapGenerator:
       - scripts/patch-cluster.sh
       - scripts/scale-instance.sh
       - scripts/backup-instance.sh
+      - scripts/backup-expire.sh
       - scripts/restore.sh
       - scripts/rotate-cluster.sh
       - scripts/rotate-hub.sh

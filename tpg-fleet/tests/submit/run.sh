@@ -61,7 +61,7 @@ for s in "$ROOT"/scripts/submit/tpg-*.sh; do
   n="$(basename "$s" .sh)"
   grep -q "^WF_TEMPLATE=${n}$" "$s" && [[ -f "$ROOT/workflows/templates/${n}.yaml" ]] && loaded=$((loaded + 1)) || failed="$failed $n"
 done
-[[ -z "$failed" && "$loaded" -eq 12 ]] && ok "12 submit scripts, each named after its WorkflowTemplate (tpg-backup-retention removed in Round 15)" || bad "scripts" "$failed"
+[[ -z "$failed" && "$loaded" -eq 13 ]] && ok "13 submit scripts, each named after its WorkflowTemplate (tpg-backup-retention removed in Round 15, tpg-backup-expire added in Round 23)" || bad "scripts" "$failed"
 sub tpg-backup yes "1
 3"
 [[ "$RC" -eq 0 ]] && grep -q "cancelled: nothing submitted" <<<"$OUT" && [[ ! -f "$TMP/argo-args" ]] \
@@ -186,6 +186,55 @@ orders-db
 1"
 argo_has "instances=[orders-db]" && argo_has "replicas=2" && ! grep -q '^maxReadReplicas=' "$TMP/argo-args" \
   && ok "scale: instances and replicas, the cap untouched" || bad "scale instances" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
+
+# ---- tpg-backup-expire (Round 23): clusterMap only; dryRun true by default; dryRun=false asks for confirm
+MAP_EXP='{aks-tpg-poc-01: {instances: {orders-db: {backups: [orders-db-full-202609010100], includeDependents: true}}}}'
+sub tpg-backup-expire yes "3
+1
+${MAP_EXP}
+1
+1"
+argo_has "workflowtemplate/tpg-backup-expire" && grep -q '^clusterMap=' "$TMP/argo-args" && ! grep -qE '^(dryRun|confirm|clusters|instances)=' "$TMP/argo-args" \
+  && grep -q 'includeDependents' "$TMP/argo-args" \
+  && ok "backup-expire: only clusterMap is asked (no clusters or instances list); dryRun keeps its default true, no confirm" || bad "backup-expire dry" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
+grep -q "Example: {aks-tpg-poc-01: {instances: {orders-db: {backups: \[orders-db-full-202609010100\], includeDependents: true}, billing-db: {purgeBackups: true}}}}" <<<"$OUT" \
+  && ok "backup-expire: the clusterMap prompt shows an example with backups and includeDependents" || bad "backup-expire example" "$OUT"
+n_dry="$(optnum tpg-backup-expire dryRun clusterMap)"
+sub tpg-backup-expire yes "3
+1
+${MAP_EXP}
+${n_dry}
+2
+n
+[aks-tpg-poc-01]
+1"
+argo_has "dryRun=false" && argo_has "confirm=[aks-tpg-poc-01]" \
+  && ok "backup-expire: dryRun=false asks for confirm (the cluster names), sent in brackets" || bad "backup-expire real" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
+sub tpg-backup-expire yes "3
+1
+{aks-tpg-poc-01: {instances: {orders-db: {backups: [orders-db-full-202609010100], purgeBackups: true, finalBackup: false}}}}
+n
+4
+1"
+grep -q "not used by tpg-backup-expire" <<<"$OUT" \
+  && ok "backup-expire: a key of another workflow in clusterMap is explained" || bad "backup-expire bad key" "$OUT"
+
+# ---- purgeBackups on tpg-delete-instance needs finalBackup=false: asked again until it holds
+n_pb="$(optnum tpg-delete-instance purgeBackups clusterMap clusters instances confirm)"
+n_fb="$(optnum tpg-delete-instance finalBackup clusterMap clusters instances confirm)"
+sub tpg-delete-instance yes "2
+aks-tpg-poc-01
+orders-db
+orders-db
+${n_pb}
+2
+n
+${n_fb}
+2
+n
+1"
+grep -q "purgeBackups=true needs finalBackup=false (finalBackup is true)" <<<"$OUT" && argo_has "purgeBackups=true" && argo_has "finalBackup=false" \
+  && ok "delete-instance: purgeBackups=true with the default finalBackup=true is refused in the menu; with finalBackup=false it is submitted" || bad "delete purge" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
 
 # ---- Round 15 (1f): the scripts run from any directory, through a link, or with TPG_FLEET_DIR
 mkdir -p "$TMP/elsewhere" "$TMP/links" "$TMP/copy"

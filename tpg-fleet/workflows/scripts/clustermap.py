@@ -71,7 +71,7 @@ NAMESPACE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
 
 # Workflows where every cluster needs at least one instance, and the cluster keys
 # that make an instance-less cluster meaningful in the others.
-INSTANCES_REQUIRED = {"day0", "create-instance", "backup", "delete-instance", "network-policy"}
+INSTANCES_REQUIRED = {"day0", "create-instance", "backup", "delete-instance", "network-policy", "backup-expire"}
 CLUSTER_ACTION_KEYS = {
     "upgrade": ["operatorVersion"],
     "scale": ["maxReadReplicas"],
@@ -229,6 +229,8 @@ def check_list(t, value, where):
     for p in items:
         if t == "nameList" and not NAME.match(p):
             return items, f"{where}: '{p}' must be a lowercase DNS label"
+        if t == "k8sNameList" and not K8S_NAME.match(p):
+            return items, f"{where}: '{p}' must be a Kubernetes object name (lowercase letters, digits, '-' and '.')"
         if t == "cidrList":
             try:
                 ipaddress.ip_network(p, strict=True)
@@ -289,7 +291,7 @@ def check_value(spec, value, where):
     t = spec["type"]
     if value is None:
         return None, f"{where}: null is not a value; remove the key to use the default"
-    if t in ("nameList", "cidrList", "fqdnList"):
+    if t in ("nameList", "k8sNameList", "cidrList", "fqdnList"):
         return check_list(t, value, where)
     if t == "stringMap":
         return check_map(value, where)

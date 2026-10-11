@@ -65,7 +65,8 @@ run_data() {   # a result key: the last record of it as the JSON delete-instance
   grep -F "$1|" "@TMP@/records" | tail -n1 | jq -Rc 'split("|") | {status: .[1], reason: .[2], detail: .[3]}'
 }
 setting() { :; }
-use_cluster() { CLUSTER="$1"; }
+use_cluster() { [[ ! -f "@TMP@/unusable.$1" ]] || return 1; CLUSTER="$1"; }   # $TMP/unusable.<cluster>: its kubeconfig is not there
+registered_clusters() { cat "@TMP@/registered"; }
 git_clone() { rm -rf "$1"; mkdir -p "$1"; cp -r "@REPO@/." "$1/"; cp "@TMP@/fleet.yaml" "$1/clusters/fleet.yaml"
   [[ ! -d "@TMP@/deleted" ]] || cp -r "@TMP@/deleted" "$1/clusters/deleted"; }
 git_commit_push() {
@@ -145,6 +146,27 @@ live_items() {  # live_items [NAMESPACE]: the Postgres objects as the kubectl li
   jq -Rn '[inputs | split(" ") | select(length == 2) | {metadata: {name: .[0], namespace: .[1]}}]' < "@TMP@/live" \
     | jq -c --arg ns "${1:-}" '{items: [.[] | select($ns == "" or .metadata.namespace == $ns)]}'
 }
+# Azure Blob (purgeBackups): curl is stubbed by a fake storage account, @TMP@/blobserver.py. It checks the SharedKey
+# signature of every request against the documented algorithm (its own implementation: the string to sign, the
+# canonicalized headers and resource), serves List Blobs with prefix and marker paging ($STUB_PAGE names a page) and
+# Delete Blob over the blobs in @TMP@/blobs ("container/name" lines), and writes "blob ..." events. The Authorization
+# header arrives on stdin (-H @-), the way lib.sh sends it
+curl() {
+  local out="" url="" verb=GET hdrs="" auth=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o) out="$2"; shift 2 ;;
+      -w|--max-time) shift 2 ;;
+      -X) verb="$2"; shift 2 ;;
+      -H) if [[ "$2" == "@-" ]]; then auth="$(cat)"; else hdrs+="$2"$'\n'; fi; shift 2 ;;
+      -*) shift ;;
+      *) url="$1"; shift ;;
+    esac
+  done
+  STUB_VERB="$verb" STUB_URL="$url" STUB_AUTH="$auth" STUB_HEADERS="$hdrs" STUB_OUT="$out" STUB_KEY="$(cat "@VAULTD@/server-key")" \
+    STUB_BLOBS="@TMP@/blobs" STUB_EV="@TMP@/events" STUB_FAIL="@TMP@/blob-fail" STUB_PAGE="${STUB_PAGE:-3}" python3 "@TMP@/blobserver.py"
+}
+
 tk() {
   local ns="" args="$*" name
   [[ "$1" != "-n" ]] || ns="$2"
@@ -152,6 +174,33 @@ tk() {
     *readyz*) return 0 ;;
     *"get crd postgres.sql.tanzu.vmware.com"*) return 0 ;;
     *"get crd -o name"*) return 0 ;;
+    *"get postgresbackuplocation -A -o json"*)   # the locations of CLUSTER: $TMP/locations lines cluster|namespace|name|container|repoPath|endpoint|secret
+      jq -Rn --arg c "$CLUSTER" '[inputs | split("|") | select(length >= 5 and .[0] == $c)
+        | {metadata: {namespace: .[1], name: .[2]}, spec: {storage: {azure: ({container: .[3], repoPath: .[4], secret: {name: (.[6] // "backup-storage")}}
+            + (if (.[5] // "") != "" then {endpoint: .[5]} else {} end))}}}] | {items: .}' < "@TMP@/locations" | jq -c . ;;
+    *" get postgresbackuplocation "*"--ignore-not-found"*)
+      jq -Rn --arg c "$CLUSTER" --arg ns "$ns" --arg n "$5" '[inputs | split("|") | select(length >= 5 and .[0] == $c and .[1] == $ns and .[2] == $n)
+        | {metadata: {namespace: .[1], name: .[2]}, spec: {storage: {azure: ({container: .[3], repoPath: .[4], secret: {name: (.[6] // "backup-storage")}}
+            + (if (.[5] // "") != "" then {endpoint: .[5]} else {} end))}}}] | .[0] // empty' < "@TMP@/locations" | jq -c . ;;
+    *" delete postgresbackuplocation "*)
+      ev "delete postgresbackuplocation $ns/$5"; grep -vF "$CLUSTER|$ns|$5|" "@TMP@/locations" > "@TMP@/locations.n" || true; mv "@TMP@/locations.n" "@TMP@/locations" ;;
+    *" get secret "*accountName*) printf '%s' "$(cat "@TMP@/acct.$CLUSTER.$ns" 2>/dev/null || printf 'acct1')" | base64 ;;
+    *" get postgresbackup -o json"*)   # the backups of $TMP/backups.json plus the unfinished operations of $TMP/busyops
+      jq -cn --slurpfile b "@TMP@/backups.json" --argjson busy "$(jq -Rn --arg ns "$ns" '[inputs | split(" ") | select(length == 2 and .[0] == $ns and .[1] == "postgresbackup")
+        | {metadata: {name: "op"}, status: {phase: "Running"}}]' < "@TMP@/busyops")" '{items: ($b[0].items + $busy)}' ;;
+    *" get postgresbackup "*"--ignore-not-found"*)
+      jq -c --arg n "$5" '.items[] | select(.metadata.name == $n)' "@TMP@/backups.json" ;;
+    *" patch postgresbackup "*)   # an expire: the stub plays the operator (removes the backup and, for a full one, its chain); $TMP/decline.<name>, $TMP/silent.<name>
+      name="$5"; ev "expire $name"
+      if [[ -f "@TMP@/silent.$name" ]]; then
+        jq --arg n "$name" '(.items[] | select(.metadata.name == $n) | .spec.expire) = true' "@TMP@/backups.json" > "@TMP@/b.n"
+      elif [[ -f "@TMP@/decline.$name" ]]; then
+        jq --arg n "$name" '(.items[] | select(.metadata.name == $n)) |= (.spec.expire = true | .status.conditions = [{type: "Expired", reason: "ExpireFailed", status: "False", message: "pgBackRest: unable to remove the latest full backup"}])' "@TMP@/backups.json" > "@TMP@/b.n"
+      else
+        jq --arg n "$name" '([.items[] | select(.metadata.name == $n) | .status.restoreLabel][0] // "") as $l
+          | .items |= map(select(.metadata.name != $n and (($l | endswith("F")) and ((.status.restoreLabel // "") | startswith($l + "_")) | not)))' "@TMP@/backups.json" > "@TMP@/b.n"
+      fi
+      mv "@TMP@/b.n" "@TMP@/backups.json" ;;
     *" apply -f -"*) cat > "@TMP@/applied"; ev "apply $ns|$(awk '/^kind:/ {print $2}' "@TMP@/applied")" ;;   # the final backup: a PostgresBackup in the namespace it is asked in
     *" get postgresbackup -o json"*|*" get postgresrestore -o json"*|*" get postgresversionupgrade -o json"*)   # $TMP/busyops: "<namespace> <kind>" lines of unfinished operations
       jq -Rn --arg ns "$ns" --arg k "${args##* get }" '[inputs | split(" ") | select(length == 2 and .[0] == $ns and .[1] == ($k | split(" ")[0]))
@@ -165,7 +214,7 @@ tk() {
     *" get postgres "*)
       name="$5"
       grep -qx "$name $ns" "@TMP@/live" || { echo "Error from server (NotFound): postgres \"$name\" not found" >&2; return 1; }
-      case "$args" in *currentState*) printf 'Running' ;; *stanzaName*) printf 'stanza-%s' "$name" ;; esac ;;
+      case "$args" in *currentState*) if [[ -f "@TMP@/pgstate" ]]; then cat "@TMP@/pgstate"; else printf 'Running'; fi ;; *stanzaName*) printf 'stanza-%s' "$name" ;; esac ;;
     *" get pvc"*)
       sel=""; [[ "$args" != *"-l postgres-instance="* ]] || sel="$(sed -E 's/.*-l postgres-instance=([^ ]+).*/\1/' <<<"$args")"
       jq -Rn --arg ns "$ns" --arg sel "$sel" '[inputs | split(" ") | select(length == 3 and .[1] == $ns and ($sel == "" or .[2] == $sel))
@@ -183,18 +232,134 @@ tk() {
   esac
 }
 PRELUDE
-sed -e "s#@TMP@#$TMP#g" -e "s#@ROOT@#$ROOT#g" -e "s#@REPO@#$REPO#g" "$TMP/prelude.tmpl" > "$TMP/prelude.sh"
+
+# ---- the fake storage account behind curl (purgeBackups): SharedKey checked per the Azure documentation
+cat > "$TMP/blobserver.py" <<'PY'
+import base64, fcntl, hashlib, hmac, os, sys, urllib.parse
+import xml.etree.ElementTree as ET
+
+verb, url, auth = os.environ["STUB_VERB"], os.environ["STUB_URL"], os.environ["STUB_AUTH"].strip()
+headers = {}
+for line in os.environ["STUB_HEADERS"].splitlines():
+    if ":" in line:
+        k, v = line.split(":", 1)
+        headers[k.strip().lower()] = v.strip()
+u = urllib.parse.urlparse(url)
+account = u.netloc.split(".")[0]
+query = urllib.parse.parse_qs(u.query, keep_blank_values=True)
+
+def reply(code, body=""):
+    out = os.environ["STUB_OUT"]
+    if out and body:
+        with open(out, "w") as f:
+            f.write(body)
+    elif out and out != "/dev/null":
+        open(out, "w").close()
+    print(code, end="")
+    sys.exit(0)
+
+def ev(line):
+    with open(os.environ["STUB_EV"], "a") as f:
+        f.write(line + "\n")
+
+# the string to sign, from the documentation of the Blob service (Shared Key, version 2021-08-06)
+canon_headers = "".join(f"{k}:{v}\n" for k, v in sorted(headers.items()) if k.startswith("x-ms-"))
+canon_res = "/" + account + u.path
+for k in sorted(query):
+    canon_res += "\n" + k.lower() + ":" + ",".join(query[k])
+sts = verb + "\n" + "\n" * 11 + canon_headers + canon_res
+sig = base64.b64encode(hmac.new(base64.b64decode(os.environ["STUB_KEY"]), sts.encode(), hashlib.sha256).digest()).decode()
+if auth != f"Authorization: SharedKey {account}:{sig}":
+    ev("blob 403 bad signature")
+    reply(403, "<Error><Code>AuthenticationFailed</Code></Error>")
+if headers.get("x-ms-version") != "2021-08-06":
+    reply(400)
+
+container = u.path.strip("/").split("/")[0]
+blobs = [l.rstrip("\n") for l in open(os.environ["STUB_BLOBS"]) if l.strip()]
+if verb == "GET" and query.get("comp") == ["list"]:
+    prefix = query.get("prefix", [""])[0]
+    marker = query.get("marker", [""])[0]
+    page = min(int(query.get("maxresults", ["5000"])[0]), int(os.environ["STUB_PAGE"]))
+    names = sorted(b[len(container) + 1:] for b in blobs if b.startswith(container + "/"))
+    names = [n for n in names if n.startswith(prefix) and n >= marker]
+    ev(f"blob LIST {container} prefix={prefix} marker={marker} -> {len(names[:page])}")
+    root = ET.Element("EnumerationResults")
+    bl = ET.SubElement(root, "Blobs")
+    for n in names[:page]:
+        ET.SubElement(ET.SubElement(bl, "Blob"), "Name").text = n
+    ET.SubElement(root, "NextMarker").text = names[page] if len(names) > page else ""
+    reply(200, ET.tostring(root, encoding="unicode"))
+if verb == "DELETE":
+    name = urllib.parse.unquote(u.path.strip("/")[len(container) + 1:])
+    full = container + "/" + name
+    fail = os.environ["STUB_FAIL"]
+    if os.path.exists(fail) and open(fail).read().strip() == full:
+        ev(f"blob DELETE {full} -> 500")
+        reply(500)
+    if full not in blobs:
+        ev(f"blob DELETE {full} -> 404")
+        reply(404)
+    with open(os.environ["STUB_BLOBS"] + ".lock", "w") as lock:    # the client deletes 8 blobs at a time
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        blobs = [l.rstrip("\n") for l in open(os.environ["STUB_BLOBS"]) if l.strip()]
+        if full not in blobs:
+            ev(f"blob DELETE {full} -> 404")
+            reply(404)
+        blobs.remove(full)
+        with open(os.environ["STUB_BLOBS"] + ".new", "w") as f:    # replaced whole: a reader never sees half a file
+            f.write("".join(b + "\n" for b in blobs))
+        os.replace(os.environ["STUB_BLOBS"] + ".new", os.environ["STUB_BLOBS"])
+    ev(f"blob DELETE {full}")
+    reply(202)
+reply(400)
+PY
+STORAGE_KEY="$(printf 'storage-account-key-0123456789ab' | base64)"   # the fleet's key (Vault tpg/shared/backup-storage)
+VAULTD="$TMP-vault"; mkdir -p "$VAULTD"; trap 'rm -rf "$TMP" "$VAULTD"' EXIT
+export VAULT_SECRETS_DIR="$VAULTD"
+jq -n --arg k "$STORAGE_KEY" '{accountName: "acct1", accountKey: $k}' > "$VAULTD/backup-storage.json"
+sed -e "s#@TMP@#$TMP#g" -e "s#@ROOT@#$ROOT#g" -e "s#@REPO@#$REPO#g" -e "s#@VAULTD@#$VAULTD#g" "$TMP/prelude.tmpl" > "$TMP/prelude.sh"
 for s in delete-instance delete-apps backup-instance; do
   sed -e "s#source /scripts/lib.sh#source $TMP/prelude.sh#" -e "s#bash /scripts/delete-instance.sh#bash $TMP/delete-instance.sh#" -e "s#bash /scripts/backup-instance.sh#bash $TMP/backup-instance.sh#" \
     "$ROOT/workflows/scripts/$s.sh" > "$TMP/$s.sh"
 done
 
+cat > "$TMP/backups.base.json" <<'JSON'
+{"items": [
+ {"metadata": {"name": "orders-full-1"},  "spec": {"sourceInstance": {"name": "orders-db"}}, "status": {"phase": "Succeeded", "restoreLabel": "20260101-000000F"}},
+ {"metadata": {"name": "orders-incr-1a"}, "spec": {"sourceInstance": {"name": "orders-db"}}, "status": {"phase": "Succeeded", "restoreLabel": "20260101-000000F_20260102-000000I"}},
+ {"metadata": {"name": "orders-full-2"},  "spec": {"sourceInstance": {"name": "orders-db"}}, "status": {"phase": "Succeeded", "restoreLabel": "20260110-000000F"}},
+ {"metadata": {"name": "orders-failed"},  "spec": {"sourceInstance": {"name": "orders-db"}}, "status": {"phase": "Failed"}},
+ {"metadata": {"name": "app-a-full-1"},   "spec": {"sourceInstance": {"name": "app-a"}},     "status": {"phase": "Succeeded", "restoreLabel": "20260101-000000F"}}
+]}
+JSON
+# the fake storage account: the repository of orders-db (7 blobs: paging with 3 a page), its neighbours that must stay
+# (orders-db-2 shares the prefix text, app-a is another instance), a container of another cluster
+cat > "$TMP/blobs.base" <<'BLOBS'
+pg-backups-c1/pg-orders-db/orders-db/archive/stanza/17-1/0000000100000000/000000010000000000000001-aa.gz
+pg-backups-c1/pg-orders-db/orders-db/archive/stanza/17-1/0000000100000000/000000010000000000000002-bb.gz
+pg-backups-c1/pg-orders-db/orders-db/archive/stanza/archive.info
+pg-backups-c1/pg-orders-db/orders-db/backup/stanza/20260101-000000F/backup.manifest
+pg-backups-c1/pg-orders-db/orders-db/backup/stanza/20260101-000000F/pg_data/base 1
+pg-backups-c1/pg-orders-db/orders-db/backup/stanza/backup.info
+pg-backups-c1/pg-orders-db/orders-db/backup/stanza/backup.info.copy
+pg-backups-c1/pg-orders-db/orders-db-2/archive/stanza/archive.info
+pg-backups-c1/pg-orders-db/orders-db-2/backup/stanza/backup.info
+pg-backups-c1/shared/app-a/archive/stanza/archive.info
+pg-backups-c1/pg-orders-dbx/archive.info
+pg-backups-c2/pg-orders-db/orders-db/archive/stanza/archive.info
+BLOBS
 reset() {  # reset [REMOVE_INSTANCES...]: the base fleet, every instance running, one PVC each, app-a tracks the shared Secrets
   rm -rf "$TMP/work" "$TMP/deleted" "$TMP/render-repo"; rm -f "$TMP/sync-fail" "$TMP/no-move" "$TMP/vss-not-ready" "$TMP/partial" "$TMP/late" "$TMP/stuck-sa" "$TMP/pr-timeout" "$TMP"/tracked.*; : > "$TMP/op-running"; : > "$TMP/busyops"; : > "$TMP/nsgone"; : > "$TMP/records"; : > "$TMP/events"; : > "$TMP/removed"; echo 0 > "$TMP/rev"
   cp "$TMP/fleet.base.yaml" "$TMP/fleet.yaml"
   printf 'app-a shared\napp-b shared\napp-c shared\norders-db pg-orders-db\n' > "$TMP/live"
   printf 'data-app-a-0 shared app-a\ndata-app-b-0 shared app-b\ndata-app-c-0 shared app-c\ndata-orders-db-0 pg-orders-db orders-db\n' > "$TMP/pvcs"
   echo tpg-c1-app-a > "$TMP/tracked"
+  # purgeBackups: the backup locations of every instance (their repoPath is /<namespace>/<instance>), the registered
+  # clusters, the backups of orders-db, the blobs of the fake storage account, and the key the server checks
+  rm -f "$TMP/pgstate" "$TMP"/unusable.* "$TMP"/silent.* "$TMP"/decline.* "$TMP/blob-fail" "$TMP"/acct.*
+  printf 'c1|shared|app-a-backup-location|pg-backups-c1|/shared/app-a\nc1|shared|app-b-backup-location|pg-backups-c1|/shared/app-b\nc1|shared|app-c-backup-location|pg-backups-c1|/shared/app-c\nc1|pg-orders-db|orders-db-backup-location|pg-backups-c1|/pg-orders-db/orders-db\n' > "$TMP/locations"
+  echo c1 > "$TMP/registered"; cp "$TMP/backups.base.json" "$TMP/backups.json"; cp "$TMP/blobs.base" "$TMP/blobs"; printf '%s' "$STORAGE_KEY" > "$VAULTD/server-key"
   local i
   for i in "$@"; do
     I="$i" yq -i 'del(.clusters.c1.instances[strenv(I)])' "$TMP/fleet.yaml"
@@ -767,6 +932,191 @@ printf 'shared/regsecret\nshared/backup-storage\n' > "$TMP/secrets"
 deploy "$INV_AB"
 [[ "$(grep -F 'sync_instance_app' "$TMP/events" | paste -sd' ')" == "sync_instance_app app-a sync_instance_app app-b" ]] \
   && ok "day0-deploy: the owner of the namespace is synced before the instance that shares it (inventory order b, a)" || bad "owner first in deploy" "$(cat "$TMP/events") $OUT"
+
+
+# ---- purgeBackups (Round 23, locked decision 4): expire every backup while the instance runs, then delete the blobs
+delp() {  # delp INSTANCE PURGE_BACKUPS [FINAL_BACKUP] -> tpg-delete-instance; output in $OUT, status in $RC
+  RC=0; OUT="$(bash "$TMP/delete-instance.sh" wf c1 "$1" "$1" "${3:-false}" false false 600 "$2" 2>&1)" || RC=$?
+}
+blobs_left() { grep -c "^$1" "$TMP/blobs" || true; }
+orders_prefix='pg-backups-c1/pg-orders-db/orders-db/'
+reset
+delp orders-db true
+e1="$(lineno 'expire orders-incr-1a')"; e2="$(lineno 'expire orders-full-1')"; e3="$(lineno 'expire orders-full-2')"
+d1="$(lineno 'delete postgres pg-orders-db/orders-db')"; d2="$(lineno 'delete postgresbackuplocation pg-orders-db/orders-db-backup-location')"; b1="$(lineno 'blob DELETE')"
+[[ "$RC" -eq 0 && -n "$e1" && -n "$e2" && -n "$e3" && -n "$d1" && -n "$d2" && -n "$b1" ]] \
+  && [[ "$e3" -lt "$e1" && "$e1" -lt "$e2" && "$e2" -lt "$d1" && "$d1" -lt "$d2" && "$d2" -lt "$b1" ]] \
+  && ok "purgeBackups: every backup is expired first (newest first, incremental before its full), then the Postgres and the location are deleted, then the blobs" \
+  || bad "purge order" "$(cat "$TMP/events") $OUT"
+! has_ev 'expire orders-failed' && ! has_ev 'expire app-a-full-1' \
+  && ok "purgeBackups: a backup without a pgBackRest label and the backups of other instances are not expired" || bad "expire scope" "$(cat "$TMP/events")"
+[[ "$(blobs_left "$orders_prefix")" == 0 && "$(blobs_left 'pg-backups-c1/pg-orders-db/orders-db-2/')" == 2 && "$(blobs_left 'pg-backups-c1/shared/app-a/')" == 1 \
+   && "$(blobs_left 'pg-backups-c1/pg-orders-dbx/')" == 1 && "$(blobs_left 'pg-backups-c2/')" == 1 ]] \
+  && ok "purgeBackups: every blob under container/repoPath is gone; orders-db-2 (same text prefix), another instance, a sibling folder and another container stay" \
+  || bad "blobs left" "$(cat "$TMP/blobs")"
+[[ "$(grep -c '^blob LIST pg-backups-c1 prefix=pg-orders-db/orders-db/ marker= ' "$TMP/events")" == 2 && "$(grep -c '^blob LIST pg-backups-c1 prefix=pg-orders-db/orders-db/ marker=[^ ]' "$TMP/events")" == 2 ]] \
+  && ok "blob listing pages with NextMarker (3 names a page: the first listing, two marker pages, then the check listing)" || bad "paging" "$(grep '^blob LIST' "$TMP/events")"
+grep -q '^blob LIST .* -> 0$' "$TMP/events" && [[ "$(grep '^blob LIST' "$TMP/events" | tail -n1)" == *'-> 0' ]] \
+  && ok "the prefix is listed again at the end and found empty" || bad "check listing" "$(grep '^blob LIST' "$TMP/events")"
+! grep -q 'bad signature' "$TMP/events" \
+  && ok "every List Blobs and Delete Blob request carries a valid SharedKey signature (checked by the fake account against the documented string to sign)" || bad "signature" "$(cat "$TMP/events")"
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "3 backups expired, 1 without a pgBackRest label skipped" && rec "result.c1.orders-db|SUCCEEDED" | grep -q "7 blobs deleted under pg-backups-c1/pg-orders-db/orders-db" \
+  && ! rec "result.c1.orders-db|SUCCEEDED" | grep -q "backup repository kept" \
+  && ok "purgeBackups: the result says what was expired and how many blobs were deleted where" || bad "purge result" "$(cat "$TMP/records")"
+ls "$TMP"/deleted/c1/orders-db-*.yaml >/dev/null 2>&1 && [[ "$(yq '.deleted.backupLocation.container' "$TMP"/deleted/c1/orders-db-*.yaml)" == pg-backups-c1 \
+   && "$(yq '.deleted.backupLocation.repoPath' "$TMP"/deleted/c1/orders-db-*.yaml)" == /pg-orders-db/orders-db ]] \
+  && ok "the audit copy records the container and repoPath of the backup location (a re-run finds them after the object is gone)" || bad "audit location" "$(cat "$TMP"/deleted/c1/*.yaml)"
+# the storage key: not in any log, record, event, file of the run, nor in the output
+if grep -rqF -- "$STORAGE_KEY" "$TMP" 2>/dev/null || grep -qF -- "$STORAGE_KEY" <<<"$OUT"; then
+  bad "the storage key appears in the output, a record, an event or a file" "$(grep -rlF -- "$STORAGE_KEY" "$TMP" | head)"
+else
+  ok "the storage key is in no log line, record, event or file of the run (it lives in the Vault Agent file and the fake server's key file, both outside the work area)"
+fi
+
+# the key never reaches an argument of a program: the stubbed curl sees URL and header names only
+reset
+delp orders-db true
+if grep -qF -- "$STORAGE_KEY" "$TMP/events"; then bad "key in curl events"; else ok "purgeBackups: the Authorization header goes to curl on stdin, the key is in no curl argument"; fi
+
+# ---- a repoPath another PostgresBackupLocation uses: expire only, blobs kept, reported
+reset
+echo c2 >> "$TMP/registered"
+echo 'c2|team-x|restored-source|pg-backups-c1|/pg-orders-db/orders-db' >> "$TMP/locations"
+delp orders-db true
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "3 backups expired" && rec "result.c1.orders-db|SUCCEEDED" | grep -q "backups expired, blobs KEPT: repository pg-backups-c1/pg-orders-db/orders-db is also used by c2/team-x/restored-source (/pg-orders-db/orders-db)" \
+  && rec "warning.c1.orders-db.repo|WARNING|BACKUP_REPO_SHARED" | grep -q "were not deleted" \
+  && [[ "$(blobs_left "$orders_prefix")" == 7 ]] && ! has_ev 'blob DELETE' && ! has_ev 'blob LIST' && has_ev 'expire orders-full-2' && has_ev 'delete postgres pg-orders-db/orders-db' \
+  && ok "shared repoPath on another registered cluster: every backup is expired, the instance is deleted, the blobs stay; the result and a warning name the other location" \
+  || bad "shared repo" "$(cat "$TMP/events") $(cat "$TMP/records")"
+reset
+echo 'c1|team-y|parent-repo|pg-backups-c1|/pg-orders-db' >> "$TMP/locations"
+delp orders-db true
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "blobs KEPT" && [[ "$(blobs_left "$orders_prefix")" == 7 ]] \
+  && ok "shared repoPath: a location whose repoPath contains this one (the pre-Round 22 /<namespace> path) counts as sharing" || bad "parent repo" "$(cat "$TMP/records")"
+reset
+echo 'c1|team-y|child-repo|pg-backups-c1|/pg-orders-db/orders-db/old' >> "$TMP/locations"
+delp orders-db true
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "blobs KEPT" && ok "shared repoPath: a location inside this repository counts as sharing" || bad "child repo" "$(cat "$TMP/records")"
+reset
+echo 'c1|team-y|other-container|pg-backups-c9|/pg-orders-db/orders-db' >> "$TMP/locations"
+echo 'c1|team-y|other-account|pg-backups-c1|/pg-orders-db/orders-db||backup-storage-2' >> "$TMP/locations"
+echo acct2 > "$TMP/acct.c1.team-y"
+delp orders-db true
+[[ "$(blobs_left "$orders_prefix")" == 0 ]] && rec "result.c1.orders-db|SUCCEEDED" | grep -q "blobs deleted" \
+  && ok "not shared: the same repoPath in another container, or behind another storage account, is another repository" || bad "not shared" "$(cat "$TMP/records") $OUT"
+reset
+echo c2 >> "$TMP/registered"; touch "$TMP/unusable.c2"
+delp orders-db true
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "blobs KEPT: repository .* also used by cluster c2 (kubeconfig unavailable: not scanned)" && [[ "$(blobs_left "$orders_prefix")" == 7 ]] \
+  && ok "a registered cluster that cannot be scanned counts as sharing: expire only, blobs kept, the report says which cluster was not scanned" || bad "unscannable" "$(cat "$TMP/records")"
+reset
+: > "$TMP/registered"
+delp orders-db true
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "blobs KEPT: repository .* the registered clusters cannot be listed (or c1 is not among them)" && [[ "$(blobs_left "$orders_prefix")" == 7 ]] \
+  && ok "an empty cluster registry (or one without the cluster itself) proves nothing: counts as sharing, blobs kept" || bad "empty registry" "$(cat "$TMP/records")"
+reset
+echo 'c1|shared|app-a-backup-location2|pg-backups-c1|/pg-orders-db/orders-db' >> "$TMP/locations"
+delp orders-db true
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "also used by c1/shared/app-a-backup-location2" && ok "a second location on the same cluster counts as sharing" || bad "same cluster" "$(cat "$TMP/records")"
+
+# ---- refused: finalBackup true or required, nothing changes
+reset
+delp orders-db true true
+rec "result.c1.orders-db|FAILED|INVALID_OPTIONS" | grep -q "purgeBackups=true needs finalBackup=false" && [[ ! -s "$TMP/events" ]] && cmp -s "$TMP/blobs" "$TMP/blobs.base" \
+  && ok "purgeBackups=true with finalBackup=true is refused before anything changes" || bad "refused true" "$(cat "$TMP/records") $(cat "$TMP/events")"
+reset
+delp orders-db true required
+rec "result.c1.orders-db|FAILED|INVALID_OPTIONS" | grep -q "finalBackup=required" && [[ ! -s "$TMP/events" ]] \
+  && ok "purgeBackups=true with finalBackup=required is refused as well" || bad "refused required" "$(cat "$TMP/records") $(cat "$TMP/events")"
+
+# ---- more refusals, all before anything changes
+reset
+sed -i '/orders-db-backup-location/d' "$TMP/locations"
+delp orders-db true
+rec "result.c1.orders-db|FAILED|PURGE_LOCATION_UNKNOWN" | grep -q "no audit copy" && [[ ! -s "$TMP/events" ]] \
+  && ok "no backup location object and no audit copy: PURGE_LOCATION_UNKNOWN, nothing deleted" || bad "location unknown" "$(cat "$TMP/records") $(cat "$TMP/events")"
+reset
+sed -i 's#|/pg-orders-db/orders-db$#|/#' "$TMP/locations"
+delp orders-db true
+rec "result.c1.orders-db|FAILED|PURGE_REPOPATH_REFUSED" | grep -q "never deletes a whole container" && [[ ! -s "$TMP/events" ]] && cmp -s "$TMP/blobs" "$TMP/blobs.base" \
+  && ok "a repoPath that is the root of the container is refused (PURGE_REPOPATH_REFUSED)" || bad "root repoPath" "$(cat "$TMP/records") $(cat "$TMP/events")"
+reset
+rm -f "$VAULTD/backup-storage.json"
+delp orders-db true
+rec "result.c1.orders-db|FAILED|NO_VAULT_SECRET" | grep -q "backup-storage" && [[ ! -s "$TMP/events" ]] \
+  && ok "no storage key in Vault (the pod has no Vault Agent file): NO_VAULT_SECRET before anything is expired or deleted" || bad "no vault" "$(cat "$TMP/records") $(cat "$TMP/events")"
+jq -n --arg k "$STORAGE_KEY" '{accountName: "acct1", accountKey: $k}' > "$VAULTD/backup-storage.json"
+reset
+echo acct9 > "$TMP/acct.c1.pg-orders-db"
+delp orders-db true
+rec "result.c1.orders-db|FAILED|PURGE_ACCOUNT_MISMATCH" | grep -q "acct9" && [[ ! -s "$TMP/events" ]] \
+  && ok "the location's Secret names another storage account than the fleet's key: PURGE_ACCOUNT_MISMATCH, nothing deleted" || bad "account mismatch" "$(cat "$TMP/records") $(cat "$TMP/events")"
+
+# ---- what pgBackRest declines is reported; no answer stops the run before the delete
+reset
+touch "$TMP/decline.orders-full-2"
+delp orders-db true
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "pgBackRest declined to expire 1: orders-full-2: pgBackRest: unable to remove the latest full backup" \
+  && rec "warning.c1.orders-db|WARNING|BACKUP_EXPIRE_DECLINED" | grep -q "orders-full-2" && [[ "$RC" -eq 0 && "$(blobs_left "$orders_prefix")" == 0 ]] \
+  && ok "declined by pgBackRest: reported in the result and as a warning, not a failure; the blobs are deleted" || bad "declined" "$(cat "$TMP/records") $OUT"
+reset
+touch "$TMP/silent.orders-full-2"
+delp orders-db true
+rec "result.c1.orders-db|FAILED|BACKUP_EXPIRE_TIMEOUT" | grep -q "nothing was deleted" && ! has_ev 'delete postgres' && ! has_ev 'blob DELETE' && yq -e '.clusters.c1.instances | has("orders-db")' "$TMP/fleet.yaml" >/dev/null \
+  && ok "no answer to an expire: BACKUP_EXPIRE_TIMEOUT before the Postgres is deleted or the entry leaves Git" || bad "expire timeout" "$(cat "$TMP/records") $(cat "$TMP/events")"
+
+# an instance that is not Running cannot have its backups expired: its own repository is deleted anyway, a shared one is not touched
+reset
+printf 'Failed' > "$TMP/pgstate"
+delp orders-db true
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "no backups expired: currentState=Failed (the blobs are deleted anyway)" && ! has_ev 'expire ' && [[ "$(blobs_left "$orders_prefix")" == 0 ]] \
+  && ok "purgeBackups on an instance that is not Running: no expire is possible, its own blobs are deleted, the note says so" || bad "not running purge" "$(cat "$TMP/records") $(cat "$TMP/events")"
+reset
+printf 'Failed' > "$TMP/pgstate"
+echo c2 >> "$TMP/registered"
+echo 'c2|team-x|restored-source|pg-backups-c1|/pg-orders-db/orders-db' >> "$TMP/locations"
+delp orders-db true
+rec "result.c1.orders-db|FAILED|BACKUP_EXPIRE_IMPOSSIBLE" | grep -q "nothing was deleted" && ! has_ev 'delete postgres' && ! has_ev 'blob ' \
+  && ok "purgeBackups on an instance that is not Running with a shared repoPath: BACKUP_EXPIRE_IMPOSSIBLE before anything is deleted" || bad "not running shared" "$(cat "$TMP/records") $(cat "$TMP/events")"
+
+# ---- a blob that cannot be deleted: the run fails after the instance is gone, and a re-run finishes from the audit copy
+reset
+printf '%s\n' "pg-backups-c1/pg-orders-db/orders-db/archive/stanza/archive.info" > "$TMP/blob-fail"
+delp orders-db true
+rec "result.c1.orders-db|FAILED|BLOB_PURGE_FAILED" | grep -q "pg-backups-c1/pg-orders-db/orders-db/archive/stanza/archive.info answered HTTP 500" \
+  && has_ev 'delete postgres pg-orders-db/orders-db' && [[ "$(blobs_left "$orders_prefix")" == 5 ]] \
+  && ok "a blob that cannot be deleted: BLOB_PURGE_FAILED names it and the HTTP status; the instance is already deleted" || bad "blob fail" "$(cat "$TMP/records") $(cat "$TMP/blobs")"
+rm -f "$TMP/blob-fail"; : > "$TMP/events"; : > "$TMP/records"
+grep -vE '^orders-db ' "$TMP/live" > "$TMP/live.n"; mv "$TMP/live.n" "$TMP/live"
+delp orders-db true
+rec "result.c1.orders-db|SUCCEEDED" | grep -q "5 blobs deleted under pg-backups-c1/pg-orders-db/orders-db" && rec "result.c1.orders-db|SUCCEEDED" | grep -q "no backups expired: Postgres orders-db does not run" \
+  && [[ "$(blobs_left "$orders_prefix")" == 0 && "$RC" -eq 0 ]] \
+  && ok "a re-run (entry and location gone) finds the container and repoPath in the audit copy and deletes what is left" || bad "re-run" "$(cat "$TMP/records") $OUT"
+reset
+WRONG="$(printf 'another-key-0123456789abcdefghij' | base64)"; printf '%s' "$WRONG" > "$VAULTD/server-key"
+delp orders-db true
+rec "result.c1.orders-db|FAILED|BLOB_PURGE_FAILED" | grep -q "HTTP 403 (the storage key was rejected)" && [[ "$(blobs_left "$orders_prefix")" == 7 ]] \
+  && ok "a rejected storage key: BLOB_PURGE_FAILED says HTTP 403, key rejected; nothing deleted" || bad "403" "$(cat "$TMP/records")"
+! grep -rqF -- "$WRONG" "$TMP/records" "$TMP/events" "$TMP/work" 2>/dev/null && ok "a failed run does not leak the key either (records, events, work directory)" || bad "key in a failed run" "$(grep -rlF -- "$WRONG" "$TMP")"
+
+# ---- tpg-delete-apps passes it through: the input, the clusterMap key, the dry run
+reset
+RC=0; OUT="$(P_APPS='{"c1":["tpg-instances:orders-db"]}' P_DRY_RUN=false P_PURGE_PVCS=false P_PURGE_NS=false P_FINAL_BACKUP=false P_PURGE_BACKUPS=true P_FORCE=false P_TIMEOUT=600 \
+  bash "$TMP/delete-apps.sh" wf c1 2>&1)" || RC=$?
+has_ev 'expire orders-full-2' && has_ev 'blob DELETE' && [[ "$(blobs_left "$orders_prefix")" == 0 && "$RC" -eq 0 ]] \
+  && ok "delete-apps: the input purgeBackups=true reaches delete-instance (expire, delete, blobs)" || bad "apps purge" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+reset
+appsmap '{"c1":{"instances":{"orders-db":{"purgeBackups":"true","finalBackup":"false"}}}}'
+has_ev 'expire orders-full-2' && [[ "$(blobs_left "$orders_prefix")" == 0 && "$RC" -eq 0 ]] \
+  && ok "delete-apps: the clusterMap key purgeBackups of the instance reaches delete-instance" || bad "apps map purge" "$(cat "$TMP/events") $(cat "$TMP/records") $OUT"
+reset
+appsmap '{"c1":{"instances":{"orders-db":{"purgeBackups":"true","finalBackup":"true"}}}}'
+rec "result.c1.orders-db|FAILED|INVALID_OPTIONS" | grep -q "purgeBackups=true needs finalBackup=false" && ! has_ev 'expire' \
+  && ok "delete-apps with a clusterMap: purgeBackups without finalBackup=false (the input default is true) is refused for that instance, nothing expired" || bad "apps map refused" "$(cat "$TMP/records") $(cat "$TMP/events")"
+reset
+RC=0; OUT="$(P_APPS='{"c1":["tpg-instances:orders-db"]}' P_DRY_RUN=true P_PURGE_PVCS=false P_PURGE_NS=false P_FINAL_BACKUP=false P_PURGE_BACKUPS=true P_FORCE=false P_TIMEOUT=600 \
+  bash "$TMP/delete-apps.sh" wf c1 2>&1)" || RC=$?
+rec "result.c1.orders-db|SUCCEEDED|DRY_RUN" | grep -q "purgeBackups=true" && [[ ! -s "$TMP/events" ]] && ok "delete-apps dry run: the plan says purgeBackups=true and changes nothing" || bad "apps dry run purge" "$(cat "$TMP/records") $(cat "$TMP/events")"
 
 echo
 echo "delete: ${PASS} passed, ${FAIL} failed"

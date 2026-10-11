@@ -45,7 +45,7 @@ DISPLAY = {
     "boolean": "Boolean", "integer": "Integer", "posint": "Integer", "quantity": "String (quantity)",
     "enum": "Enum", "operatorVersion": "String (version)", "postgresVersion": "String (version)",
     "patchFile": "List (one file path)", "patchFileList": "List (file paths)", "caFile": "List (one file path)",
-    "kindList": "List (kinds)", "nameList": "List", "cidrList": "List (CIDRs)", "fqdnList": "List (host names)",
+    "kindList": "List (kinds)", "nameList": "List", "k8sNameList": "List (names)", "cidrList": "List (CIDRs)", "fqdnList": "List (host names)",
     "stringMap": "Map", "cron": "String (cron)",
 }
 
@@ -74,6 +74,7 @@ EXAMPLE = {
         "postgresValuesOverlayFilePath": ["~/overlays/orders-values.yaml"], "patchMode": "apply",
         "backupType": "full", "backupTimeoutSeconds": 3600, "replicas": 2, "enableHAIfNeeded": True,
         "preUpgradeBackup": True, "allowMajor": False, "purgePvcs": True, "purgeNamespace": True, "finalBackup": "required",
+        "purgeBackups": False, "backups": ["orders-db-full-202609010100"], "includeDependents": True,
         "exposure": "internalLoadBalancer", "serviceAnnotations": {"service.beta.kubernetes.io/azure-dns-label-name": "orders"},
         "readOnlyExposure": "clusterIP", "readOnlyServiceAnnotations": {"team": "orders"},
         "allowedSourceRanges": ["10.20.0.0/16"], "internalLoadBalancerSubnet": "snet-apps",
@@ -81,12 +82,20 @@ EXAMPLE = {
         "ingressFromCidrs": ["10.30.0.0/24"], "egressToCidrs": ["10.40.0.0/24"], "egressToFqdns": ["api.example.com"],
     },
 }
+# per workflow: a key the example shows as a comment because it excludes another key of that workflow
+COMMENTED_WF = {
+    "backup-expire": {"instance": {"purgeBackups": "purgeBackups: true   # instead of backups: expire every backup of the instance (not both; blobs are never deleted here)"}},
+}
 COMMENTED = {
     "cluster": {"backupCaBundleFile": "backupCaBundleFile: [./azure-ca.pem]   # or this instead of backupCaBundleVaultSecret (one source per level)",
                 "clearKinds": "clearKinds: [operatorValues]   # with patchMode: clear"},
     "instance": {"backupCaBundleVaultSecret": "backupCaBundleVaultSecret: azure-storage   # or this instead of backupCaBundleFile (one source per level)",
                  "clearKinds": "clearKinds: [PostgresBackupSchedule, postgresValues]   # with patchMode: clear"},
 }
+
+
+# keys whose input of the same name exists in some workflows only: tpg-backup-expire has no input purgeBackups
+NO_INPUT = {("backup-expire", "purgeBackups")}
 
 
 def _p(rx):
@@ -149,8 +158,8 @@ def value_schema(spec):
         return {"anyOf": [
             {"const": "all"},   # all stays bare; [all] is refused (Round 23)
             {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"enum": list(cm.PATCH_KINDS)}}]}
-    if t in ("nameList", "cidrList", "fqdnList"):
-        item = {"nameList": _p(cm.NAME), "fqdnList": _p(cm.FQDN),
+    if t in ("nameList", "k8sNameList", "cidrList", "fqdnList"):
+        item = {"nameList": _p(cm.NAME), "k8sNameList": _p(cm.K8S_NAME), "fqdnList": _p(cm.FQDN),
                 "cidrList": r"^[0-9A-Fa-f:.]+/[0-9]{1,3}$"}[t]
         return {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"type": "string", "pattern": item}}
     if t == "stringMap":
@@ -167,6 +176,8 @@ def need(spec, wf, key):
     """How the workflow uses the key, as the reference says it."""
     use = spec["workflows"][wf]
     flag = spec.get("flag", key)
+    if (wf, key) in NO_INPUT:
+        flag = ""
     if use == "required":
         return f"required (this key, or the input {flag})" if flag else "required"
     if not flag and key.startswith("backupCaBundle"):
@@ -235,7 +246,9 @@ def example_of(keys, wf):
     lines += ["  instances:", "    orders-db:"]
     inst = keys_of(keys, "instance", wf)
     for k, s in inst:
-        if k in EXAMPLE["instance"]:
+        if k in COMMENTED_WF.get(wf, {}).get("instance", {}):
+            lines.append(f"      # {COMMENTED_WF[wf]['instance'][k]}")
+        elif k in EXAMPLE["instance"]:
             lines.append(f"      {k}: {_yaml_value(EXAMPLE['instance'][k])}")
         else:
             lines.append(f"      # {COMMENTED['instance'][k]}")

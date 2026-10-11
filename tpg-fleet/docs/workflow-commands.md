@@ -28,6 +28,7 @@ Every workflow can also be started with an interactive script, `scripts/submit/t
 18. [Test data: pgdata](#18-test-data-pgdata)
 19. [Follow, approve, stop and clean up runs](#19-follow-approve-stop-and-clean-up-runs)
 20. [argocd CLI: inspect the sync steps behind the workflows](#20-argocd-cli-inspect-the-sync-steps-behind-the-workflows)
+21. [tpg-backup-expire](#21-tpg-backup-expire)
 
 ---
 
@@ -198,6 +199,9 @@ Instance keys:
 | `purgePvcs` | `Boolean` | delete-instance, delete-apps | As the input: delete the volumes |
 | `purgeNamespace` | `Boolean` | delete-instance, delete-apps | As the input: delete the namespace (needs purgePvcs true). Refused (NAMESPACE_SHARED) while another instance of clusters/fleet.yaml, or another Postgres, uses the namespace; tpg-delete-apps deletes a shared namespace after the last instance of the run, and with deleteOperator whoever else is there |
 | `finalBackup` | `Enum` | delete-instance, delete-apps | As the input: true (a final backup, best effort), false (none) or required (fail when the instance is not Running) |
+| `purgeBackups` | `Boolean` | delete-instance, delete-apps, backup-expire | Round 23. tpg-delete-instance, tpg-delete-apps: as the input - expire every PostgresBackup of the instance while it runs, then delete every blob left under its container and repoPath after it is gone (irreversible; needs finalBackup false; a repoPath another PostgresBackupLocation on any registered cluster uses is expired only, blobs kept and reported). tpg-backup-expire: true expires every backup of the instance and never deletes blobs; not together with backups |
+| `backups` | `List (names)` | backup-expire | Round 23, tpg-backup-expire: the PostgresBackup names to expire (a list in brackets, [orders-db-full-202609010100]). A full backup that has dependent differential or incremental backups needs includeDependents: true (else the instance is BLOCKED and the dependents are listed). Not together with purgeBackups |
+| `includeDependents` | `Boolean` | backup-expire | Round 23, tpg-backup-expire: true also expires the differential and incremental backups that depend on the listed ones (dependents first); required to expire a backup that has dependents. With backups only |
 | `exposure` | `Enum` | day0, create-instance | Read-write Service: clusterIP, internalLoadBalancer or loadBalancer |
 | `serviceAnnotations` | `Map` | day0, create-instance | Extra annotations of the read-write Service |
 | `readOnlyExposure` | `Enum` | day0, create-instance | Read-only Service: clusterIP, internalLoadBalancer or loadBalancer |
@@ -381,6 +385,7 @@ map that uses every key in `clustermap-<workflow>.example.yaml`:
       purgePvcs        Boolean           optional (default: the input purgePvcs)
       purgeNamespace   Boolean           optional (default: the input purgeNamespace)
       finalBackup      Enum              optional (default: the input finalBackup)
+      purgeBackups     Boolean           optional (default: the input purgeBackups)
 ```
 
 `tpg-delete-apps` (`clustermap-delete-apps.schema.json`):
@@ -395,6 +400,7 @@ map that uses every key in `clustermap-<workflow>.example.yaml`:
       purgePvcs        Boolean           optional (default: the input purgePvcs)
       purgeNamespace   Boolean           optional (default: the input purgeNamespace)
       finalBackup      Enum              optional (default: the input finalBackup)
+      purgeBackups     Boolean           optional (default: the input purgeBackups)
 ```
 
 `tpg-network-policy` (`clustermap-network-policy.schema.json`):
@@ -409,6 +415,17 @@ map that uses every key in `clustermap-<workflow>.example.yaml`:
       ingressFromCidrs       List (CIDRs)       optional (default: the input ingressFromCidrs)
       egressToCidrs          List (CIDRs)       optional (default: the input egressToCidrs)
       egressToFqdns          List (host names)  optional (default: the input egressToFqdns)
+```
+
+`tpg-backup-expire` (`clustermap-backup-expire.schema.json`):
+
+```text
+<cluster>:
+  instances:                           at least one
+    <instance>:
+      purgeBackups       Boolean       optional
+      backups            List (names)  optional
+      includeDependents  Boolean       optional
 ```
 
 <!-- END GENERATED: clustermap-keys -->
@@ -1328,7 +1345,7 @@ The applications per cluster come from `apps` (JSON) or from `clusterMap`: the i
 |---|---|---|---|---|
 | `clusters` | `List` | yes, without `clusterMap` | | Registered clusters to clean up |
 | `apps` | `Map (JSON)` | yes, without `clusterMap` | | Cluster to list of `tpg-instances`, `tpg-instances:<i>` (one element per instance: `"tpg-instances:orders-db", "tpg-instances:billing-db"`, never `tpg-instances:orders-db,billing-db`), `tpg-operator`. Every cluster in `clusters` needs an entry |
-| `clusterMap` | `Map` | no | | Instances per cluster, `deleteOperator` and `force` per cluster, `finalBackup`, `purgePvcs` and `purgeNamespace` per instance (section 3) |
+| `clusterMap` | `Map` | no | | Instances per cluster, `deleteOperator` and `force` per cluster, `finalBackup`, `purgePvcs`, `purgeNamespace` and `purgeBackups` per instance (section 3) |
 | `confirm` | `List` | yes | | Repeat the cluster names (`clusters`, or the clusters of `clusterMap`) |
 | `dryRun` | `Boolean` | no | `true` | `true` records the plan; `false` deletes (set `false` explicitly to delete) |
 | `purgePvcs` | `Boolean` | yes (input or map key per instance) | | `true` deletes PVCs and Azure disks; `false` keeps them |
@@ -1337,9 +1354,10 @@ The applications per cluster come from `apps` (JSON) or from `clusterMap`: the i
 | `force` | `Boolean` | no | `false` | With the operator: also delete Postgres instances not listed, and do not wait for running backups or restores |
 | `forceDeleteStuckApps` | `Boolean` | no | `true` | An Application that cannot be rendered (`ComparisonError`, for example an expired Broadcom registry token: 401) stays in `Deleting` for ever. `true`: after the delete wait the condition is logged, the Argo CD finalizer is removed (nothing is rendered), the leftovers are cleaned up as usual and the result carries `FORCED: Application removed without rendering (...)`; `false`: the run fails `APPLICATION_NOT_REMOVED` |
 | `finalBackup` | `Enum` | no | `true` | `true`, `false` or `required` (fail when the instance is not Running) |
+| `purgeBackups` | `Boolean` | no | `false` | `true` expires every PostgresBackup of each instance while it runs and, after the instance is gone, deletes every blob left under its container and `repoPath` (irreversible; needs `finalBackup=false`; a `repoPath` another PostgresBackupLocation on any registered cluster also uses is expired only, the blobs stay and the result says so). Also a `clusterMap` key per instance |
 | `timeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `1800`, `3600` | Timeouts |
 
-Order per cluster: instances (final backup, `fleet.yaml` removal, Application removal without cascade, Postgres objects, optional PVC and namespace purge), remaining Tanzu Postgres custom resources, operator (`fleet.yaml`, Application, leftover cluster-scoped objects, namespace `tanzu-postgres-operator`), CRDs. The Azure Blob backup repository is never deleted. With a `postgresVersion` key in `clusterMap`, an instance that runs another version is `SKIPPED_VERSION_MISMATCH` and kept.
+Order per cluster: instances (final backup, `fleet.yaml` removal, Application removal without cascade, Postgres objects, optional PVC and namespace purge), remaining Tanzu Postgres custom resources, operator (`fleet.yaml`, Application, leftover cluster-scoped objects, namespace `tanzu-postgres-operator`), CRDs. The Azure Blob backup repository is kept unless `purgeBackups` is true. With a `postgresVersion` key in `clusterMap`, an instance that runs another version is `SKIPPED_VERSION_MISMATCH` and kept.
 
 ```bash
 # 1. Plan (dry run) a full clean-up of two clusters
@@ -1422,12 +1440,13 @@ Guarded delete of instances (the per-instance step that `tpg-delete-apps` uses).
 |---|---|---|---|---|
 | `clusters` | `List` | yes, without `clusterMap` | | Registered clusters (`all` is not accepted) |
 | `instances` | `List` | yes, without `clusterMap` | | Instances to delete on every listed cluster. Each instance must be declared on each listed cluster |
-| `clusterMap` | `Map` | no | | Instances per cluster, with `finalBackup`, `purgePvcs` and `purgeNamespace` per instance (section 3) |
+| `clusterMap` | `Map` | no | | Instances per cluster, with `finalBackup`, `purgePvcs`, `purgeNamespace` and `purgeBackups` per instance (section 3) |
 | `confirm` | `List` | yes | | Repeat the `instances` value; with `clusterMap`, repeat its cluster names |
 | `forceDeleteStuckApps` | `Boolean` | no | `true` | As tpg-delete-apps: an Application stuck in `Deleting` with a `ComparisonError` is removed by clearing its Argo CD finalizer, and the result carries `FORCED:`; `false` fails `APPLICATION_NOT_REMOVED` |
 | `finalBackup` | `Enum` | no | `true` | `true`, `false` or `required` (fail when the instance is not Running) |
 | `purgePvcs` | `Boolean` | no | `false` | `true` deletes PVCs and Azure disks |
 | `purgeNamespace` | `Boolean` | no | `false` | `true` deletes the namespace of the instance (needs `purgePvcs=true`; refused while another instance uses it) |
+| `purgeBackups` | `Boolean` | no | `false` | `true` expires every PostgresBackup of the instance while it runs (step log: each expire and the operator's answer), then deletes every blob left under its container and `repoPath` once the instance and its backup location are gone (irreversible). Needs `finalBackup=false` (`true` or `required` is refused: the final backup would be deleted at once). A `repoPath` that another PostgresBackupLocation on any registered cluster also uses (also a folder inside or around it; a cluster that cannot be scanned counts as sharing) is expired only: the blobs stay, the result and a warning (`BACKUP_REPO_SHARED`) say so. What pgBackRest declines to expire is reported (`BACKUP_EXPIRE_DECLINED`), not a failure; no answer in time fails the run before anything is deleted (`BACKUP_EXPIRE_TIMEOUT`). The container and `repoPath` are copied into the audit copy in `clusters/deleted/`, so a re-run after a failed blob delete finishes the job. Needs the storage key in Vault (`tpg/shared/backup-storage`). Also a `clusterMap` key per instance |
 | `pushMode` | `Enum` | no | `direct` | `direct` or `pr` |
 | `timeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `1800`, `3600` | Per instance, pull request |
 
@@ -2044,3 +2063,33 @@ argocd repo list
 ```
 
 The delete workflows remove target Applications by removing their `clusters/fleet.yaml` entries (the ApplicationSet deletes the Application without cascade) and delete database objects in order; `argocd app delete` is refused for people.
+
+---
+
+## 21. tpg-backup-expire
+
+Expires PostgresBackups (Round 23). `clusterMap` is the only way to name the targets. Per instance, one of:
+
+- `backups: [orders-db-full-202609010100, ...]`: the PostgresBackup names to expire (a list in brackets, also with one name).
+- `purgeBackups: true`: every backup of the instance. The blobs of the repository are never deleted here (that is `purgeBackups` of `tpg-delete-instance` and `tpg-delete-apps`).
+
+Not both. `includeDependents: true` (with `backups`) is required to expire a backup that has dependents: a full backup takes the differential and incremental backups of its chain with it, a differential the incrementals after it. Without it the instance is `BLOCKED` (`HAS_DEPENDENTS`) with the list of dependents, nothing is expired, and the run ends `Failed` after the other instances ran; naming every dependent in `backups` is the other way. Dependents go first, newest first. A backup is expired by `spec.expire=true` on its PostgresBackup; the operator runs pgBackRest expire and the step waits for its answer (`timeoutSeconds` per backup, every poll logged).
+
+| Input | Type | Mandatory | Default | Description |
+|---|---|---|---|---|
+| `clusterMap` | `Map` | yes | | Cluster to instances to `backups` or `purgeBackups`, `includeDependents` (section 3) |
+| `dryRun` | `Boolean` | no | `true` | `true` records the plan (what would be expired, dependents included, what is `BLOCKED`) and changes nothing; `false` expires |
+| `confirm` | `List` | with `dryRun=false` | | The cluster names of `clusterMap`, for example `[aks-tpg-poc-01]` |
+| `timeoutSeconds` | `Integer` | no | `600` | How long to wait for the operator's answer to the expire of one backup |
+
+Results per instance: `SUCCEEDED` (`DRY_RUN` for the plan; `DECLINED_SOME` when `purgeBackups` ran and pgBackRest declined some), `BLOCKED` (`HAS_DEPENDENTS`), `FAILED` (`UNKNOWN_BACKUP`, `NOT_EXPIRABLE`, `INSTANCE_NOT_RUNNING`, `OPERATION_IN_PROGRESS`, `BACKUP_EXPIRE_DECLINED`: a backup you named, or a dependent of it, was declined; the detail is the operator's message and the later backups are not attempted), `TIMEOUT`. Lab item: how the operator reports an expire, and what it does when pgBackRest refuses (for example the last full backup), is a lab item of Round 23 (verify it on the lab cluster).
+
+```bash
+# 1. Plan: the full backup with its chain
+argo submit --from workflowtemplate/tpg-backup-expire \
+  -p clusterMap='{"aks-tpg-poc-01":{"instances":{"orders-db":{"backups":["orders-db-full-202609010100"],"includeDependents":true}}}}' --watch
+
+# 2. Run it
+argo submit --from workflowtemplate/tpg-backup-expire -p dryRun=false -p 'confirm=[aks-tpg-poc-01]' \
+  -p clusterMap='{"aks-tpg-poc-01":{"instances":{"orders-db":{"backups":["orders-db-full-202609010100"],"includeDependents":true}}}}' --watch
+```

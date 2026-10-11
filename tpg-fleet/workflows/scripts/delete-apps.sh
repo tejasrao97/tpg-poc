@@ -17,7 +17,7 @@
 # exist, or while a backup, restore or upgrade is running, unless P_FORCE=true, which deletes
 # those instances too.
 # P_DRY_RUN=true records the plan and changes nothing. The Azure Blob backup repository is
-# never deleted.
+# never deleted (except with purgeBackups, below).
 # Namespaces (Round 23): an instance's namespace is instance.namespace of its entry in
 # clusters/fleet.yaml (default pg-<instance>; the audit copy in clusters/deleted when the entry is gone,
 # lib.sh instance_ns_known); "its own namespace" below means that one. A live Postgres outside the
@@ -32,7 +32,11 @@
 # deleteOperator the run removes everything: the namespaces purged are deleted after the last instance
 # of them whoever else was there. The owner of the shared Secrets of a namespace hands them over to an
 # instance that stays (never to one of the run).
-# Environment: P_APPS P_DRY_RUN P_PURGE_PVCS P_PURGE_NS P_FORCE P_FORCE_DELETE_STUCK P_FINAL_BACKUP P_TIMEOUT
+# purgeBackups (Round 23, input and clusterMap instance key; delete-instance.sh does the work): every
+# PostgresBackup of the instance is expired while the operator runs, and after the instance is gone every
+# blob under its container and repoPath is deleted, unless another PostgresBackupLocation on any registered
+# cluster uses that repoPath (then only expired, blobs kept, reported). Needs finalBackup=false.
+# Environment: P_APPS P_DRY_RUN P_PURGE_PVCS P_PURGE_NS P_PURGE_BACKUPS P_FORCE P_FORCE_DELETE_STUCK P_FINAL_BACKUP P_TIMEOUT
 #              PUSH_MODE PR_TIMEOUT_SECONDS
 WF="$1"; C="$2"
 # shellcheck source=workflows/scripts/lib.sh
@@ -167,7 +171,7 @@ crds="$(tk get crd -o name 2>/dev/null | sed 's#^customresourcedefinition.apiext
 if [[ "$DRY" == "true" ]]; then
   for i in $targets; do
     in_git="no"; grep -Fqx -- "$i" <<<"$declared" && in_git="yes"
-    record "result.${C}.${i}" SUCCEEDED DRY_RUN "would delete Postgres ${i} (fleet.yaml entry: ${in_git}; finalBackup=$(cmap_ival "$C" "$i" finalBackup "${P_FINAL_BACKUP:-true}"), purgePvcs=$(cmap_ival "$C" "$i" purgePvcs "${P_PURGE_PVCS:-}"), purgeNamespace=$(cmap_ival "$C" "$i" purgeNamespace "${P_PURGE_NS:-}"))"
+    record "result.${C}.${i}" SUCCEEDED DRY_RUN "would delete Postgres ${i} (fleet.yaml entry: ${in_git}; finalBackup=$(cmap_ival "$C" "$i" finalBackup "${P_FINAL_BACKUP:-true}"), purgePvcs=$(cmap_ival "$C" "$i" purgePvcs "${P_PURGE_PVCS:-}"), purgeNamespace=$(cmap_ival "$C" "$i" purgeNamespace "${P_PURGE_NS:-}"), purgeBackups=$(cmap_ival "$C" "$i" purgeBackups "${P_PURGE_BACKUPS:-false}"))"
   done
   if [[ "$DELETE_OPERATOR" == "true" ]]; then
     record "result.${C}.operator" SUCCEEDED DRY_RUN "would delete tpg-${C}-operator, namespace tanzu-postgres-operator$( [[ "$(jq 'length' <<<"$foreign")" -gt 0 ]] && printf ', Postgres CRs outside their own namespace: %s' "$(jq -r 'map(.namespace + "/" + .name) | join(" ")' <<<"$foreign")" ) and CRDs: $(paste -sd' ' <<<"${crds:-none}")"
@@ -183,7 +187,7 @@ export DELETE_RUN_INSTANCES DELETE_OPERATOR_RUN="$DELETE_OPERATOR" NS_PURGE_FILE
 : > "$NS_PURGE_FILE"
 instance_failed=0
 for i in $targets; do
-  ALLOW_UNTRACKED=true bash /scripts/delete-instance.sh "$WF" "$C" "$i" "$i" "${P_FINAL_BACKUP:-true}" "$P_PURGE_PVCS" "$P_PURGE_NS" "$TIMEOUT" \
+  ALLOW_UNTRACKED=true bash /scripts/delete-instance.sh "$WF" "$C" "$i" "$i" "${P_FINAL_BACKUP:-true}" "$P_PURGE_PVCS" "$P_PURGE_NS" "$TIMEOUT" "${P_PURGE_BACKUPS:-false}" \
     || instance_failed=1
 done
 [[ "$instance_failed" -eq 0 ]] || failed=1

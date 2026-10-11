@@ -63,3 +63,10 @@ additionalProperties:
             - true
             - false
             description: 'As the input: true (a final backup, best effort), false (none) or required (fail when the instance is not Running) [Enum; optional (default: the input finalBackup)]'
+          purgeBackups:
+            enum:
+            - true
+            - false
+            - 'true'
+            - 'false'
+            description: 'Round 23. tpg-delete-instance, tpg-delete-apps: as the input - expire every PostgresBackup of the instance while it runs, then delete every blob left under its container and repoPath after it is gone (irreversible; needs finalBackup false; a repoPath another PostgresBackupLocation on any registered cluster uses is expired only, blobs kept and reported). tpg-backup-expire: true expires every backup of the instance and never deletes blobs; not together with backups [Boolean; optional (default: the input purgeBackups)]'

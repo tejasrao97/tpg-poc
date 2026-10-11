@@ -805,7 +805,7 @@ case "$MODE" in
     ;;
   delete-instance)
     oneof finalBackup "${P_FINAL_BACKUP:-true}" true false required
-    bool purgePvcs "${P_PURGE_PVCS:-false}"; bool purgeNamespace "${P_PURGE_NS:-false}"
+    bool purgePvcs "${P_PURGE_PVCS:-false}"; bool purgeNamespace "${P_PURGE_NS:-false}"; bool purgeBackups "${P_PURGE_BACKUPS:-false}"
     if cmap_set; then
       map_exclusive "clusters=${P_CLUSTERS:-}" "instances=${P_INSTANCES:-}"
       map_validate delete-instance "{}"
@@ -817,6 +817,8 @@ case "$MODE" in
       fi
       map_each_instance "((.v.purgeNamespace // \"${P_PURGE_NS:-false}\") != \"true\") or ((.v.purgePvcs // \"${P_PURGE_PVCS:-false}\") == \"true\")" \
         "purgeNamespace=true needs purgePvcs=true"
+      map_each_instance "((.v.purgeBackups // \"${P_PURGE_BACKUPS:-false}\") != \"true\") or ((.v.finalBackup // \"${P_FINAL_BACKUP:-true}\") == \"false\")" \
+        "purgeBackups=true needs finalBackup=false (a final backup would be expired and its blobs deleted at once)"
     else
       clusters_in clusters "${P_CLUSTERS:-}" ""
       instances_in instances "${P_INSTANCES:-}" ""
@@ -826,6 +828,8 @@ case "$MODE" in
           && { same_set confirm "$P_CONFIRM" instances "$P_INSTANCES" || err "confirm must repeat the instances value (${P_INSTANCES})"; }
       fi
       [[ "${P_PURGE_NS:-false}" != "true" || "${P_PURGE_PVCS:-false}" == "true" ]] || err "purgeNamespace=true needs purgePvcs=true"
+      [[ "${P_PURGE_BACKUPS:-false}" != "true" || "${P_FINAL_BACKUP:-true}" == "false" ]] \
+        || err "purgeBackups=true needs finalBackup=false (finalBackup is ${P_FINAL_BACKUP:-true}): a final backup would be expired and its blobs deleted at once"
     fi
     oneof pushMode "${P_PUSH_MODE:-direct}" direct pr
     posint timeoutSeconds "${P_TIMEOUT:-1800}"; posint prTimeoutSeconds "${P_PR_TIMEOUT:-3600}"
@@ -845,6 +849,8 @@ case "$MODE" in
       map_each_instance "(.v.purgeNamespace // \"${P_PURGE_NS:-}\") != \"\"" "purgeNamespace is required (map key or workflow input)"
       map_each_instance "((.v.purgeNamespace // \"${P_PURGE_NS:-}\") != \"true\") or ((.v.purgePvcs // \"${P_PURGE_PVCS:-}\") == \"true\")" \
         "purgeNamespace=true needs purgePvcs=true"
+      map_each_instance "((.v.purgeBackups // \"${P_PURGE_BACKUPS:-false}\") != \"true\") or ((.v.finalBackup // \"${P_FINAL_BACKUP:-true}\") == \"false\")" \
+        "purgeBackups=true needs finalBackup=false (a final backup would be expired and its blobs deleted at once)"
     else
       clusters_in clusters "${P_CLUSTERS:-}" ""
       need apps "${P_APPS:-}" 'JSON map, for example {"aks-tpg-poc-01":["tpg-instances:orders-db","tpg-instances:billing-db","tpg-operator"]} (or clusterMap)'
@@ -878,13 +884,41 @@ case "$MODE" in
       need purgePvcs "${P_PURGE_PVCS:-}" "true deletes PVCs and Azure disks, false keeps them"
       need purgeNamespace "${P_PURGE_NS:-}" "true deletes the instance namespaces (refused while another instance uses one), false keeps them"
       [[ "${P_PURGE_NS:-}" != "true" || "${P_PURGE_PVCS:-}" == "true" ]] || err "purgeNamespace=true needs purgePvcs=true"
+      [[ "${P_PURGE_BACKUPS:-false}" != "true" || "${P_FINAL_BACKUP:-true}" == "false" ]] \
+        || err "purgeBackups=true needs finalBackup=false (finalBackup is ${P_FINAL_BACKUP:-true}): a final backup would be expired and its blobs deleted at once"
     fi
     need dryRun "${P_DRY_RUN:-}" "true (plan only) or false"; [[ -z "${P_DRY_RUN:-}" ]] || bool dryRun "$P_DRY_RUN"
     [[ -z "${P_PURGE_PVCS:-}" ]] || bool purgePvcs "$P_PURGE_PVCS"
     [[ -z "${P_PURGE_NS:-}" ]] || bool purgeNamespace "$P_PURGE_NS"
     need pushMode "${P_PUSH_MODE:-}" "direct or pr"; [[ -z "${P_PUSH_MODE:-}" ]] || oneof pushMode "$P_PUSH_MODE" direct pr
     bool force "${P_FORCE:-false}"; oneof finalBackup "${P_FINAL_BACKUP:-true}" true false required
+    bool purgeBackups "${P_PURGE_BACKUPS:-false}"
     posint timeoutSeconds "${P_TIMEOUT:-1800}"; posint prTimeoutSeconds "${P_PR_TIMEOUT:-3600}"
+    ;;
+  backup-expire)
+    # tpg-backup-expire (Round 23, locked decision 5): clusterMap only. Per instance backups: [..] or
+    # purgeBackups: true (not both); includeDependents: true only with backups; dryRun true by default;
+    # confirm = the cluster names of the map when dryRun=false
+    bool dryRun "${P_DRY_RUN:-true}"; posint timeoutSeconds "${P_TIMEOUT:-600}"
+    if ! cmap_set; then
+      err "clusterMap is mandatory: tpg-backup-expire takes its targets from the map, {aks-tpg-poc-01: {instances: {orders-db: {backups: [orders-db-full-202609010100]}}}} (or purgeBackups: true to expire every backup of the instance)"
+    else
+      map_validate backup-expire "{}"
+      map_each_instance '(.v | has("backups")) or ((.v.purgeBackups // "false") == "true")' \
+        "name the backups to expire, backups: [..], or purgeBackups: true to expire all of them"
+      map_each_instance '((.v | has("backups")) and ((.v.purgeBackups // "false") == "true")) | not' \
+        "backups and purgeBackups: true cannot be used together: list the backups, or purge all of them"
+      map_each_instance '((.v.includeDependents // "false") != "true") or (.v | has("backups"))' \
+        "includeDependents applies to backups: [..] only (purgeBackups: true expires every backup, dependents first)"
+      if [[ -n "${P_CONFIRM:-}" ]]; then
+        if list_get confirm "$P_CONFIRM" && [[ -s "$WORK/cmap.json" ]]; then
+          same_set confirm "$P_CONFIRM" clusterMap "$(bracket_keys "$WORK/cmap.json")" \
+            || err "confirm must repeat the cluster names of clusterMap ($(bracket_keys "$WORK/cmap.json"))"
+        fi
+      elif [[ "${P_DRY_RUN:-true}" == "false" && -s "$WORK/cmap.json" ]]; then
+        err "confirm is mandatory with dryRun=false: repeat the cluster names of clusterMap, $(bracket_keys "$WORK/cmap.json") (run with dryRun=true first to see the plan)"
+      fi
+    fi
     ;;
   helm-addons)
     clusters_in clusters "${P_CLUSTERS:-}" allow

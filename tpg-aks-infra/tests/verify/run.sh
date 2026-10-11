@@ -88,6 +88,7 @@ assert "missing AppProject tpg-hub is named" 'AppProject tpg-hub: appproject/tpg
 assert "missing admission policy is named (cluster-scoped)" \
   'ValidatingAdmissionPolicy tpg-application-sync: validatingadmissionpolicy/tpg-application-sync not found on aks-tpg-hub$'
 assert "missing tpg-patch WorkflowTemplate is named" 'WorkflowTemplate tpg-patch: workflowtemplate/tpg-patch not found on aks-tpg-hub'
+assert "missing tpg-backup-expire WorkflowTemplate is named (Round 23)" 'WorkflowTemplate tpg-backup-expire: workflowtemplate/tpg-backup-expire not found on aks-tpg-hub'
 assert "the run ends with the summary" '^=+ verify summary =+$'
 assert "the missing StorageClass on the hub is an issue (35-vault.sh creates it)" \
   '^ +[0-9]+\. StorageClass tpg-data-retain \(disk SKU StandardSSD_LRS\)$'
