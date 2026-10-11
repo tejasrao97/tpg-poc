@@ -49,6 +49,12 @@ whole list, and `null` removes a key. The `tpg-instances` ApplicationSet passes
 `clusters/fleet.yaml` as a value file, so a sync at the commit of a tpg-patch pull
 request branch applies that branch's current file before the merge.
 
+An instance restored by tpg-restore with a spec file also has a **restore-patch**
+(`../restore-patch/`, see its README) that the chart applies after the overlay and the patch. A
+tpg-patch run that sets a patch file on such an instance makes that patch current and moves the
+restore-patch to `restorePatch.previous`, so the chart stops applying it (warning
+`RESTORE_PATCH_RETIRED`); `patchMode=clear` leaves it in place.
+
 tpg-patch refuses a file of the wrong kind (a Postgres manifest passed as values,
 and the reverse), unknown keys and fields, a second document for one object, fields
 that another workflow or input owns, fields that cannot change on a running

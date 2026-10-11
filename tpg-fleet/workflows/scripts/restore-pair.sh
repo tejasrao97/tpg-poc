@@ -26,17 +26,25 @@
 #    sourceBackupName they are mandatory (PITR_SOURCE_UNKNOWN). srcBackupLabel is spec.pitr.sourceBackupLocation.set.
 #    (An in-place pair is only possible on a cluster with clusters.<cluster>.cluster.allowInPlaceRestore: true;
 #    the validate step refuses the whole run otherwise, IN_PLACE_NOT_ALLOWED, so no pair gets here without it.)
-#  4 Matrix: standard -> lite is BLOCKED (RESTORE_FLAVOUR_UNSUPPORTED); a lower minor version is BLOCKED
-#    (RESTORE_VERSION_LOWER; with skipMinorVersionCheck a warning), a lower or higher major version is BLOCKED.
-#    Only this pair.
-#  5 Target: an existing target needs confirm = its name (CONFIRMATION_MISMATCH) and refuses a spec file; a new
-#    target takes the instance spec from the spec file (a fragment merged over the chart render of its entry),
-#    else the entry of the source in clusters/fleet.yaml is copied (disableInitialBackup and backup.repoPath
-#    dropped, FerretDB dropped, instance.namespace set, the owner of the shared Secrets decided like tpg-day0:
-#    exactly one per namespace) and written to clusters/fleet.yaml (git_commit_push: pushMode). The shared objects
-#    (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage) are only ever applied by the
-#    Argo CD Application of their owner: a selective sync of those objects (and of the backup location of the
-#    new instance) before the restore, the whole Application after it (adoption).
+#  4 Matrix: standard -> lite is BLOCKED (RESTORE_FLAVOUR_UNSUPPORTED); a target version below the version of the backup (the named
+#    backup's status.fullPostgresVersion, else the live source's, else its PostgresVersion) is BLOCKED (RESTORE_VERSION_LOWER), a lower
+#    major version included. skipMinorVersionCheck only sets the operator's annotation and relaxes none of this; another (higher)
+#    major version is the operator's to refuse. Only this pair.
+#  5 Target: the spec file (targetInstanceSpecFilePath) is the source of truth for the restored Postgres: its spec is
+#    spec.targetInstance.spec as it is, no merge over a chart render. Allowed for a new target and for an in-place restore; any
+#    other existing target refuses it (TARGET_SPEC_FILE_REFUSED). An existing target needs confirm = its name (CONFIRMATION_MISMATCH).
+#    A new target writes its entry to clusters/fleet.yaml (git_commit_push: pushMode): a copy of the source's entry
+#    (disableInitialBackup, backup.repoPath, FerretDB and restorePatch dropped, instance.namespace set), or a skeleton
+#    (namespace, the spec file's version) when the source is not there; the owner of the shared Secrets is decided like tpg-day0
+#    (exactly one per namespace). With a spec file the entry also records it as restorePatch.current: the spec file is stored as
+#    restore-patch/<instance>-restore-<uid>.yaml (one kind: Postgres document, apiVersion, kind and the spec as given) which the chart
+#    applies last (overlay, patch, restore-patch); for a new target in the same commit as the entry, for an existing entry (in place,
+#    or declared in fleet.yaml but not deployed) in a commit of its own after the restore succeeded (the former current becomes
+#    previous). Without a spec file: a new target gets the copied entry and the PostgresRestore only spec.targetInstance.name (the
+#    operator creates the instance and fills in its spec: LAB ITEM), an in-place restore only the name and writes nothing to
+#    fleet.yaml. The shared objects (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage) are only ever applied
+#    by the Argo CD Application of their owner: a selective sync of those objects (and of the backup location of the new instance)
+#    before the restore, the whole Application after it (adoption).
 #  6 Another namespace or cluster: the source PostgresBackupLocation is copied into the target namespace
 #    (backupSync on, retention so high that no expiry runs through it, labels tpg.fleet/restore-source); a
 #    location of the target namespace for the same container and repoPath is REUSED when its backupSync is on
@@ -49,13 +57,14 @@
 #  8 The PostgresRestore is rendered through helm_artifacts/instance/crd-reference (tpg.prune: zero defaults
 #    left out), applied, and waited for within restoreTimeoutSeconds; then the instance must run (pg_wait_ready),
 #    and a new target is adopted by its Application (sync_instance_app).
-#  9 postRestoreBackup: a full backup of the target as tpg-backup takes it. keepSourceLocation=false removes the
+#  9 postRestoreBackup: a full backup of the target as tpg-backup takes it (a failure is the warning POST_RESTORE_BACKUP_FAILED, the pair
+#    stays SUCCEEDED). keepSourceLocation=false removes the
 #    copy this run created (never a reused one). While the copy exists repo_shared (tpg-delete-instance,
 #    tpg-delete-apps purgeBackups) treats the source repository as shared, which is intended.
 # 10 Success is the PostgresRestore Succeeded and the target Running.
 #
 # Reason codes: INVALID_PAIR NOT_REGISTERED FLEET_UNREADABLE SOURCE_NAMESPACE_MISMATCH SOURCE_UNREADABLE
-#   BACKUP_NOT_FOUND BACKUP_NOT_SUCCEEDED SOURCE_BACKUP_UNVERIFIED PITR_SOURCE_UNKNOWN
+#   BACKUP_NOT_FOUND BACKUP_NOT_SUCCEEDED BACKUP_OF_OTHER_INSTANCE SOURCE_BACKUP_UNVERIFIED PITR_SOURCE_UNKNOWN
 #   BACKUP_LOCATION_NOT_INITIALIZED SOURCE_LOCATION_UNKNOWN SOURCE_LOCATION_UNREADABLE NO_FULL_BACKUP INVALID_TIMESTAMP
 #   OUTSIDE_RECOVERY_WINDOW TARGET_UNREADABLE NAMESPACE_IMMUTABLE INSTANCE_NAME_IN_USE TARGET_SPEC_FILE_REFUSED
 #   CONFIRMATION_MISMATCH OPERATION_IN_PROGRESS UNKNOWN_TARGET_CLUSTER SPEC_FILE_REQUIRED SPEC_FILE_NOT_FOUND
@@ -63,11 +72,12 @@
 #   NAMESPACE_SECRET_CONFLICT BACKUP_LOCATION_MISSING SOURCE_LOCATION_CONFLICT SOURCE_SECRET_CONFLICT
 #   SOURCE_SECRET_UNREADABLE NO_VAULT_SECRET GIT_PUSH_FAILED NAMESPACE_OWNER_CONFLICT APP_NOT_GENERATED
 #   SHARED_SECRETS_MISSING SECRET_NOT_SYNCED TARGET_PREPARE_FAILED SOURCE_LOCATION_FAILED BACKUPS_NOT_SYNCED
-#   CREATE_FAILED RESTORE_FAILED TARGET_<reason> POST_RESTORE_BACKUP_FAILED UNEXPECTED_ERROR
-#   BLOCKED: RESTORE_FLAVOUR_UNSUPPORTED RESTORE_VERSION_LOWER RESTORE_MAJOR_DIFFERS; TIMEOUT; SKIPPED_IN_PROGRESS
+#   CREATE_FAILED RESTORE_FAILED TARGET_<reason> UNEXPECTED_ERROR
+#   BLOCKED: RESTORE_FLAVOUR_UNSUPPORTED RESTORE_VERSION_LOWER; TIMEOUT; SKIPPED_IN_PROGRESS
 #   warnings (report section Warnings): SRC_LOCATION_DIFFERS SRC_STANZA_DIFFERS CONFIRMATION_MISSING
-#   RECOVERY_WINDOW_UNVERIFIED BACKUP_LABEL_UNVERIFIED BACKUP_OF_OTHER_INSTANCE MATRIX_UNVERIFIED
-#   RESTORE_VERSION_LOWER_SKIPPED SPEC_FILE_NOT_IN_ENTRY OPERATION_IN_PROGRESS ADOPTION_NOT_SYNCED
+#   RECOVERY_WINDOW_UNVERIFIED BACKUP_LABEL_UNVERIFIED MATRIX_UNVERIFIED OPERATION_IN_PROGRESS ADOPTION_NOT_SYNCED
+#   POST_RESTORE_BACKUP_FAILED (the restore succeeded and the instance runs: the pair stays SUCCEEDED) RESTORE_PATCH_NOT_RECORDED
+#   SOURCE_LOCATION_NOT_REMOVED
 WF="$1"
 # shellcheck source=workflows/scripts/lib.sh
 source /scripts/lib.sh
@@ -314,43 +324,56 @@ get_obj "$TNS" postgres "$TI" || fail TARGET_UNREADABLE "Postgres ${TNS}/${TI} o
 TGT_EXISTS=false; TGT_PG=""
 [[ -z "$OBJ" ]] || { TGT_EXISTS=true; TGT_PG="$OBJ"; }
 
-ENTRY_NEW=false; TARGET_SPEC=""; T_OWNER=""; SPEC_JSON=""; BUSY=""
+# The spec file (targetInstanceSpecFilePath) is the source of truth for the restored Postgres: its spec is rendered as it is as
+# spec.targetInstance.spec of the PostgresRestore (no merge over a chart render) and stored in the fleet repository as a restore-patch
+# that the chart applies last. Allowed for a new target and for an in-place restore.
+SPEC_JSON=""   # the spec of the spec file (compact JSON)
+load_spec() {  # load_spec: SPEC_JSON from the file; the pair fails with the reason when it cannot be used
+  local sf="$WORK/spec-file.yaml" out
+  if patch_is_repo "$SPEC"; then
+    [[ -f "$REPO/${SPEC#repo:}" ]] || fail SPEC_FILE_NOT_FOUND "${SPEC}: no such file on the fleet branch"
+    cp "$REPO/${SPEC#repo:}" "$sf"
+  else
+    patch_file_write "$SPEC" "$sf" "$REPO" || fail SPEC_FILE_NOT_RECEIVED "${SPEC}: ${PATCH_FILES_ERROR:-its contents are not in patchFiles}"
+  fi
+  yq ea -o=json -I=0 '[.]' "$sf" > "$WORK/spec-file.json" 2>"$WORK/spec-file.err" \
+    || fail SPEC_FILE_INVALID "${SPEC}: not valid YAML: $(head -n 2 "$WORK/spec-file.err" | tr '\n' ' ')"
+  if ! out="$(python3 "$TPG_LIB_DIR/patchcheck.py" spec "$WORK/spec-file.json" --schemas "$(patch_schemas_path)" --name "$SPEC")"; then
+    fail SPEC_FILE_INVALID "$(tr '\n' ';' <<<"$out")"
+  fi
+  SPEC_JSON="$(jq -c '[.[] | select(. != null and . != {})][0].spec // {}' "$WORK/spec-file.json")"
+  [[ "$SPEC_JSON" != '{}' ]] || fail SPEC_FILE_INVALID "${SPEC}: spec is empty: the spec file is the spec of the restored instance"
+}
+if [[ -n "$SPEC" && "$TGT_EXISTS" == true && "$IN_PLACE" != true ]]; then
+  fail TARGET_SPEC_FILE_REFUSED "${TNS}/${TI} exists on ${TC} and is not the source instance: targetInstanceSpecFilePath (${SPEC}) is for a new target or for an in-place restore; remove the key (the restore overwrites the data of the existing instance, its spec stays)"
+fi
+
+ENTRY_NEW=false; T_OWNER=""; BUSY=""; T_PGV=""; T_BLN=""; RP_NOTE=""
 if [[ "$TGT_EXISTS" == true ]]; then
-  [[ -z "$SPEC" ]] || fail TARGET_SPEC_FILE_REFUSED "${TNS}/${TI} exists on ${TC}: targetInstanceSpecFilePath (${SPEC}) is for a new instance; remove the key (the restore overwrites the data of the existing instance, its spec stays)"
+  [[ -z "$SPEC" ]] || load_spec
   if [[ "$CONFIRM" != "$TI" ]]; then
     if [[ "$DRY" == false ]]; then
       fail CONFIRMATION_MISMATCH "restoring into the existing instance ${TC}/${TNS}/${TI} overwrites its data: set confirm: ${TI} in the target of the pair"
     fi
     warn CONFIRMATION_MISSING "the target ${TC}/${TNS}/${TI} exists: a real run (dryRun=false) is refused unless the pair sets confirm: ${TI}"
   fi
-  T_PGV="$(jq -r '.spec.postgresVersion.name // ""' <<<"$TGT_PG")"
+  T_PGV="$(jq -r '.postgresVersion.name // ""' <<<"${SPEC_JSON:-null}")"
+  [[ -n "$T_PGV" ]] || T_PGV="$(jq -r '.spec.postgresVersion.name // ""' <<<"$TGT_PG")"
+  [[ -z "$SPEC_JSON" ]] || T_BLN="$(jq -r '.backupLocation.name // ""' <<<"$SPEC_JSON")"
   BUSY="$(busy_operations "$TI" | sed 's/postgresrestore//' | tr -s ' ' | sed 's/^ //;s/ $//')"
   if [[ -n "$BUSY" && "$DRY" == true ]]; then
     warn OPERATION_IN_PROGRESS "${TC}/${TI} has an unfinished ${BUSY}: a real run is refused until it finished"
   fi
-  plan "target: existing Postgres ${TC}/${TNS}/${TI} (version ${T_PGV:-unknown}); its data is overwritten$( [[ "$IN_PLACE" == true ]] && echo " (in place)" ); no spec in the PostgresRestore"
+  plan "target: existing Postgres ${TC}/${TNS}/${TI} (version ${T_PGV:-unknown}); its data is overwritten$( [[ "$IN_PLACE" == true ]] && echo " (in place)" ); spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is (it overrides the existing instance's values)" || echo "none, only the name" )"
 else
   # a live Postgres of that name in another namespace of the cluster would clash with the Application tpg-<cluster>-<instance>
   other="$(live_postgres_namespaces "$TI" | grep -vFx -- "$TNS" | paste -sd, - || true)"
   [[ -z "$other" ]] || fail INSTANCE_NAME_IN_USE "a Postgres named ${TI} already runs in namespace ${other} on ${TC}; the instance name is unique per cluster in clusters/fleet.yaml: choose another target instance name"
   fleet_has_cluster "$REPO" "$TC" || fail UNKNOWN_TARGET_CLUSTER "no clusters.${TC} in ${FLEET_REL}: run tpg-day0 for ${TC} first (a new restore target is added to its entry)"
-  # the spec file: one Postgres document, a fragment merged over the chart render of the entry
   if [[ -n "$SPEC" ]]; then
-    sf="$WORK/spec-file.yaml"
-    if patch_is_repo "$SPEC"; then
-      [[ -f "$REPO/${SPEC#repo:}" ]] || fail SPEC_FILE_NOT_FOUND "${SPEC}: no such file on the fleet branch"
-      cp "$REPO/${SPEC#repo:}" "$sf"
-    else
-      patch_file_write "$SPEC" "$sf" "$REPO" || fail SPEC_FILE_NOT_RECEIVED "${SPEC}: ${PATCH_FILES_ERROR:-its contents are not in patchFiles}"
-    fi
-    yq ea -o=json -I=0 '[.]' "$sf" > "$WORK/spec-file.json" 2>"$WORK/spec-file.err" \
-      || fail SPEC_FILE_INVALID "${SPEC}: not valid YAML: $(head -n 2 "$WORK/spec-file.err" | tr '\n' ' ')"
-    if ! out="$(python3 "$TPG_LIB_DIR/patchcheck.py" spec "$WORK/spec-file.json" --schemas "$(patch_schemas_path)" --name "$SPEC")"; then
-      fail SPEC_FILE_INVALID "$(tr '\n' ';' <<<"$out")"
-    fi
-    SPEC_JSON="$(jq -c '[.[] | select(. != null and . != {})][0].spec // {}' "$WORK/spec-file.json")"
+    load_spec
     [[ "$(jq -r '.postgresVersion.name // ""' <<<"$SPEC_JSON")" != "" ]] \
-      || fail SPEC_FILE_INVALID "${SPEC}: spec.postgresVersion.name is missing: the version of the new instance is needed for the restore matrix"
+      || fail SPEC_FILE_INVALID "${SPEC}: spec.postgresVersion.name is missing: the version of the new instance is needed for its entry in ${FLEET_REL} and for the restore matrix"
   fi
   if [[ "$TGT_FLEET" == true ]]; then
     note "the entry ${TC}/${TI} is already declared in ${FLEET_REL}: it is kept as it is"
@@ -359,11 +382,19 @@ else
   fi
 fi
 
+# stage_restore_patch: the spec file as a restore-patch in the clone $REPO (restore-patch/<instance>-restore-<uid>.yaml) and
+# recorded as restorePatch.current in the instance's entry of clusters/fleet.yaml; the former current becomes previous
+RP_PATH=""
+stage_restore_patch() {
+  RP_PATH="$(restore_patch_store "$REPO" "$TI" "$SPEC_JSON")" && restore_patch_set "$REPO" "$TC" "$TI" "$RP_PATH"
+}
+
 # prepare_entry: write the entry of the new target to the clone in $REPO (a copy of the source's entry, or a skeleton
-# for a spec file) and decide who owns the shared Secrets of the namespace. Run on the clone of the plan, and again on a
-# fresh clone under the fleet lock right before the push, so two new targets of one namespace never both own them.
+# when the source is not in clusters/fleet.yaml and a spec file gives the instance) and decide who owns the shared Secrets of the
+# namespace. Run on the clone of the plan, and again on a fresh clone under the fleet lock right before the push, so two new
+# targets of one namespace never both own them.
 prepare_entry() {
-  local f="$REPO/$FLEET_REL" others ha
+  local f="$REPO/$FLEET_REL" others
   if [[ "$SRC_FLEET" == true ]]; then
     # The restored instance inherits the source's settings, its backup scheduler included (backup.scheduled, backup.operatorSchedules,
     # D70), but not FerretDB (D71): a restored copy does not start serving MongoDB clients on its own (turn it on with a
@@ -375,29 +406,19 @@ prepare_entry() {
       | del(.clusters[strenv(TC_)].instances[strenv(TI_)].ferret)
       | del(.clusters[strenv(TC_)].instances[strenv(TI_)].backup.repoPath)
       | del(.clusters[strenv(TC_)].instances[strenv(TI_)].instance.disableInitialBackup)
+      | del(.clusters[strenv(TC_)].instances[strenv(TI_)].restorePatch)
       | .clusters[strenv(TC_)].instances[strenv(TI_)].instance.namespace = strenv(NS_)
       | del(.clusters[strenv(TC_)].instances[strenv(TI_)].instance.sharedSecretsOwner)' "$f" || return 1
     if [[ "$(instance_effective "$REPO" "$TC" "$TI" '.ferret.enabled' false)" == "true" ]]; then
       TC_="$TC" TI_="$TI" yq -i '.clusters[strenv(TC_)].instances[strenv(TI_)].valuesOverride.ferret.enabled = false' "$f" || return 1
     fi
+    # the version of the spec file is the version of the instance (the entry of the source may be another one)
+    if [[ -n "$SPEC_JSON" ]]; then
+      TC_="$TC" TI_="$TI" V_="$(jq -r '.postgresVersion.name' <<<"$SPEC_JSON")" yq -i '.clusters[strenv(TC_)].instances[strenv(TI_)].instance.postgresVersion = strenv(V_)' "$f" || return 1
+    fi
   else
     TC_="$TC" TI_="$TI" NS_="$TNS" V_="$(jq -r '.postgresVersion.name' <<<"$SPEC_JSON")" yq -i '
       .clusters[strenv(TC_)].instances[strenv(TI_)].instance = {"namespace": strenv(NS_), "postgresVersion": strenv(V_)}' "$f" || return 1
-  fi
-  if [[ -n "$SPEC_JSON" ]]; then
-    # the fields of the spec file that clusters/fleet.yaml has a value for are written there too, so the chart renders them
-    # (highAvailability only when the file has it: an absent block keeps the fleet default)
-    ha="$(jq -c 'if .highAvailability == null then empty else (.highAvailability.enabled // false) as $e
-      | {enabled: $e, readReplicas: (if $e then (if .highAvailability.readReplicas == null then 1 else .highAvailability.readReplicas end) else 0 end)} end' <<<"$SPEC_JSON")"
-    # shellcheck disable=SC2016  # yq variables, not shell
-    TC_="$TC" TI_="$TI" S_="$SPEC_JSON" HA_="$ha" yq -i '
-      (strenv(S_) | from_json) as $s
-      | with(select($s.postgresVersion.name != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.postgresVersion = $s.postgresVersion.name)
-      | with(select($s.storageSize != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.storageSize = $s.storageSize)
-      | with(select($s.walStorageSize != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.walStorageSize = $s.walStorageSize)
-      | with(select($s.storageClassName != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.storageClassName = $s.storageClassName)
-      | with(select($s.resources != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.resources = $s.resources)
-      | with(select(strenv(HA_) != ""); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.highAvailability = (strenv(HA_) | from_json))' "$f" || return 1
   fi
   # who renders the ServiceAccount tpg-vso and the VaultStaticSecrets regsecret and backup-storage: exactly one instance per namespace
   others="$(fleet_ns_owners "$REPO" "$TC" "$TNS" | grep -vFx -- "$TI" || true)"
@@ -408,6 +429,8 @@ prepare_entry() {
     TC_="$TC" TI_="$TI" yq -i 'del(.clusters[strenv(TC_)].instances[strenv(TI_)].instance.sharedSecretsOwner)' "$f" || return 1
     T_OWNER=true; OWNER_NOTE=""
   fi
+  # the spec file of the pair is recorded with the entry, in the same commit
+  [[ -z "$SPEC_JSON" ]] || stage_restore_patch || return 1
 }
 OWNER_NOTE=""
 if [[ "$ENTRY_NEW" == true ]]; then
@@ -418,25 +441,40 @@ if [[ "$ENTRY_NEW" == true ]]; then
 elif [[ "$TGT_FLEET" == true && "$TGT_EXISTS" == false ]]; then
   T_OWNER="$(_flag_get "$REPO" "$TC" "$TI")"; [[ "$T_OWNER" == false ]] || T_OWNER=true
 fi
+# an existing entry (in place, or declared but not deployed) records the spec file in a commit of its own after the restore
+if [[ -n "$SPEC_JSON" && "$ENTRY_NEW" != true ]]; then
+  if [[ "$TGT_FLEET" == true ]]; then
+    stage_restore_patch || fail FLEET_EDIT_FAILED "$FLEET_REL (restorePatch of ${TI})"
+  else
+    RP_NOTE="${TC}/${TI} has no entry in ${FLEET_REL}: the spec file is used for the restore only, no restore-patch is recorded (Argo CD does not manage this instance)"
+  fi
+fi
 
 if [[ "$TGT_EXISTS" == false ]]; then
-  # the Postgres spec of the new instance: the chart render of its entry, then the spec file on top (tpg.deepMerge: null removes, lists replace)
+  # the chart must render the entry (with the restore-patch staged in the clone); the restored spec itself is the spec file's, or
+  # the operator's when there is none
   if ! rendered="$(instance_render "$REPO" "$TC" "$TI" 2>"$WORK/render.err")"; then
     fail CHART_RENDER_FAILED "${TC}/${TI}: $(tr '\n' ' ' <"$WORK/render.err" | cut -c1-300)"
   fi
   base_spec="$(yq -o=json -I=0 'select(.kind == "Postgres") | .spec' <<<"$rendered")"
   [[ -n "$base_spec" && "$base_spec" != null ]] || fail CHART_RENDER_FAILED "${TC}/${TI}: the chart rendered no Postgres"
-  TARGET_SPEC="$base_spec"
   if [[ -n "$SPEC_JSON" ]]; then
-    TARGET_SPEC="$(jq -c --argjson s "$SPEC_JSON" '. * $s | del(..|nulls)' <<<"$base_spec")"
-    unmapped="$(jq -r --argjson b "$base_spec" --argjson m "$TARGET_SPEC" '[$m | keys[] | select(. as $k | ($b[$k] // null) != $m[$k])] | join(",")' <<<"$base_spec")"
-    if [[ -n "$unmapped" ]]; then
-      warn SPEC_FILE_NOT_IN_ENTRY "the spec file sets ${unmapped}, which ${FLEET_REL} does not render for ${TI}: the restored instance gets them, the Argo CD Application does not manage them (add them with tpg-patch)"
-    fi
+    T_PGV="$(jq -r '.postgresVersion.name // ""' <<<"$SPEC_JSON")"
+    T_BLN="$(jq -r '.backupLocation.name // ""' <<<"$SPEC_JSON")"
+  else
+    T_PGV="$(jq -r '.postgresVersion.name // ""' <<<"$base_spec")"
+    T_BLN="$(jq -r '.backupLocation.name // ""' <<<"$base_spec")"
   fi
-  T_PGV="$(jq -r '.postgresVersion.name // ""' <<<"$TARGET_SPEC")"
-  T_BLN="$(jq -r '.backupLocation.name // ""' <<<"$TARGET_SPEC")"
-  plan "target: new instance ${TC}/${TNS}/${TI}, version ${T_PGV:-unknown}$( [[ -n "$SPEC" ]] && echo ", spec file ${SPEC} merged over the render of its entry" || echo ", the entry of ${SC}/${SI} copied" ); ${FLEET_REL}: $( [[ "$ENTRY_NEW" == true ]] && echo "the entry would be added (pushMode ${PUSH_MODE})" || echo "the entry already exists" ); shared Secrets of ${TNS}: $( [[ "$T_OWNER" == true ]] && echo "owned by ${TI}" || echo "owned by ${OWNER_NOTE:-another instance}" )"
+  plan "target: new instance ${TC}/${TNS}/${TI}, version ${T_PGV:-unknown}; spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is" || echo "none, only the name: the operator creates the instance and fills in its spec (lab item: how it fills it)" ); ${FLEET_REL}: $( [[ "$ENTRY_NEW" == true ]] && echo "the entry would be added$( [[ "$SRC_FLEET" == true ]] && echo " (a copy of the entry of ${SC}/${SI})" || echo " (from the spec file)" ) (pushMode ${PUSH_MODE})" || echo "the entry already exists" ); shared Secrets of ${TNS}: $( [[ "$T_OWNER" == true ]] && echo "owned by ${TI}" || echo "owned by ${OWNER_NOTE:-another instance}" )"
+fi
+if [[ -n "$SPEC_JSON" ]]; then
+  if [[ "$ENTRY_NEW" == true ]]; then
+    plan "restore-patch: the spec file would be stored as helm_artifacts/instance/tpg-instance/restore-patch/${TI}-restore-<uid>.yaml and recorded as restorePatch.current of ${TC}/${TI} in the same commit as the entry; the chart applies it last (after the overlay and the patch)"
+  elif [[ -n "$RP_NOTE" ]]; then
+    plan "restore-patch: ${RP_NOTE}"
+  else
+    plan "restore-patch: the spec file would be stored as helm_artifacts/instance/tpg-instance/restore-patch/${TI}-restore-<uid>.yaml and recorded as restorePatch.current of ${TC}/${TI} in a commit of its own after the restore succeeded (pushMode ${PUSH_MODE}); a restore-patch it replaces becomes previous"
+  fi
 fi
 
 # ---- 4. the matrix: standard -> lite, a lower minor version, another major version
@@ -445,8 +483,8 @@ if [[ -z "$T_PGV" ]]; then
   warn MATRIX_UNVERIFIED "the PostgresVersion of the target ${TC}/${TNS}/${TI} is not known: the restore matrix was not checked"
 else
   pv_version "$T_PGV"; T_VER="$PV_VER"
-  if [[ "$TGT_EXISTS" == false && "$PV_FOUND" != true ]]; then
-    fail VERSION_NOT_AVAILABLE "PostgresVersion ${T_PGV} of the new instance ${TI} does not exist on ${TC} (kubectl get postgresversion); the operator there offers other versions, or is not installed"
+  if [[ ( "$TGT_EXISTS" == false || -n "$SPEC_JSON" ) && "$PV_FOUND" != true ]]; then
+    fail VERSION_NOT_AVAILABLE "PostgresVersion ${T_PGV} of the instance ${TI} does not exist on ${TC} (kubectl get postgresversion); the operator there offers other versions, or is not installed"
   fi
   T_LITE=false; is_lite "$T_PGV" && T_LITE=true
   # the version the backup was taken from: the named backup's status.fullPostgresVersion, else the live source's
@@ -485,9 +523,9 @@ if [[ "$ENTRY_NEW" == true && "$T_OWNER" == true ]]; then
     esac
   done
 fi
-if [[ "$TGT_EXISTS" == false && -n "${T_BLN:-}" && "$T_BLN" != "${TI}-backup-location" ]]; then
+if [[ -n "$SPEC_JSON" && -n "${T_BLN:-}" && "$T_BLN" != "${TI}-backup-location" ]]; then
   get_obj "$TNS" postgresbackuplocation "$T_BLN" || true
-  [[ -n "$OBJ" ]] || fail BACKUP_LOCATION_MISSING "the spec file names backupLocation ${T_BLN}, which does not exist in ${TNS} on ${TC} (the fleet renders ${TI}-backup-location for the new instance)"
+  [[ -n "$OBJ" ]] || fail BACKUP_LOCATION_MISSING "the spec file names backupLocation ${T_BLN}, which does not exist in ${TNS} on ${TC} (the fleet renders ${TI}-backup-location for the instance)"
 fi
 
 # ---- 6. another namespace or cluster: the copy of the source backup location (reused when one exists)
@@ -538,8 +576,9 @@ render_obj() {  # render_obj KIND VALUES_JSON: RENDERED = the object as YAML (CH
   RENDERED="$(K="$1" yq 'select(.kind == strenv(K))' <<<"$out" | sed '/^---$/d;/^# Source:/d')"
 }
 RNAME="${TI}-restore-$(date -u +%Y%m%d%H%M%S)"
-tinst="$(jq -cn --arg n "$TI" --argjson new "$( [[ "$TGT_EXISTS" == true ]] && echo false || echo true )" --argjson spec "${TARGET_SPEC:-null}" \
-  '{name: $n} + (if $new then {spec: $spec} else {} end)')"
+# spec.targetInstance.spec is the spec file's spec as it is, or absent (the name only): the operator creates a new instance and
+# fills in its spec (lab item), an existing one keeps its spec
+tinst="$(jq -cn --arg n "$TI" --argjson spec "${SPEC_JSON:-null}" '{name: $n} + (if $spec != null then {spec: $spec} else {} end)')"
 if [[ "$METHOD" == backup ]]; then
   rspec="$(jq -cn --arg b "$SBK" --argjson t "$tinst" '{sourceBackup: {name: $b}, targetInstance: $t}')"
 else
@@ -626,12 +665,12 @@ if [[ "$ENTRY_NEW" == true ]]; then
       fleet_lock_release
     else
       prepare_entry || { fleet_lock_release; fail FLEET_EDIT_FAILED "$FLEET_REL"; }
-      git_commit_push "$REPO" "restore: add ${TC}/${TI} from ${SC}/${SI} (${WF})" "$FLEET_REL" \
+      git_commit_push "$REPO" "restore: add ${TC}/${TI} from ${SC}/${SI} (${WF})" "$FLEET_REL" ${SPEC_JSON:+"$RESTORE_PATCH_DIR"} \
         || { fleet_lock_release; fail GIT_PUSH_FAILED "pushMode=${PUSH_MODE}: the entry ${TC}/${TI} was not pushed to ${FLEET_REL}"; }
       fleet_lock_release
     fi
   else
-    git_commit_push "$REPO" "restore: add ${TC}/${TI} from ${SC}/${SI} (${WF})" "$FLEET_REL" \
+    git_commit_push "$REPO" "restore: add ${TC}/${TI} from ${SC}/${SI} (${WF})" "$FLEET_REL" ${SPEC_JSON:+"$RESTORE_PATCH_DIR"} \
       || fail GIT_PUSH_FAILED "pushMode=${PUSH_MODE}: the entry ${TC}/${TI} was not merged into ${FLEET_REL}${PR_NUMBER:+ (pull request #${PR_NUMBER})}"
   fi
   PUSHED_REV="${PUSHED_REVISION:-}"
@@ -772,6 +811,28 @@ while true; do
 done
 
 pg_wait_ready "$TI" "$READY_TIMEOUT" || fail "TARGET_${POD_WATCH_REASON:-NOT_RUNNING}" "$TI: ${POD_WATCH_DETAIL:-}"
+[[ "$TGT_EXISTS" == true || -n "$SPEC_JSON" ]] || note "no spec file: ${TI} was created by the operator from spec.targetInstance.name alone, which fills in its spec (lab item: not verified how)"
+
+# ---- 5 (real) an existing entry (in place, or declared but not deployed) records the spec file as its restore-patch, now that the restore
+# succeeded: a commit of its own (pushMode applies), before the adoption sync of a declared instance
+if [[ -n "$SPEC_JSON" && "$ENTRY_NEW" != true ]]; then
+  if [[ -n "$RP_NOTE" ]]; then
+    note "$RP_NOTE"
+  else
+    rp_ok=false
+    [[ "$PUSH_MODE" != direct ]] || fleet_lock_acquire || true
+    if git_clone "$REPO" >/dev/null 2>&1 && fleet_has_instance "$REPO" "$TC" "$TI" && stage_restore_patch \
+       && git_commit_push "$REPO" "restore: record the spec file of ${TC}/${TI} as its restore-patch (${WF})" "$FLEET_REL" "$RESTORE_PATCH_DIR"; then
+      rp_ok=true; PUSHED_REV="${PUSHED_REVISION:-$PUSHED_REV}"
+    fi
+    [[ "$PUSH_MODE" != direct ]] || fleet_lock_release
+    if [[ "$rp_ok" == true ]]; then
+      note "the spec file is recorded as restorePatch.current of ${TC}/${TI} in ${FLEET_REL} (${RP_PATH}); the chart of Application tpg-${TC}-${TI} applies it last"
+    else
+      warn RESTORE_PATCH_NOT_RECORDED "the restore succeeded, but the spec file could not be recorded as the restore-patch of ${TC}/${TI} in ${FLEET_REL} (pushMode ${PUSH_MODE}); the next sync of Application tpg-${TC}-${TI} renders the entry without it"
+    fi
+  fi
+fi
 
 # ---- 5 (real) the new instance is adopted by its Application
 if [[ "$TGT_EXISTS" == false ]]; then

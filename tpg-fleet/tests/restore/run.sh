@@ -38,6 +38,8 @@ mkdir -p "$TMP/fleet.base/clusters/_template" "$TMP/fleet.base/helm_artifacts/in
 cp "$ROOT"/clusters/_template/*.yaml "$TMP/fleet.base/clusters/_template/"
 cp -r "$ROOT/helm_artifacts/instance/tpg-instance" "$ROOT/helm_artifacts/instance/crd-reference" "$TMP/fleet.base/helm_artifacts/instance/"
 RSD="$TMP/fleet.base/helm_artifacts/instance/tpg-instance/restore-specs"
+RPD="$TMP/fleet.base/helm_artifacts/instance/tpg-instance/restore-patch"
+rm -f "$RPD"/example-*   # the examples of fleet.example.yaml are not part of this fleet
 cat > "$TMP/fleet.base/clusters/fleet.yaml" <<'YAML'
 clusters:
   c1:
@@ -159,6 +161,10 @@ git_commit_push() {
   ev "push mode=${PUSH_MODE} $2"
   flag push.fail && return 1
   cp "$1/clusters/fleet.yaml" "$FLEETREPO/clusters/fleet.yaml"
+  # the restore-patch files of the clone (new, and the deletion of the one that fell out of the window)
+  if [[ -d "$1/helm_artifacts/instance/tpg-instance/restore-patch" ]]; then
+    rm -rf "$FLEETREPO/helm_artifacts/instance/tpg-instance/restore-patch"; cp -r "$1/helm_artifacts/instance/tpg-instance/restore-patch" "$FLEETREPO/helm_artifacts/instance/tpg-instance/restore-patch"
+  fi
   # another writer's entry that arrives with ours (the owner conflict of two pull requests)
   if flag push.race; then yq -i '.clusters.c2.instances."'"$(flagval push.race)"'".instance = {"namespace": "pg-dr-new", "postgresVersion": "postgres-17.6"}' "$FLEETREPO/clusters/fleet.yaml"; cp "$FLEETREPO/clusters/fleet.yaml" "$1/clusters/fleet.yaml"; fi
   PUSHED_REVISION="rev-$(date +%s%N)"
@@ -352,11 +358,10 @@ expect "a named backup into a new instance of the same namespace: SUCCEEDED/DRY_
 nothing_changed "same namespace, new instance" "$snap"
 RKP=c1.orders-copy; Y="$(restore_yaml)"
 [[ "$(yq '.kind' <<<"$Y")" == PostgresRestore && "$(yq '.spec.sourceBackup.name' <<<"$Y")" == orders-full-1 && "$(yq '.spec | has("pitr")' <<<"$Y")" == false \
-   && "$(yq '.spec.targetInstance.name' <<<"$Y")" == orders-copy && "$(yq '.spec.targetInstance.spec.postgresVersion.name' <<<"$Y")" == postgres-17.6 ]] \
-  && ok "the PostgresRestore: spec.sourceBackup.name = sourceBackupName, no pitr, targetInstance.name and the instance spec of the new target" || bad "restore yaml" "$Y"
-[[ "$(yq '.spec.targetInstance.spec | has("highAvailability")' <<<"$Y")" == true && "$(yq '.spec.targetInstance.spec.backupLocation.name' <<<"$Y")" == orders-copy-backup-location \
-   && "$(yq '.spec.targetInstance.spec.imagePullSecret.name' <<<"$Y")" == regsecret ]] \
-  && ok "the new target's spec is the chart render of its entry (its own backup location, regsecret, highAvailability)" || bad "chart render" "$Y"
+   && "$(yq '.spec.targetInstance.name' <<<"$Y")" == orders-copy ]] \
+  && ok "the PostgresRestore: spec.sourceBackup.name = sourceBackupName, no pitr, targetInstance.name" || bad "restore yaml" "$Y"
+[[ "$(yq '.spec.targetInstance | has("spec")' <<<"$Y")" == false ]] && grep -q 'spec.targetInstance.spec: none, only the name: the operator creates the instance and fills in its spec (lab item' "$TMP/rec/plan.restore.c1.orders-copy.detail" \
+  && ok "a new target without a spec file: spec.targetInstance.spec is omitted (the operator creates the instance; the plan names the lab item)" || bad "no spec" "$Y $(cat "$TMP/rec/plan.restore.c1.orders-copy.detail")"
 grep -q 'restore-src' <<<"$(cat "$TMP/rec/plan.restore.c1.orders-copy.detail")" && bad "a same-namespace restore needs no location copy" "$(cat "$TMP/rec/plan.restore.c1.orders-copy.detail")" || ok "a same-namespace restore plans no location copy"
 grep -q 'entry would be added' "$TMP/rec/plan.restore.c1.orders-copy.detail" && grep -q 'shared Secrets of pg-orders: owned by orders-db' "$TMP/rec/plan.restore.c1.orders-copy.detail" \
   && ok "the plan says the entry would be added and who owns the shared Secrets (orders-db, the namespace's owner)" || bad "plan text" "$(cat "$TMP/rec/plan.restore.c1.orders-copy.detail")"
@@ -379,7 +384,7 @@ RKP=c2.orders-dr; C="$(plan_block 'PostgresBackupLocation .* on ')"
 [[ "$(yq '.metadata.labels["tpg.fleet/restore-source"]' <<<"$C")" == "c1.orders-db" && "$(yq '.metadata | has("namespace")' <<<"$C")" == false && "$(yq '.spec.storage.azure | has("forcePathStyle")' <<<"$C")" == false ]] \
   && ok "the copy is labelled tpg.fleet/restore-source, carries no namespace (the apply sets it) and no zero default (forcePathStyle)" || bad "copy labels" "$C"
 Y="$(restore_yaml)"
-[[ "$(yq '.spec.targetInstance.spec | has("ferret")' <<<"$Y")" == false ]] && ok "a restored copy gets no FerretDB (the entry's ferret block is dropped)" || bad "ferret" "$Y"
+[[ "$(yq '.spec.targetInstance | keys | join(",")' <<<"$Y")" == name ]] && ok "onto another cluster without a spec file: targetInstance carries the name only (the chart render is not sent)" || bad "targetInstance keys" "$Y"
 
 echo "== 1b. every PITR type renders into spec.pitr"
 reset
@@ -570,7 +575,7 @@ RK=c2.dr-db
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr-existing/dr-db "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
 expect "an existing target without confirm: CONFIRMATION_MISMATCH in a real run" FAILED CONFIRMATION_MISMATCH "set confirm: dr-db"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr-existing/dr-db $'pitrEnabled: false\nconfirm: dr-db\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-dr.yaml]'; run "$PJ" P_DRY_RUN=false
-expect "an existing target refuses targetInstanceSpecFilePath" FAILED TARGET_SPEC_FILE_REFUSED "is for a new instance"
+expect "an existing target that is not the source refuses targetInstanceSpecFilePath" FAILED TARGET_SPEC_FILE_REFUSED "is for a new target or for an in-place restore"
 reset
 RK=c2.dr-db
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-other/dr-db "$BACKUP_T"; run "$PJ"
@@ -600,18 +605,21 @@ B64="$(base64 -w0 "$RSD/orders-dr.yaml")"
 run "$PJ" P_PATCH_FILES="{\"./local.yaml\": \"$B64\"}"
 expect "a local spec file in patchFiles is used" SUCCEEDED DRY_RUN
 Y="$(RKP=c2.orders-dr restore_yaml)"
-[[ "$(yq '.spec.targetInstance.spec.storageSize' <<<"$Y")" == 50Gi && "$(yq '.spec.targetInstance.spec | has("highAvailability")' <<<"$Y")" == false ]] \
-  && ok "the spec file is the instance spec: storageSize 50Gi, highAvailability enabled:false is a zero default and is left out (pruned like a Postgres)" || bad "spec file merge" "$Y"
-[[ "$(yq '.spec.targetInstance.spec.imagePullSecret.name' <<<"$Y")" == regsecret && "$(yq '.spec.targetInstance.spec.backupLocation.name' <<<"$Y")" == orders-dr-backup-location ]] \
-  && ok "the fragment is merged over the render of the entry: imagePullSecret and backupLocation come from the fleet" || bad "spec merge base" "$Y"
+[[ "$(yq '.spec.targetInstance.spec.storageSize' <<<"$Y")" == 50Gi && "$(yq '.spec.targetInstance.spec | has("highAvailability")' <<<"$Y")" == false \
+   && "$(yq '.spec.targetInstance.spec.postgresVersion.name' <<<"$Y")" == postgres-17.6 ]] \
+  && ok "the spec file is the instance spec: storageSize 50Gi, highAvailability enabled:false is a zero default and is left out (pruned like a Postgres)" || bad "spec file" "$Y"
+[[ "$(yq '.spec.targetInstance.spec | keys | join(",")' <<<"$Y")" == "postgresVersion,storageSize" ]] \
+  && ok "…and nothing else: no chart render is merged under it (no imagePullSecret, no backupLocation from the fleet)" || bad "spec not merged" "$Y"
 for f in orders-bad orders-two; do
   mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr "pitrEnabled: false
 targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/$f.yaml]"; run "$PJ"
   expect "an invalid spec file ($f): SPEC_FILE_INVALID" FAILED SPEC_FILE_INVALID
 done
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-extra.yaml]'; run "$PJ"
-expect "a spec file field the entry does not render: the pair goes on" SUCCEEDED DRY_RUN
-[[ -e "$TMP/rec/warning.c2.orders-dr.SPEC_FILE_NOT_IN_ENTRY.status" ]] && grep -q pgConfig "$TMP/rec/warning.c2.orders-dr.SPEC_FILE_NOT_IN_ENTRY.detail" && ok "SPEC_FILE_NOT_IN_ENTRY names the field (pgConfig)" || bad "not in entry" "$(ls "$TMP/rec")"
+expect "a spec file field the entry does not render: the pair goes on, no SPEC_FILE_NOT_IN_ENTRY any more" SUCCEEDED DRY_RUN
+Y="$(RKP=c2.orders-dr restore_yaml)"
+[[ ! -e "$TMP/rec/warning.c2.orders-dr.SPEC_FILE_NOT_IN_ENTRY.status" && "$(yq '.spec.targetInstance.spec.pgConfig.dbname' <<<"$Y")" == orders ]] \
+  && ok "…the field is in spec.targetInstance.spec as the file has it" || bad "extra field" "$Y"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-loc.yaml]'; run "$PJ"
 expect "a spec file backupLocation that does not exist: BACKUP_LOCATION_MISSING" FAILED BACKUP_LOCATION_MISSING "shared-location"
 reset
@@ -931,6 +939,152 @@ if command -v kubeconform >/dev/null; then
   kc="$(kubeconform -strict -summary -schema-location "$SCHEMAS" "$TMP/rendered.yaml" 2>&1)" && grep -q 'Valid: 2, Invalid: 0' <<<"$kc" \
     && ok "the rendered PostgresRestore and location copy pass kubeconform -strict against the CRD schemas" || bad "kubeconform" "$kc"
 fi
+
+echo "== 7c. the spec file is the source of truth: restore-patch (Round 23 phase 6b revision)"
+RPDR="$TMP/fleet.repo/helm_artifacts/instance/tpg-instance/restore-patch"
+rp_files() { local f; for f in "$RPDR"/*.yaml; do [[ -f "$f" ]] && basename "$f"; done; true; }
+rendered_spec() {  # rendered_spec CLUSTER INSTANCE: the Postgres spec the chart renders from the fleet repository (JSON)
+  (source "$TMP/prelude.sh"; instance_render "$TMP/fleet.repo" "$1" "$2" | yq -o=json -I=0 'select(.kind == "Postgres") | .spec')
+}
+SPEC_ORDERS='targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-dr.yaml]'
+reset
+RK=c2.orders-dr; set_flag sync.names "orders-full-1"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\n'"$SPEC_ORDERS"; snap="$(snapshot)"; run "$PJ"
+expect "a new target with a spec file (the source is in fleet.yaml): the dry run plans" SUCCEEDED DRY_RUN
+nothing_changed "new target with a spec file" "$snap"
+[[ -z "$(rp_files)" ]] && ok "dry run: no restore-patch file is written to the fleet repository" || bad "dry run wrote a restore-patch" "$(rp_files)"
+grep -q 'restore-patch: the spec file would be stored as helm_artifacts/instance/tpg-instance/restore-patch/orders-dr-restore-<uid>.yaml and recorded as restorePatch.current of c2/orders-dr in the same commit as the entry' "$TMP/rec/plan.restore.c2.orders-dr.detail" \
+  && ok "the plan says where the restore-patch goes and that it shares the commit of the entry" || bad "restore-patch plan" "$(cat "$TMP/rec/plan.restore.c2.orders-dr.detail")"
+run "$PJ" P_DRY_RUN=false
+expect "…a real run: SUCCEEDED" SUCCEEDED "" "restored c1/pg-orders/orders-db into c2/pg-dr/orders-dr"
+RPF="$(rp_files)"
+[[ "$(wc -l <<<"$RPF")" -eq 1 && "$RPF" =~ ^orders-dr-restore-[a-z0-9]{5}\.yaml$ ]] && ok "one restore-patch file <instance>-restore-<uid>.yaml is stored in restore-patch/" || bad "stored name" "$RPF"
+E="$(yq '.clusters.c2.instances.orders-dr' "$TMP/fleet.repo/clusters/fleet.yaml")"
+[[ "$(yq '.restorePatch.current' <<<"$E")" == "restore-patch/$RPF" && "$(yq '.restorePatch | has("previous")' <<<"$E")" == false ]] \
+  && ok "the entry records restorePatch.current (a chart-relative path), no previous" || bad "restorePatch record" "$E"
+RPD_DOC="$RPDR/$RPF"
+[[ "$(yq '. | keys | join(",")' "$RPD_DOC")" == "apiVersion,kind,spec" && "$(yq '.kind' "$RPD_DOC")" == Postgres && "$(yq '.apiVersion' "$RPD_DOC")" == sql.tanzu.vmware.com/v1 ]] \
+  && [[ "$(yq -o=json -I=0 '.spec' "$RPD_DOC")" == "$(yq -o=json -I=0 '.spec' "$RSD/orders-dr.yaml")" ]] \
+  && ok "the file is the Postgres document of the spec file: apiVersion, kind, spec as given, no metadata" || bad "restore-patch document" "$(cat "$RPD_DOC")"
+[[ "$(yq '.instance | has("storageSize")' <<<"$E")" == false && "$(yq '.instance | has("highAvailability")' <<<"$E")" == false && "$(yq '.instance.postgresVersion' <<<"$E")" == postgres-17.6 ]] \
+  && ok "no field of the spec file is mapped into the entry (only instance.postgresVersion, the version of the spec file)" || bad "entry mapping" "$E"
+[[ "$(grep -c '^push' "$TMP/events")" -eq 1 ]] && ok "the entry and the restore-patch are one commit (one push)" || bad "pushes" "$(cat "$TMP/events")"
+RS="$(rendered_spec c2 orders-dr)"
+[[ "$(jq -c '.storageSize' <<<"$RS")" == '"50Gi"' && "$(jq -c '.postgresVersion.name' <<<"$RS")" == '"postgres-17.6"' && "$(jq 'has("highAvailability")' <<<"$RS")" == false ]] \
+  && ok "the chart merge reproduces the restored spec: the render carries the spec file's fields (storageSize 50Gi) and, though the copied entry says HA, a single node as the spec file does" || bad "chart render" "$RS"
+PR="$(jq -c '.spec.targetInstance.spec' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json)"
+jq -e --argjson r "$RS" '. as $s | $s | to_entries | all(.[]; $r[.key] == .value)' <<<"$PR" >/dev/null \
+  && ok "…every field of the spec.targetInstance.spec the PostgresRestore got is in the render, with the same value" || bad "render vs restore spec" "$PR
+$RS"
+
+echo "-- a new target with a spec file, the source not in fleet.yaml: the entry is built from the file"
+reset
+RK=c2.orders-dr; set_flag sync.names "legacy-full-1"
+mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr "pitrEnabled: false
+targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-new.yaml]"; run "$PJ" P_DRY_RUN=false
+expect "SUCCEEDED" SUCCEEDED ""
+E="$(yq '.clusters.c2.instances.orders-dr' "$TMP/fleet.repo/clusters/fleet.yaml")"
+[[ "$(yq '.instance.postgresVersion' <<<"$E")" == postgres-17.8 && "$(yq '.instance.namespace' <<<"$E")" == pg-dr && "$(yq '.restorePatch.current' <<<"$E")" =~ ^restore-patch/orders-dr-restore- ]] \
+  && ok "the entry: namespace, the spec file's version and the restore-patch (a skeleton, since there is no entry to copy)" || bad "skeleton entry" "$E"
+echo "-- the source's restore-patch is not copied to a target without a spec file"
+reset
+RK=c2.orders-dr; set_flag sync.names "orders-full-1"
+yq -i '.clusters.c1.instances.orders-db.restorePatch.current = "restore-patch/orders-db-restore-sssss.yaml"' "$TMP/fleet.repo/clusters/fleet.yaml"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  logLevel: Debug\n' > "$RPDR/orders-db-restore-sssss.yaml"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
+expect "a source that has a restore-patch: SUCCEEDED" SUCCEEDED ""
+[[ "$(yq '.clusters.c2.instances.orders-dr | has("restorePatch")' "$TMP/fleet.repo/clusters/fleet.yaml")" == false && -z "$(rp_files | grep -v sssss || true)" ]] \
+  && ok "no spec file: the copied entry has no restorePatch and no restore-patch file is written" || bad "copied restorePatch" "$(yq '.clusters.c2.instances.orders-dr' "$TMP/fleet.repo/clusters/fleet.yaml")"
+[[ "$(jq 'has("spec")' <<<"$(jq -c '.spec.targetInstance' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json)")" == false ]] && ok "…and the PostgresRestore carries spec.targetInstance.name only" || bad "restore without spec"
+grep -q 'lab item' <<<"$(detail)" && ok "…the result records that how the operator fills the spec is a lab item" || bad "lab note" "$(detail)"
+
+echo "-- pushMode pr: the restore-patch is in the pull request commit"
+reset
+RK=c2.orders-dr; set_flag sync.names "orders-full-1"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\n'"$SPEC_ORDERS"; run "$PJ" P_DRY_RUN=false P_PUSH_MODE=pr
+expect "pushMode pr, a spec file: SUCCEEDED" SUCCEEDED ""
+ev_has 'push mode=pr' && [[ -n "$(rp_files)" ]] && ok "the pull request commit carries the restore-patch next to the entry" || bad "pr restore-patch" "$(cat "$TMP/events")"
+
+echo "-- in place with a spec file"
+reset
+rm -f "$TMP/cl/c1/postgresbackup/pg-orders/orders-running.json"   # a running backup of the instance blocks a real in-place restore
+RK=c1.orders-db
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db\n'"$SPEC_ORDERS"; snap="$(snapshot)"; run "$PJ"
+expect "in place with a spec file: the dry run plans (the spec file is allowed)" SUCCEEDED DRY_RUN
+nothing_changed "in place with a spec file" "$snap"
+RKP=c1.orders-db; Y="$(restore_yaml)"
+[[ "$(yq '.spec.targetInstance.name' <<<"$Y")" == orders-db && "$(yq '.spec.targetInstance.spec.storageSize' <<<"$Y")" == 50Gi && "$(yq '.spec.targetInstance.spec | keys | join(",")' <<<"$Y")" == "postgresVersion,storageSize" ]] \
+  && ok "in place: spec.targetInstance.spec is the spec file as it is (it overrides the existing instance's values), next to the name" || bad "in place restore yaml" "$Y"
+grep -q 'restore-patch: the spec file would be stored as .*orders-db-restore-<uid>.yaml and recorded as restorePatch.current of c1/orders-db in a commit of its own after the restore succeeded' "$TMP/rec/plan.restore.c1.orders-db.detail" \
+  && ok "the plan says the restore-patch is committed after the restore succeeded" || bad "in place plan" "$(cat "$TMP/rec/plan.restore.c1.orders-db.detail")"
+run "$PJ" P_DRY_RUN=false
+expect "in place, real run: SUCCEEDED" SUCCEEDED "" "restored c1/pg-orders/orders-db into c1/pg-orders/orders-db" "recorded as restorePatch.current of c1/orders-db"
+order="$(grep -nE '^(apply c1 postgresrestore|wait ready|push|adopt|sync)' "$TMP/events" | sed -E 's/^[0-9]+://' | cut -c1-24 | paste -sd'|' -)"
+[[ "$order" == "apply c1 postgresrestore|wait ready orders-db|push mode=direct restore" ]] \
+  && ok "in place: the restore-patch is committed after the restore and the instance running; no adoption sync, no Argo CD call" || bad "in place order" "$order
+$(cat "$TMP/events")"
+RPF="$(rp_files)"
+[[ "$(yq '.clusters.c1.instances.orders-db.restorePatch.current' "$TMP/fleet.repo/clusters/fleet.yaml")" == "restore-patch/$RPF" && "$RPF" =~ ^orders-db-restore-[a-z0-9]{5}\.yaml$ ]] \
+  && ok "…recorded on the existing entry of the in-place instance" || bad "in place record" "$(yq '.clusters.c1.instances.orders-db' "$TMP/fleet.repo/clusters/fleet.yaml") $RPF"
+[[ "$(yq '.clusters.c1.instances.orders-db.instance.disableInitialBackup' "$TMP/fleet.repo/clusters/fleet.yaml")" == true && "$(yq '.clusters.c1.instances.orders-db.backup.repoPath' "$TMP/fleet.repo/clusters/fleet.yaml")" == /pg-orders ]] \
+  && ok "…and the rest of the entry is untouched" || bad "in place entry changed"
+echo "-- a second restore with a spec file replaces the restore-patch; the third drops the oldest file"
+FIRST="$RPF"
+run "$PJ" P_DRY_RUN=false
+SECOND="$(rp_files | grep -v "^${FIRST}$")"
+RP="$(yq -o=json -I=0 '.clusters.c1.instances.orders-db.restorePatch' "$TMP/fleet.repo/clusters/fleet.yaml")"
+[[ "$(jq -r '.current' <<<"$RP")" == "restore-patch/$SECOND" && "$(jq -r '.previous.path' <<<"$RP")" == "restore-patch/$FIRST" ]] && [[ "$(rp_files | wc -l)" -eq 2 ]] \
+  && ok "the former current becomes previous (path and commit recorded); both files exist" || bad "second restore" "$RP
+$(rp_files)"
+run "$PJ" P_DRY_RUN=false
+RP="$(yq -o=json -I=0 '.clusters.c1.instances.orders-db.restorePatch' "$TMP/fleet.repo/clusters/fleet.yaml")"
+[[ "$(jq -r '.previous.path' <<<"$RP")" == "restore-patch/$SECOND" && ! -e "$RPDR/$FIRST" && "$(rp_files | wc -l)" -eq 2 ]] \
+  && ok "the third replaces the second as previous and deletes the first: the folder holds the recorded files only" || bad "third restore" "$RP
+$(rp_files)"
+echo "-- in place: without a spec file nothing is written; a source that is not in fleet.yaml; a failing push"
+reset
+rm -f "$TMP/cl/c1/postgresbackup/pg-orders/orders-running.json"
+RK=c1.orders-db
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db'; run "$PJ" P_DRY_RUN=false
+expect "in place without a spec file: SUCCEEDED" SUCCEEDED ""
+Y="$(jq -c '.spec.targetInstance' "$TMP/cl/c1/postgresrestore/pg-orders/"*.json)"
+[[ "$(jq -c 'keys' <<<"$Y")" == '["name"]' ]] && ! ev_has '^(push|adopt|sync)' && [[ -z "$(rp_files)" ]] \
+  && [[ "$(sha256sum < "$TMP/fleet.repo/clusters/fleet.yaml")" == "$(sha256sum < "$TMP/fleet.base/clusters/fleet.yaml")" ]] \
+  && ok "…only spec.targetInstance.name; nothing is written to clusters/fleet.yaml, no restore-patch, no push" || bad "in place without spec" "$Y $(cat "$TMP/events")"
+reset
+RK=c1.legacy-db
+mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c1/pg-legacy/legacy-db "pitrEnabled: false
+confirm: legacy-db
+targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/legacy.yaml]"; run "$PJ" P_DRY_RUN=false
+expect "in place on an instance that is not in clusters/fleet.yaml, with a spec file: SUCCEEDED" SUCCEEDED "" "has no entry in clusters/fleet.yaml: the spec file is used for the restore only, no restore-patch is recorded"
+! ev_has '^push' && [[ -z "$(rp_files)" ]] && ok "…nothing is pushed" || bad "legacy in place pushed" "$(cat "$TMP/events")"
+reset
+rm -f "$TMP/cl/c1/postgresbackup/pg-orders/orders-running.json"
+RK=c1.orders-db; set_flag push.fail
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db\n'"$SPEC_ORDERS"; run "$PJ" P_DRY_RUN=false
+expect "the restore-patch cannot be pushed after a successful restore: the pair stays SUCCEEDED" SUCCEEDED "" "warnings: RESTORE_PATCH_NOT_RECORDED"
+[[ -e "$TMP/rec/warning.c1.orders-db.RESTORE_PATCH_NOT_RECORDED.status" ]] && ok "RESTORE_PATCH_NOT_RECORDED is a warning of the report" || bad "not recorded warning"
+
+echo "-- an instance declared in fleet.yaml but not deployed, with a spec file"
+reset
+RK=c2.declared-db; set_flag sync.names "orders-full-1"
+yq -i '.clusters.c2.instances.declared-db.instance = {"namespace": "pg-declared", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-declared/declared-db $'pitrEnabled: false\n'"$SPEC_ORDERS"; run "$PJ" P_DRY_RUN=false
+expect "declared, not deployed, with a spec file: SUCCEEDED" SUCCEEDED ""
+order="$(grep -nE '^(apply c2 postgresrestore|wait ready|push|adopt)' "$TMP/events" | sed -E 's/^[0-9]+://' | cut -c1-24 | paste -sd'|' -)"
+[[ "$order" == "apply c2 postgresrestore|wait ready declared-db|push mode=direct restore|adopt c2 declared-db" && "$(yq '.clusters.c2.instances.declared-db.restorePatch.current' "$TMP/fleet.repo/clusters/fleet.yaml")" =~ ^restore-patch/declared-db-restore- ]] \
+  && ok "the entry is kept; the restore-patch is committed after the restore and before the adoption sync" || bad "declared order" "$order $(yq '.clusters.c2.instances.declared-db' "$TMP/fleet.repo/clusters/fleet.yaml")"
+
+echo "-- spec file errors"
+reset
+RK=c2.orders-dr
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec: {}\n' > "$RSD/orders-empty.yaml"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-bad.yaml]'; RK=c1.orders-db; run "$PJ"
+expect "an invalid spec file for an in-place restore: SPEC_FILE_INVALID (checked like a new target's)" FAILED SPEC_FILE_INVALID
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/missing.yaml]'; run "$PJ"
+expect "a spec file that is not on the fleet branch, in place: SPEC_FILE_NOT_FOUND" FAILED SPEC_FILE_NOT_FOUND
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-copy $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-nover.yaml]'; RK=c1.orders-copy; run "$PJ"
+expect "a spec file with a PostgresVersion the cluster does not have: VERSION_NOT_AVAILABLE" FAILED VERSION_NOT_AVAILABLE "postgres-19.0"
 
 echo "== 8. crashes and unknown clusters"
 reset

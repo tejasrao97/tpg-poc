@@ -444,6 +444,27 @@ render 'clusters:
 [[ "$RC" -ne 0 ]] && grep -q 'restore-patch file restore-patch/i1-restore-eeeee.yaml: kind "ConfigMap" is not a kind the tpg-instance chart renders' <<<"$OUT" \
   && ok "23: a restore-patch document of another kind fails the render" || bad "restore-patch kind" "$OUT"
 rm -f "$CHART/restore-patch/i1-restore-eeeee.yaml"
+# a spec file for a single node (highAvailability.enabled false) over an HA entry: no highAvailability block survives (readReplicas of the entry
+# without enabled is no valid object)
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability:\n    enabled: false\n' > "$CHART/restore-patch/i1-restore-fffff.yaml"
+render 'instance: {highAvailability: {enabled: true, readReplicas: 1}}
+clusters:
+  c1:
+    instances:
+      i1:
+        restorePatch: {current: restore-patch/i1-restore-fffff.yaml}'
+[[ "$RC" -eq 0 && "$(pg '.spec | has("highAvailability")')" == false ]] \
+  && ok "23: a restore-patch with highAvailability.enabled false over an HA entry renders a single node (no highAvailability block, no leftover readReplicas)" || bad "restore-patch single node" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability:\n    enabled: true\n    readReplicas: 2\n' > "$CHART/restore-patch/i1-restore-fffff.yaml"
+render 'instance: {highAvailability: {enabled: true, readReplicas: 1}}
+clusters:
+  c1:
+    instances:
+      i1:
+        restorePatch: {current: restore-patch/i1-restore-fffff.yaml}'
+[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.readReplicas')" == 2 && "$(pg '.spec.highAvailability.enabled')" == true ]] \
+  && ok "23: a restore-patch with more read replicas wins over the entry's" || bad "restore-patch ha 2" "$(pg '.spec')"
+rm -f "$CHART/restore-patch/i1-restore-fffff.yaml"
 # .helmignore must not hide restore-patch/ (the chart reads it with .Files.Get): it is in the packaged chart
 rm -rf "$TMP/rp"; mkdir -p "$TMP/rp"; cp -r "$CHART" "$TMP/rp/tpg-instance"
 if (cd "$TMP/rp" && helm package tpg-instance -d out >/dev/null 2>&1); then

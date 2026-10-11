@@ -17,6 +17,8 @@ highAvailability block: the operator treats the absent block as a single node
 reported OutOfSync (Round 12, item 5). enabled true with readReplicas 0, and
 readReplicas above 0 without enabled, fail the render (the workflows refuse
 both before they reach Git).
+A highAvailability block that does not say enabled true after the merge (a restore-patch with
+enabled false over an HA entry) is left out: a single node has no block.
 Last, tpg.prune leaves out every field that holds its zero default, patch
 file content included (templates/_prune.tpl).
 */ -}}
@@ -60,5 +62,7 @@ spec:
 {{- $ctx := include "tpg.ctx" . | fromYaml -}}
 {{- $pg := include "tpg.postgres" $ctx | fromYaml -}}
 {{- $_ := include "tpg.deepMerge" (dict "dst" $pg.spec "src" (include "tpg.kindPatch" (dict "root" $ "key" "Postgres") | fromYaml)) }}
+{{- /* a restore-patch whose spec file says highAvailability.enabled false is a single node (no block): the entry's readReplicas must not survive the merge */ -}}
+{{- if and (hasKey $pg.spec "highAvailability") (ne (toString (dig "enabled" "" $pg.spec.highAvailability)) "true") }}{{ $_ := unset $pg.spec "highAvailability" }}{{ end }}
 {{- $_ := include "tpg.prune" (dict "obj" $pg "root" $) }}
 {{ toYaml $pg }}
