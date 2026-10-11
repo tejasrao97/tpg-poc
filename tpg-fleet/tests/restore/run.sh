@@ -88,6 +88,7 @@ YAML
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-17.4 > "$RSD/orders-old.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-18.1 > "$RSD/orders-18.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-17.8 > "$RSD/orders-new.yaml"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-16.9 > "$RSD/orders-16.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-19.0 > "$RSD/orders-nover.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  noSuchField: 1\n' > "$RSD/orders-bad.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  pgConfig:\n    dbname: orders\n---\napiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageSize: 5Gi\n' > "$RSD/orders-two.yaml"
@@ -100,7 +101,7 @@ mkdir -p "$TMP/cl.base"
 seed() { mkdir -p "$TMP/cl.base/$1/$2/$3"; printf '%s' "$5" > "$TMP/cl.base/$1/$2/$3/$4.json"; }
 mkdir -p "$TMP/cl.base/c1" "$TMP/cl.base/c2"
 for c in c1 c2; do
-  for v in 17.4:postgres-17.4 17.6:postgres-17.6 17.6:postgres-17.6-lite 17.8:postgres-17.8 18.1:postgres-18.1; do
+  for v in 16.9:postgres-16.9 17.4:postgres-17.4 17.6:postgres-17.6 17.6:postgres-17.6-lite 17.8:postgres-17.8 18.1:postgres-18.1; do
     seed "$c" postgresversion _ "${v#*:}" "$(jq -cn --arg n "${v#*:}" --arg d "${v%%:*}" '{kind: "PostgresVersion", metadata: {name: $n}, spec: {dbVersion: $d}}')"
   done
 done
@@ -110,6 +111,11 @@ seed c1 postgresbackuplocation pg-orders orders-db-backup-location '{"kind":"Pos
 for b in "orders-full-1:Succeeded" "orders-failed:Failed" "orders-running:Running"; do
   seed c1 postgresbackup pg-orders "${b%%:*}" "$(jq -cn --arg n "${b%%:*}" --arg p "${b#*:}" '{kind: "PostgresBackup", metadata: {name: $n, namespace: "pg-orders"}, spec: {sourceInstance: {name: "orders-db"}, type: "full"},
     status: {phase: $p, restoreLabel: "20200101-000000F", timeStarted: "2020-01-01T00:00:00Z", backupLocation: "orders-db-backup-location", stanzaName: "pg-orders-orders-db-0000"}}')"
+done
+# backups that report the version they were taken from (status.fullPostgresVersion)
+for b in "orders-full-v174:17.4" "orders-full-v178:17.8"; do
+  seed c1 postgresbackup pg-orders "${b%%:*}" "$(jq -cn --arg n "${b%%:*}" --arg v "${b#*:}" '{kind: "PostgresBackup", metadata: {name: $n, namespace: "pg-orders"}, spec: {sourceInstance: {name: "orders-db"}, type: "full"},
+    status: {phase: "Succeeded", fullPostgresVersion: $v, restoreLabel: "20200103-000000F", timeStarted: "2020-01-03T00:00:00Z", backupLocation: "orders-db-backup-location", stanzaName: "pg-orders-orders-db-0000"}}')"
 done
 seed c1 postgresbackup pg-orders other-inst-full '{"kind":"PostgresBackup","metadata":{"name":"other-inst-full","namespace":"pg-orders"},"spec":{"sourceInstance":{"name":"reports-db"},"type":"full"},"status":{"phase":"Succeeded","restoreLabel":"20200102-000000F","timeStarted":"2020-01-02T00:00:00Z","backupLocation":"orders-db-backup-location","stanzaName":"pg-orders-reports-db-0000"}}'
 for s in regsecret backup-storage; do
@@ -442,9 +448,16 @@ expect "another cluster, source cluster unreadable: SOURCE_BACKUP_UNVERIFIED (re
 rm -f "$TMP/flags/tkfail.c1.postgresbackup"
 mk c1/pg-orders/orders-db 'sourceBackupName: orders-failed' c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ"
 expect "another cluster, source backup Failed: BACKUP_NOT_SUCCEEDED" FAILED BACKUP_NOT_SUCCEEDED "phase Failed"
-mk c1/pg-orders/orders-db 'sourceBackupName: other-inst-full' c1/pg-orders/orders-copy "$BACKUP_T"; RK=c1.orders-copy; run "$PJ"
-expect "a backup of another instance: a warning, the pair goes on" SUCCEEDED DRY_RUN
-[[ -e "$TMP/rec/warning.c1.orders-copy.BACKUP_OF_OTHER_INSTANCE.status" ]] && ok "BACKUP_OF_OTHER_INSTANCE is a warning" || bad "other instance warning"
+mk c1/pg-orders/orders-db 'sourceBackupName: other-inst-full' c1/pg-orders/orders-copy "$BACKUP_T"; RK=c1.orders-copy; snap="$(snapshot)"; run "$PJ"
+expect "a backup of another instance than the pair's source: BACKUP_OF_OTHER_INSTANCE is a refusal (also in a dry run)" FAILED BACKUP_OF_OTHER_INSTANCE "is a backup of reports-db, not of the source instance orders-db" "a pair has exactly one"
+nothing_changed "BACKUP_OF_OTHER_INSTANCE" "$snap"
+[[ ! -e "$TMP/rec/warning.c1.orders-copy.BACKUP_OF_OTHER_INSTANCE.status" ]] && ok "…and no longer a warning" || bad "still a warning"
+mk c1/pg-orders/orders-db 'sourceBackupName: other-inst-full' c2/pg-dr/orders-dr "$BACKUP_T"; RK=c2.orders-dr; run "$PJ" P_DRY_RUN=false
+expect "…the same into another cluster, in a real run" FAILED BACKUP_OF_OTHER_INSTANCE "reports-db"
+mk c1/pg-orders/orders-db 'sourceBackupName: other-inst-full' c2/pg-dr/orders-dr "$LATEST"; run "$PJ"
+expect "…with pitr and a sourceBackupName of another instance too" FAILED BACKUP_OF_OTHER_INSTANCE
+mk c1/pg-orders/reports-db 'sourceBackupName: other-inst-full' c1/pg-orders/orders-copy "$BACKUP_T"; RK=c1.orders-copy; run "$PJ"
+expect "a backup of the pair's own source instance (reports-db) is fine" SUCCEEDED DRY_RUN
 
 echo "== 3. PITR: location and stanza"
 reset
@@ -485,7 +498,7 @@ jq '.status.stanzaName = ""' "$TMP/cl/c1/postgres/pg-orders/orders-db.json" > "$
 mk c1/pg-orders/orders-db '' c2/pg-dr/orders-dr "$LATEST"; run "$PJ"
 expect "a live source without a stanza: BACKUP_LOCATION_NOT_INITIALIZED" FAILED BACKUP_LOCATION_NOT_INITIALIZED "no stanza yet"
 reset
-for k in orders-full-1 orders-failed orders-running other-inst-full; do rm -f "$TMP/cl/c1/postgresbackup/pg-orders/$k.json"; done
+for k in orders-full-1 orders-failed orders-running other-inst-full orders-full-v174 orders-full-v178; do rm -f "$TMP/cl/c1/postgresbackup/pg-orders/$k.json"; done
 mk c1/pg-orders/orders-db '' c2/pg-dr/orders-dr "$LATEST"; run "$PJ"
 expect "a live source without a Succeeded full backup: NO_FULL_BACKUP" FAILED NO_FULL_BACKUP
 reset
@@ -510,16 +523,26 @@ tgt orders-lite.yaml; run "$PJ"
 expect "standard source -> lite target: BLOCKED RESTORE_FLAVOUR_UNSUPPORTED" BLOCKED RESTORE_FLAVOUR_UNSUPPORTED "postgres-17.6-lite" "choose a standard PostgresVersion"
 [[ -e "$TMP/rec/plan.restore.c2.orders-dr.detail" ]] && ok "a BLOCKED pair still records its plan so far" || bad "blocked plan"
 tgt orders-old.yaml; run "$PJ"
-expect "a lower minor version: BLOCKED RESTORE_VERSION_LOWER" BLOCKED RESTORE_VERSION_LOWER "postgres-17.4" "skipMinorVersionCheck"
+expect "a lower minor version: BLOCKED RESTORE_VERSION_LOWER" BLOCKED RESTORE_VERSION_LOWER "postgres-17.4" "lower version than 17.6" "relaxes no check"
 tgt orders-old.yaml 'skipMinorVersionCheck: true'; run "$PJ"
-expect "…with skipMinorVersionCheck the pair goes on" SUCCEEDED DRY_RUN
-[[ -e "$TMP/rec/warning.c2.orders-dr.RESTORE_VERSION_LOWER_SKIPPED.status" ]] && ok "…and RESTORE_VERSION_LOWER_SKIPPED is recorded as a warning" || bad "skipped warning"
+expect "…skipMinorVersionCheck does not lift it: still BLOCKED RESTORE_VERSION_LOWER" BLOCKED RESTORE_VERSION_LOWER "only sets the operator's annotation"
+[[ ! -e "$TMP/rec/warning.c2.orders-dr.RESTORE_VERSION_LOWER_SKIPPED.status" ]] && ok "…RESTORE_VERSION_LOWER_SKIPPED does not exist any more" || bad "skipped warning"
 tgt orders-new.yaml; run "$PJ"
 expect "a higher minor version is allowed" SUCCEEDED DRY_RUN
+tgt orders-16.yaml; run "$PJ"
+expect "a lower major version: BLOCKED RESTORE_VERSION_LOWER" BLOCKED RESTORE_VERSION_LOWER "postgres-16.9"
 tgt orders-18.yaml; run "$PJ"
-expect "another major version: BLOCKED RESTORE_MAJOR_DIFFERS" BLOCKED RESTORE_MAJOR_DIFFERS "same major version"
+expect "a higher major version is not blocked by the workflow (RESTORE_MAJOR_DIFFERS is removed; the operator refuses it)" SUCCEEDED DRY_RUN
+grep -q 'the operator refuses a restore across major versions itself' "$TMP/rec/plan.restore.c2.orders-dr.detail" && ok "…the plan notes that the operator decides" || bad "major note" "$(cat "$TMP/rec/plan.restore.c2.orders-dr.detail")"
 tgt orders-18.yaml 'skipMinorVersionCheck: true'; run "$PJ"
-expect "…skipMinorVersionCheck does not lift a major difference" BLOCKED RESTORE_MAJOR_DIFFERS
+expect "…with skipMinorVersionCheck the same" SUCCEEDED DRY_RUN
+# the version of the named backup counts (status.fullPostgresVersion), not only the source's current version
+mk c1/pg-orders/orders-db 'sourceBackupName: orders-full-v178' c2/pg-dr/orders-dr "pitrEnabled: false
+targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-dr.yaml]"; run "$PJ"
+expect "a backup taken at 17.8 into a 17.6 target: BLOCKED RESTORE_VERSION_LOWER (the backup's fullPostgresVersion, although the source runs 17.6)" BLOCKED RESTORE_VERSION_LOWER "17.8" "PostgresBackup orders-full-v178"
+mk c1/pg-orders/orders-db 'sourceBackupName: orders-full-v174' c2/pg-dr/orders-dr "pitrEnabled: false
+targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-old.yaml]"; run "$PJ"
+expect "a backup taken at 17.4 into a 17.4 target: allowed (the source runs 17.6)" SUCCEEDED DRY_RUN
 tgt orders-nover.yaml; run "$PJ"
 expect "a version the target cluster does not have: VERSION_NOT_AVAILABLE" FAILED VERSION_NOT_AVAILABLE "postgres-19.0"
 # a lite source is restored into a standard or a lite target
@@ -856,7 +879,8 @@ ev_has '^backup tpg-restore-x c2 orders-dr full 10800' && ok "a full backup of t
 set_flag backup.fail
 reset; set_flag backup.fail; set_flag sync.names "orders-full-1"
 run "$PJ" P_DRY_RUN=false
-expect "…a failing backup: POST_RESTORE_BACKUP_FAILED, saying the restore itself succeeded" FAILED POST_RESTORE_BACKUP_FAILED "the restore itself succeeded"
+expect "…a failing backup: the pair stays SUCCEEDED, POST_RESTORE_BACKUP_FAILED is a warning saying the restore itself succeeded" SUCCEEDED "" "warnings: POST_RESTORE_BACKUP_FAILED: the restore itself succeeded"
+[[ "$(cat "$TMP/rec/warning.c2.orders-dr.POST_RESTORE_BACKUP_FAILED.status" 2>/dev/null)" == WARNING ]] && ok "…recorded as a warning of the report" || bad "backup warning record" "$(ls "$TMP/rec")"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; reset; set_flag sync.names "orders-full-1"; run "$PJ" P_DRY_RUN=false
 ! ev_has '^backup' && ok "no postRestoreBackup: no backup" || bad "backup without the flag"
 

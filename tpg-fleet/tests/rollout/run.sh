@@ -59,6 +59,14 @@ expect "pairs: a maxParallel that is not a number fails"                       "
 (cd "$TMP" && P_PAIRS="$P4" bash "$TMP/plan.sh" wf false 2 canary >/dev/null 2>&1)
 expect "pairs: an item carries index, cluster, instance, method and the pair as JSON" \
   "$(jq -c '.[0][0] | [.index, .cluster, .instance, .method, (.pair | fromjson | .target.instance)]' /tmp/batches.json)" '[0,"t0","t0","latest","t0"]'
+expect "pairs: an item also carries the target namespace (the mutex of the pair step is per target cluster and namespace)" \
+  "$(jq -c '.[0][0].namespace' /tmp/batches.json)" '"pg-t"'
+RT="$ROOT/workflows/templates/tpg-restore.yaml"
+expect "tpg-restore: restore-batch hands the namespace of the item to the pair step" \
+  "$(yq -r '.spec.templates[] | select(.name == "restore-batch") | .steps[0][0].arguments.parameters[] | select(.name == "namespace") | .value' "$RT")" '{{item.namespace}}'
+expect "tpg-restore: the pair step holds a mutex per target cluster and namespace (besides the one per instance)" \
+  "$(yq -r '.spec.templates[] | select(.name == "restore-pair") | .synchronization.mutexes[].name' "$RT" | paste -sd' ' -)" \
+  'tpg-instance-{{inputs.parameters.cluster}}-{{inputs.parameters.instance}} tpg-restore-ns-{{inputs.parameters.cluster}}-{{inputs.parameters.namespace}}'
 expect "pairs: has-batches is true" "$(cat /tmp/has-batches)" 'true'
 (cd "$TMP" && P_PAIRS='[]' bash "$TMP/plan.sh" wf false 2 all >/dev/null 2>&1)
 expect "pairs: has-batches is false without a pair" "$(cat /tmp/has-batches)" 'false'

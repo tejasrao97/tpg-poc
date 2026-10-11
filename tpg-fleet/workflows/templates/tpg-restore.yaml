@@ -211,6 +211,8 @@ spec:
               value: "{{item.pair}}"
             - name: cluster
               value: "{{item.cluster}}"
+            - name: namespace
+              value: "{{item.namespace}}"
             - name: instance
               value: "{{item.instance}}"
             - name: method
@@ -247,12 +249,16 @@ spec:
       parameters:
         - name: pair
         - name: cluster
+        - name: namespace
         - name: instance
         - name: method
-    # one restore at a time per target instance (the lock of the other workflows)
+    # one restore at a time per target instance (the lock of the other workflows) and per target cluster and
+    # namespace: pairs that restore into one namespace share its Secrets, backup locations and fleet entries and
+    # run one after another; pairs of other namespaces stay parallel (up to maxParallel)
     synchronization:
       mutexes:
         - name: "tpg-instance-{{inputs.parameters.cluster}}-{{inputs.parameters.instance}}"
+        - name: "tpg-restore-ns-{{inputs.parameters.cluster}}-{{inputs.parameters.namespace}}"
     outputs:
       parameters:
         - name: result

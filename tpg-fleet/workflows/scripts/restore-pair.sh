@@ -202,6 +202,8 @@ elif [[ "$SRC_FLEET" == true ]]; then
 fi
 S_VER=""
 if [[ -n "$S_PGV" ]]; then pv_version "$S_PGV"; S_VER="$PV_VER"; fi
+S_VER_LIVE=""
+[[ "$SRC_LIVE" != true ]] || S_VER_LIVE="$(ver_of "$(jq -r '.status.postgresVersion // ""' <<<"$SRC_PG")")"
 S_LITE=false; if [[ -n "$S_PGV" ]] && is_lite "$S_PGV"; then S_LITE=true; fi
 plan "source: $( [[ "$SRC_LIVE" == true ]] && echo "Postgres ${SC}/${SNS}/${SI} is live" || echo "${SC}/${SNS}/${SI} is not on the cluster" )$( [[ "$SRC_FLEET" == true ]] && echo ", declared in clusters/fleet.yaml" || echo ", not in clusters/fleet.yaml" ); version ${S_PGV:-unknown}${S_VER:+ (${S_VER}, $( [[ "$S_LITE" == true ]] && echo lite || echo standard ))}; location ${S_BL:-none}, stanza ${S_STANZA:-none}"
 
@@ -209,6 +211,15 @@ plan "source: $( [[ "$SRC_LIVE" == true ]] && echo "Postgres ${SC}/${SNS}/${SI} 
 SB=""; SB_ERR=""
 if [[ -n "$SBK" ]]; then
   if get_obj "$SNS" postgresbackup "$SBK"; then SB="$OBJ"; else SB_ERR="$OBJ_ERR"; fi
+fi
+S_VER_BACKUP=""
+[[ -z "$SB" ]] || S_VER_BACKUP="$(ver_of "$(jq -r '.status.fullPostgresVersion // ""' <<<"$SB")")"
+if [[ -n "$SB" ]]; then
+  # a pair names one source instance: a backup of another instance is no recovery point for it
+  sinst="$(jq -r '.spec.sourceInstance.name // ""' <<<"$SB")"
+  if [[ -n "$sinst" && "$sinst" != "$SI" ]]; then
+    fail BACKUP_OF_OTHER_INSTANCE "PostgresBackup ${SNS}/${SBK} on ${SC} is a backup of ${sinst}, not of the source instance ${SI} of the pair: name ${sinst} as the source instance (a pair has exactly one), or give a backup of ${SI}"
+  fi
 fi
 if [[ "$METHOD" == backup ]]; then
   if [[ -z "$SB" ]]; then
@@ -220,10 +231,6 @@ if [[ "$METHOD" == backup ]]; then
   fi
   sphase="$(jq -r '.status.phase // ""' <<<"$SB")"
   [[ "$sphase" == Succeeded ]] || fail BACKUP_NOT_SUCCEEDED "PostgresBackup ${SNS}/${SBK} on ${SC} is in phase ${sphase:-<none>}, not Succeeded"
-  sinst="$(jq -r '.spec.sourceInstance.name // ""' <<<"$SB")"
-  if [[ -n "$sinst" && "$sinst" != "$SI" ]]; then
-    warn BACKUP_OF_OTHER_INSTANCE "PostgresBackup ${SBK} is a backup of ${sinst}, not of the source instance ${SI} of the pair"
-  fi
   plan "named backup ${SNS}/${SBK} on ${SC}: Succeeded$( [[ "$SAME_NS" == true ]] && echo " (same namespace: no wait, no copy)" || echo " (source check passed; the target namespace gets a copy of the source backup location and the same-named backup is waited for)" )"
 fi
 
@@ -442,26 +449,26 @@ else
     fail VERSION_NOT_AVAILABLE "PostgresVersion ${T_PGV} of the new instance ${TI} does not exist on ${TC} (kubectl get postgresversion); the operator there offers other versions, or is not installed"
   fi
   T_LITE=false; is_lite "$T_PGV" && T_LITE=true
-  if [[ -z "$S_PGV" ]]; then
+  # the version the backup was taken from: the named backup's status.fullPostgresVersion, else the live source's
+  # (status.postgresVersion), else the PostgresVersion of the source (dbVersion, or read from its name)
+  S_VER_FROM="PostgresVersion ${S_PGV}"
+  if [[ -n "$S_VER_BACKUP" ]]; then S_VER="$S_VER_BACKUP"; S_VER_FROM="PostgresBackup ${SBK} (status.fullPostgresVersion)"
+  elif [[ -n "$S_VER_LIVE" ]]; then S_VER="$S_VER_LIVE"; S_VER_FROM="the live Postgres (status.postgresVersion)"; fi
+  if [[ -z "$S_PGV" && -z "$S_VER" ]]; then
     warn MATRIX_UNVERIFIED "the PostgresVersion of the source ${SC}/${SNS}/${SI} is not known (not live, not in ${FLEET_REL}): the restore matrix (flavour, minor version) was not checked"
   else
-    if [[ "$S_LITE" == false && "$T_LITE" == true ]]; then
+    if [[ -n "$S_PGV" && "$S_LITE" == false && "$T_LITE" == true ]]; then
       block RESTORE_FLAVOUR_UNSUPPORTED "the backups of ${SI} are of the standard version ${S_PGV}; the target ${TI} is the lite version ${T_PGV}: a standard backup cannot be restored into a lite instance; choose a standard PostgresVersion for the target"
     fi
     if [[ -n "$S_VER" && -n "$T_VER" ]]; then
       smaj="${S_VER%%.*}"; smin="${S_VER#*.}"; [[ "$smin" != "$S_VER" ]] || smin=0
       tmaj="${T_VER%%.*}"; tmin="${T_VER#*.}"; [[ "$tmin" != "$T_VER" ]] || tmin=0
-      if (( tmaj < smaj )); then
-        block RESTORE_VERSION_LOWER "the target ${T_PGV} (${T_VER}) is an older major version than the source ${S_PGV} (${S_VER})"
-      elif (( tmaj > smaj )); then
-        block RESTORE_MAJOR_DIFFERS "the target ${T_PGV} (${T_VER}) is another major version than the source ${S_PGV} (${S_VER}): a pgBackRest backup restores into the same major version only (upgrade the restored instance with tpg-upgrade)"
-      elif (( tmin < smin )); then
-        if [[ "$SKIPMINOR" == true ]]; then
-          warn RESTORE_VERSION_LOWER_SKIPPED "the target ${T_PGV} (${T_VER}) is a lower minor version than the source ${S_PGV} (${S_VER}); skipMinorVersionCheck is set, so the restore goes on with the annotation sql.tanzu.vmware.com/skip-minor-version-check"
-        else
-          block RESTORE_VERSION_LOWER "the target ${T_PGV} (${T_VER}) is a lower minor version than the source ${S_PGV} (${S_VER}): choose ${S_VER} or newer, or set skipMinorVersionCheck: true to skip the operator's check"
-        fi
+      # a lower version always blocks (skipMinorVersionCheck only sets the operator's annotation); another major version is
+      # the operator's to refuse, a higher one is passed on
+      if (( tmaj < smaj || (tmaj == smaj && tmin < smin) )); then
+        block RESTORE_VERSION_LOWER "the target ${T_PGV} (${T_VER}) is a lower version than ${S_VER}, the version of ${S_VER_FROM}: choose ${S_VER} or newer (skipMinorVersionCheck only sets the operator's annotation, it relaxes no check of this workflow)"
       fi
+      if (( tmaj > smaj )); then plan "note: the target ${T_PGV} (${T_VER}) is another major version than the source (${S_VER}): the operator refuses a restore across major versions itself"; fi
     fi
   fi
   plan "matrix: source ${S_PGV:-unknown} -> target ${T_PGV} $( [[ "$T_LITE" == true ]] && echo "(lite)" || echo "(standard)" ): allowed"
@@ -781,9 +788,11 @@ if [[ "$POSTBACKUP" == true ]]; then
   RESULT_KEY="backup.${TC}.${TI}" bash /scripts/backup-instance.sh "$WF" "$TC" "$TI" full "$BACKUP_TIMEOUT" || true
   b="$(run_data "backup.${TC}.${TI}")"; [[ -n "$b" ]] || b='{}'
   if [[ "$(jq -r '.status // ""' <<<"$b")" != "SUCCEEDED" ]]; then
-    fail POST_RESTORE_BACKUP_FAILED "the restore itself succeeded and ${TI} runs, but the full backup after it did not: $(jq -r '(.status // "no result") + " " + (.reason // "") + " " + (.detail // "")' <<<"$b")"
+    # the restore succeeded and the instance runs: the pair stays SUCCEEDED, the failed backup is a warning
+    warn POST_RESTORE_BACKUP_FAILED "the restore itself succeeded and ${TI} runs, but the full backup after it did not: $(jq -r '(.status // "no result") + " " + (.reason // "") + " " + (.detail // "")' <<<"$b"); take one with tpg-backup"
+  else
+    note "post-restore backup: $(jq -r '.detail' <<<"$b")"
   fi
-  note "post-restore backup: $(jq -r '.detail' <<<"$b")"
 fi
 if [[ "$SAME_NS" != true ]]; then
   if [[ "$KEEP" == false && "$COPY_MADE" == true ]]; then

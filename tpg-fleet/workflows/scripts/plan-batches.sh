@@ -13,7 +13,8 @@
 # clusters (REQUIRE_PRECHECK is ignored: there is no pre-check, and waves do not apply): the
 # modes mean canary = the first pair alone, then batches of MAX_PARALLEL; batches = chunks of
 # MAX_PARALLEL in the order of the list; all = one batch. A batch is a list of items
-#   {index, cluster, instance, method, pair}   cluster and instance: the target; pair: the
+#   {index, cluster, namespace, instance, method, pair}   cluster, namespace and instance: the target (the
+#   restore step holds a mutex per target cluster and namespace); pair: the
 #   normalized pair as JSON text, which the restore step reads (a string, so Argo passes it whole)
 # Outputs /tmp/batches.json and /tmp/has-batches.
 WF="$1"; REQUIRE="$2"; MAXP="$3"; MODE="${4:-canary}"
@@ -26,7 +27,7 @@ case "$MODE" in canary|batches|all) ;; *) log "rolloutMode must be canary, batch
 if [[ -n "${P_PAIRS:-}" ]]; then
   jq -c --argjson n "$MAXP" --arg mode "$MODE" '
     def chunks($size): [range(0; length; $size) as $i | .[$i:($i + $size)]];
-    map({index, cluster: .target.cluster, instance: .target.instance, method, pair: tojson})
+    map({index, cluster: .target.cluster, namespace: .target.namespace, instance: .target.instance, method, pair: tojson})
     | if $mode == "all" then (if length > 0 then [.] else [] end)
       elif $mode == "batches" then chunks($n)
       else (if length > 0 then [.[0:1]] + (.[1:] | chunks($n)) else [] end) end
