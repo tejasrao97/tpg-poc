@@ -35,7 +35,10 @@
 # purgeBackups (Round 23, input and clusterMap instance key; delete-instance.sh does the work): every
 # PostgresBackup of the instance is expired while the operator runs, and after the instance is gone every
 # blob under its container and repoPath is deleted, unless another PostgresBackupLocation on any registered
-# cluster uses that repoPath (then only expired, blobs kept, reported). Needs finalBackup=false.
+# cluster uses that repoPath (then only expired, blobs kept, reported). Needs finalBackup=false. A re-run after
+# BLOB_PURGE_FAILED (the Postgres, the entry and the location are gone) names the instance again with
+# purgeBackups=true: an instance with no entry and no Postgres is a target then when its audit copy in
+# clusters/deleted records the repository (deleted.backupLocation); delete-instance.sh finishes the blob purge only.
 # Environment: P_APPS P_DRY_RUN P_PURGE_PVCS P_PURGE_NS P_PURGE_BACKUPS P_FORCE P_FORCE_DELETE_STUCK P_FINAL_BACKUP P_TIMEOUT
 #              PUSH_MODE PR_TIMEOUT_SECONDS
 WF="$1"; C="$2"
@@ -113,6 +116,11 @@ else
     [[ -n "$i" ]] || continue
     if grep -Fqx -- "$i" <<<"$declared" || grep -Fqx -- "$i" <<<"$live_names"; then
       targets="$(printf '%s\n%s' "$targets" "$i")"
+    elif [[ "$(cmap_ival "$C" "$i" purgeBackups "${P_PURGE_BACKUPS:-false}")" == "true" ]] && deleted_backup_repo "$REPO" "$C" "$i"; then
+      # the re-run of a delete with purgeBackups=true whose blob purge failed: the Postgres, the entry and the
+      # location are gone, the audit copy records the repository; delete-instance.sh finishes the blob purge
+      targets="$(printf '%s\n%s' "$targets" "$i")"
+      log "${C}/${i}: no Postgres and no entry in ${FLEET_REL}, but an audit copy with its backup repository: only the blob purge (purgeBackups=true) is finished"
     else
       cfail "$i" UNKNOWN_INSTANCE "not declared in ${FLEET_REL} and no Postgres ${i} on ${C}"
     fi
@@ -124,7 +132,7 @@ foreign="[]"   # Postgres CRs that block the operator removal
 if [[ "$DELETE_OPERATOR" == "true" && "$has_crd" == "true" ]]; then
   foreign="$(jq -c --arg t "$targets" '($t | split("\n")) as $tl | [.[] | select(.namespace != .expected or ((.name as $n | $tl | index($n)) | not))]' <<<"$live")"
   busy="$(for k in postgresbackups postgresrestores postgresversionupgrades; do
-      tk get "$k" -A -o json 2>/dev/null | jq -r --arg k "$k" '.items[]? | select((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed)$") | not) | $k + ":" + .metadata.namespace + "/" + .metadata.name'
+      tk get "$k" -A -o json 2>/dev/null | jq -r --arg k "$k" ".items[]? | ${OP_ACTIVE_JQ}"' | $k + ":" + .metadata.namespace + "/" + .metadata.name'
     done)"
   if [[ -n "$busy" && "$FORCE" != "true" ]]; then
     cfail operator OPERATION_IN_PROGRESS "$(paste -sd' ' <<<"$busy"); wait or set force=true"
@@ -171,6 +179,10 @@ crds="$(tk get crd -o name 2>/dev/null | sed 's#^customresourcedefinition.apiext
 if [[ "$DRY" == "true" ]]; then
   for i in $targets; do
     in_git="no"; grep -Fqx -- "$i" <<<"$declared" && in_git="yes"
+    if [[ "$in_git" == "no" ]] && ! grep -Fqx -- "$i" <<<"$live_names"; then
+      record "result.${C}.${i}" SUCCEEDED DRY_RUN "would only finish the blob purge of ${i} (re-run: no Postgres and no fleet.yaml entry any more; purgeBackups=true deletes the blobs under the container and repoPath of its audit copy)"
+      continue
+    fi
     record "result.${C}.${i}" SUCCEEDED DRY_RUN "would delete Postgres ${i} (fleet.yaml entry: ${in_git}; finalBackup=$(cmap_ival "$C" "$i" finalBackup "${P_FINAL_BACKUP:-true}"), purgePvcs=$(cmap_ival "$C" "$i" purgePvcs "${P_PURGE_PVCS:-}"), purgeNamespace=$(cmap_ival "$C" "$i" purgeNamespace "${P_PURGE_NS:-}"), purgeBackups=$(cmap_ival "$C" "$i" purgeBackups "${P_PURGE_BACKUPS:-false}"))"
   done
   if [[ "$DELETE_OPERATOR" == "true" ]]; then

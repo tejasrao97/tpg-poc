@@ -6,6 +6,8 @@
 # purgeBackups=true (needs finalBackup=false): every backup is expired while the instance runs and the
 # blobs left under its container and repoPath are deleted after it is gone; a repoPath that another
 # backup location uses keeps its blobs.
+# A blob purge that failed (BLOB_PURGE_FAILED) is finished by running the workflow again with purgeBackups=true:
+# the instance is gone, but its audit copy in clusters/deleted records the repository (discover.sh accepts it).
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -106,6 +108,8 @@ spec:
               value: "{{workflow.parameters.instances}}"
             - name: clusterMap
               value: "{{workflow.parameters.clusterMap}}"
+            - name: purgeBackups
+              value: "{{workflow.parameters.purgeBackups}}"
     - - name: delete-all
         template: delete-all
         arguments:

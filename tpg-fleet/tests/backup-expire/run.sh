@@ -155,7 +155,9 @@ tk() {
     *" patch postgresbackup "*)
       name="$(awk '{for (i = 1; i <= NF; i++) if ($i == "postgresbackup") { print $(i + 1); exit }}' <<<"$args")"
       ev "patch $name"
-      if [[ -f "@TMP@/silent.$name" ]]; then
+      if [[ -f "@TMP@/keep.$name" ]]; then   # the object already has spec.expire=true: the patch changes nothing, and the operator says nothing new
+        jq '.' "@TMP@/backups.json" > "@TMP@/b.n"
+      elif [[ -f "@TMP@/silent.$name" ]]; then
         jq --arg n "$name" '(.items[] | select(.metadata.name == $n) | .spec.expire) = true' "@TMP@/backups.json" > "@TMP@/b.n"
       elif [[ -f "@TMP@/decline.$name" ]]; then
         jq --arg n "$name" '(.items[] | select(.metadata.name == $n)) |= (.spec.expire = true | .status.conditions = [{type: "Expired", reason: "ExpireFailed", status: "False", message: "pgBackRest: unable to remove the latest full backup"}])' "@TMP@/backups.json" > "@TMP@/b.n"
@@ -172,7 +174,7 @@ PRELUDE
 sed -e "s#@TMP@#$TMP#g" -e "s#@ROOT@#$ROOT#g" "$TMP/prelude.tmpl" > "$TMP/prelude.sh"
 sed -e "s#source /scripts/lib.sh#source $TMP/prelude.sh#" "$ROOT/workflows/scripts/backup-expire.sh" > "$TMP/backup-expire.sh"
 
-reset() { rm -rf "$TMP/work"; rm -f "$TMP"/silent.* "$TMP"/decline.* "$TMP/notrunning" "$TMP/busy"; : > "$TMP/records"; : > "$TMP/events"; cp "$TMP/backups.base.json" "$TMP/backups.json"; }
+reset() { rm -rf "$TMP/work"; rm -f "$TMP"/silent.* "$TMP"/decline.* "$TMP"/keep.* "$TMP/notrunning" "$TMP/busy"; : > "$TMP/records"; : > "$TMP/events"; cp "$TMP/backups.base.json" "$TMP/backups.json"; }
 run() {  # run MAP DRY [TIMEOUT] -> backup-expire.sh for orders-db; output in $OUT, status in $RC
   RC=0; OUT="$(P_CLUSTER_MAP="$1" bash "$TMP/backup-expire.sh" wf c1 orders-db "$2" "${3:-10}" 2>&1)" || RC=$?
 }
@@ -183,6 +185,7 @@ mapof() { printf 'c1:\n  instances:\n    orders-db: %s\n' "$1"; }
 
 # ---- the dependents of a backup (derived from the restore labels)
 reset
+# shellcheck disable=SC2030  # the subshell is on purpose (lib.sh is sourced in several subshells of this suite)
 ( export TPG_WORK="$TMP/work"; source "$TMP/prelude.sh"
   for b in orders-full-1 orders-incr-1a orders-diff-1 orders-incr-1b orders-full-2 orders-incr-2a orders-failed; do
     printf '%s=%s\n' "$b" "$(backup_dependents pg-orders-db "$b" | paste -sd' ' -)"
@@ -309,6 +312,92 @@ touch "$TMP/silent.orders-incr-2a"
 run "$(mapof '{backups: [orders-incr-2a]}')" false 40
 grep -q 'wait expire of PostgresBackup orders-incr-2a: gave up' <<<"$OUT" && grep -q 'poll 4/4' <<<"$OUT" \
   && ok "the wait is timeoutSeconds / 10 polls, each logged" || bad "poll count" "$OUT"
+
+# ---- _backup_expire_state trusts only conditions the operator wrote for the current generation of the object
+state() { printf '%s' "$1" | ( source "$TMP/prelude.sh"; _backup_expire_state ); }
+OLD_FALSE='{"metadata":{"generation":2},"spec":{"expire":true},"status":{"phase":"Succeeded","conditions":[{"type":"Expired","status":"False","reason":"ExpireFailed","message":"old refusal","observedGeneration":1}]}}'
+NEW_FALSE='{"metadata":{"generation":2},"spec":{"expire":true},"status":{"phase":"Succeeded","conditions":[{"type":"Expired","status":"False","reason":"ExpireFailed","message":"fresh refusal","observedGeneration":2}]}}'
+NEW_TRUE='{"metadata":{"generation":2},"spec":{"expire":true},"status":{"phase":"Succeeded","conditions":[{"type":"Expired","status":"True","observedGeneration":2}]}}'
+NO_GEN='{"metadata":{"generation":2},"spec":{"expire":true},"status":{"phase":"Succeeded","conditions":[{"type":"Expired","status":"False","reason":"ExpireFailed","message":"no generation"}]}}'
+[[ "$(state "$OLD_FALSE")" == PENDING ]] && ok "expire state: an Expired=False condition of an older generation (observedGeneration 1, object at 2) is not read as DECLINED" || bad "stale false" "$(state "$OLD_FALSE")"
+[[ "$(state "$NEW_FALSE")" == "DECLINED fresh refusal" ]] && ok "expire state: the same condition for the current generation is DECLINED with the operator's message" || bad "fresh false" "$(state "$NEW_FALSE")"
+[[ "$(state "$NEW_TRUE")" == EXPIRED ]] && ok "expire state: Expired=True for the current generation is EXPIRED" || bad "fresh true" "$(state "$NEW_TRUE")"
+[[ "$(state "$NO_GEN")" == PENDING ]] && ok "expire state: a condition without observedGeneration on an object at generation 2 is not trusted" || bad "no observedGeneration" "$(state "$NO_GEN")"
+[[ "$(state '{"metadata":{"generation":2},"status":{"phase":"Expired","conditions":[{"type":"Expired","status":"False","observedGeneration":1}]}}')" == EXPIRED ]] \
+  && ok "expire state: the phase Expired is EXPIRED whatever an older condition says" || bad "phase expired"
+reset
+jq '(.items[] | select(.metadata.name == "orders-incr-2a")) |= (.spec.expire = true | .metadata.generation = 2 | .status.conditions = [{type: "Expired", reason: "ExpireFailed", status: "False", message: "old refusal", observedGeneration: 1}])' "$TMP/backups.base.json" > "$TMP/backups.json"
+touch "$TMP/keep.orders-incr-2a"
+run "$(mapof '{backups: [orders-incr-2a]}')" false
+rec | grep -q '|TIMEOUT||orders-incr-2a: no answer from the operator' && ! rec | grep -q 'DECLINED' \
+  && ok "a re-run where spec.expire is already true and the only Expired=False is from an older generation waits and times out like a normal expire (not DECLINED)" || bad "re-run stale decline" "$(cat "$TMP/records")"
+reset
+jq '(.items[] | select(.metadata.name == "orders-incr-2a")) |= (.spec.expire = true | .metadata.generation = 2 | .status.conditions = [{type: "Expired", reason: "ExpireFailed", status: "False", message: "fresh refusal", observedGeneration: 2}])' "$TMP/backups.base.json" > "$TMP/backups.json"
+touch "$TMP/keep.orders-incr-2a"
+run "$(mapof '{backups: [orders-incr-2a]}')" false
+rec | grep -q '|FAILED|BACKUP_EXPIRE_DECLINED|pgBackRest declined to expire orders-incr-2a: fresh refusal' \
+  && ok "a re-run whose Expired=False is for the current generation is DECLINED with the message" || bad "re-run fresh decline" "$(cat "$TMP/records")"
+
+# ---- busy_operations: an expired object the operator keeps is not an unfinished operation
+busy_of() {  # busy_of BACKUP_ITEMS_JSON [RESTORE_ITEMS_JSON] -> busy_operations output
+  ( export BK="$1" RS="${2:-[]}"; source "$ROOT/workflows/scripts/lib.sh"; WORK="$TMP/work-busy"
+    instance_ns() { printf 'pg-orders-db'; }
+    CLUSTER=c1
+    tk() { case "$*" in *"get postgresbackup -o json"*) printf '{"items":%s}' "$BK" ;; *"get postgresrestore -o json"*) printf '{"items":%s}' "$RS" ;; *) printf '{"items":[]}' ;; esac; }
+    busy_operations orders-db )
+}
+BKP() { printf '[{"metadata":{"name":"b"},"spec":%s,"status":{"phase":"%s"}}]' "$1" "$2"; }
+[[ -z "$(busy_of "$(BKP '{"expire":true}' Expired)")" ]] && ok "busy_operations: a PostgresBackup with spec.expire=true in the phase Expired is not busy" || bad "busy expired" "$(busy_of "$(BKP '{"expire":true}' Expired)")"
+[[ -z "$(busy_of "$(BKP '{"expire":true}' Expiring)")" ]] && ok "busy_operations: spec.expire=true in the phase Expiring is not busy (the operator kept the object)" || bad "busy expiring"
+[[ -z "$(busy_of "$(BKP '{"expire":true}' Running)")" ]] && ok "busy_operations: any PostgresBackup with spec.expire=true is left out of the running set" || bad "busy expire true"
+[[ -z "$(busy_of "$(BKP '{}' Expired)")" ]] && ok "busy_operations: the phase Expired is finished even without spec.expire" || bad "busy phase expired"
+[[ "$(busy_of "$(BKP '{}' Running)")" == "postgresbackup " ]] && ok "busy_operations: a running backup without spec.expire is still busy" || bad "busy running" "$(busy_of "$(BKP '{}' Running)")"
+[[ "$(busy_of "$(BKP '{"expire":true}' Expired)" '[{"metadata":{"name":"r"},"status":{"phase":"Running"}}]')" == "postgresrestore " ]] \
+  && ok "busy_operations: an expired backup does not hide a running restore" || bad "busy restore" "$(busy_of "$(BKP '{"expire":true}' Expired)" '[{"metadata":{"name":"r"},"status":{"phase":"Running"}}]')"
+
+# ---- repo_shared fails closed: only a definite "no such resource" means a cluster has no locations
+rs() {  # rs CRD LIST -> repo_shared for c1/ns/i-backup-location against c2; CRD: ok|timeout|notfound, LIST: ok|garbage|noresource|forbidden|noitems|shared. Prints SHARED:<with> or NOT_SHARED
+  ( export CRD="$1" LIST="$2"; source "$ROOT/workflows/scripts/lib.sh"; WORK="$TMP/work-rs"
+    use_cluster() { CLUSTER="$1"; }
+    registered_clusters() { printf 'c1\nc2\n'; }
+    _secret_account() { printf 'acct1'; }
+    tk() {
+      case "$*" in
+        *"get crd postgresbackuplocations"*)
+          if [[ "$CLUSTER" == c2 ]]; then
+            case "$CRD" in
+              timeout) echo "Unable to connect to the server: net/http: request canceled (Client.Timeout exceeded)" >&2; return 1 ;;
+              notfound) echo 'Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "postgresbackuplocations.sql.tanzu.vmware.com" not found' >&2; return 1 ;;
+            esac
+          fi
+          return 0 ;;
+        *readyz*) return 0 ;;
+        *"get postgresbackuplocation -A -o json"*)
+          if [[ "$CLUSTER" == c2 ]]; then
+            case "$LIST" in
+              garbage) echo '<html>502 Bad Gateway</html>'; return 0 ;;
+              noitems) echo '{"kind":"Status"}'; return 0 ;;
+              noresource) echo 'error: the server doesn'"'"'t have a resource type "postgresbackuplocation"' >&2; return 1 ;;
+              forbidden) echo 'Error from server (Forbidden): postgresbackuplocations is forbidden' >&2; return 1 ;;
+              shared) echo '{"items":[{"metadata":{"namespace":"t","name":"copy"},"spec":{"storage":{"azure":{"container":"pg","repoPath":"/ns/i"}}}}]}'; return 0 ;;
+              *) echo '{"items":[]}'; return 0 ;;
+            esac
+          fi
+          echo '{"items":[{"metadata":{"namespace":"ns","name":"i-backup-location"},"spec":{"storage":{"azure":{"container":"pg","repoPath":"/ns/i"}}}}]}' ;;
+      esac
+    }
+    set +e
+    if repo_shared c1 ns i-backup-location pg /ns/i blob.core.windows.net acct1; then echo "SHARED:$REPO_SHARED_WITH"; else echo NOT_SHARED; fi )
+}
+r="$(rs timeout ok)"; [[ "$r" == SHARED:*"cluster c2"*"not scanned"* ]] \
+  && ok "repo_shared: a failing CRD lookup (a timeout) followed by an OK /readyz marks the cluster not scanned: shared" || bad "crd timeout" "$r"
+r="$(rs notfound ok)"; [[ "$r" == NOT_SHARED ]] && ok "repo_shared: NotFound for the CRD means no locations there (not shared)" || bad "crd notfound" "$r"
+r="$(rs ok garbage)"; [[ "$r" == SHARED:*"cluster c2"*"not scanned"* ]] && ok "repo_shared: a location list jq cannot parse marks the cluster not scanned: shared" || bad "garbage list" "$r"
+r="$(rs ok noitems)"; [[ "$r" == SHARED:*"cluster c2"*"not scanned"* ]] && ok "repo_shared: an answer without an items list is not a list of zero locations: shared" || bad "no items" "$r"
+r="$(rs ok noresource)"; [[ "$r" == NOT_SHARED ]] && ok "repo_shared: 'the server doesn't have a resource type' for the list means none there" || bad "no resource type" "$r"
+r="$(rs ok forbidden)"; [[ "$r" == SHARED:*"cluster c2"*"not scanned"* ]] && ok "repo_shared: any other error of the list (Forbidden) is not scanned: shared" || bad "forbidden" "$r"
+r="$(rs ok ok)"; [[ "$r" == NOT_SHARED ]] && ok "repo_shared: a readable cluster with no other location on the repository is not shared" || bad "clean" "$r"
+r="$(rs ok shared)"; [[ "$r" == "SHARED:c2/t/copy (/ns/i)" ]] && ok "repo_shared: a location on the repository of another cluster is named" || bad "named" "$r"
 
 # ---- the template, the script and the wiring
 yq -e '.spec.arguments.parameters[] | select(.name == "dryRun") | .value == "true"' "$ROOT/workflows/templates/tpg-backup-expire.yaml" >/dev/null \

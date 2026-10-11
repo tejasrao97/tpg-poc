@@ -18,6 +18,11 @@
 #   P_CLUSTER_MAP  clusterMap: the instances of each cluster (always checked as pairs)
 #   P_INSTANCES    otherwise: the instances input, a bracketed list [a, b] (lib.sh list_items),
 #                  or all / empty for every one
+#   P_PURGE_BACKUPS  tpg-delete-instance (Round 23): purgeBackups, the default of every instance (the clusterMap
+#                  key purgeBackups of an instance overrides it). With pairs and purgeBackups=true an instance
+#                  that is no longer declared is accepted when it has an audit copy in clusters/deleted that
+#                  records its backup repository (deleted.backupLocation): the re-run of a delete whose blob
+#                  purge failed, after the Postgres, the entry and the location are gone
 # A selected instance that is not declared fails the run here, before anything
 # changes, with UNKNOWN_INSTANCE and the instances that are declared.
 # Outputs:
@@ -62,6 +67,7 @@ if [[ "$FILTER" != "none" && -z "$(cmap_set && echo map)" ]] && [[ -z "${P_INSTA
 fi
 unknown=0
 declare -A seen_anywhere=()
+declare -A gone_rerun=()   # "<cluster>/<instance>": no longer declared, accepted for the blob purge of a re-run
 # What the plan of this run (tpg-day0, tpg-create-instance: fleet-day0.sh) already
 # blocked: a blocked cluster or instance is left out here without failing the run,
 # and its BLOCKED record stays what the report and the gate show.
@@ -107,6 +113,10 @@ for c in ${wanted_list[@]+"${wanted_list[@]}"}; do
         chosen="$(printf '%s\n%s' "$chosen" "$i")"; seen_anywhere[$i]=1
       elif [[ -n "$cblock" || -n "$(plan_block "result.${c}.${i}")" ]]; then
         log "${c}/${i}: blocked in the plan, left out"
+      elif [[ "$FILTER" == "pairs" && "$(cmap_ival "$c" "$i" purgeBackups "${P_PURGE_BACKUPS:-false}")" == "true" ]] && deleted_backup_repo "$REPO" "$c" "$i"; then
+        # the re-run of a delete with purgeBackups=true that stopped at the blobs: only the audit copy is left
+        chosen="$(printf '%s\n%s' "$chosen" "$i")"; seen_anywhere[$i]=1; gone_rerun["$c/$i"]=1
+        log "${c}/${i}: no longer declared in ${FLEET_REL}, but its audit copy in clusters/deleted/${c} records the backup repository: accepted to finish the blob purge (purgeBackups=true)"
       elif [[ "$FILTER" == "pairs" ]]; then
         record "result.${c}.${i}" FAILED UNKNOWN_INSTANCE \
           "no clusters.${c}.instances.${i} in ${FLEET_REL}; declared on ${c}: $(paste -sd, <<<"$declared")"
@@ -116,6 +126,14 @@ for c in ${wanted_list[@]+"${wanted_list[@]}"}; do
   fi
   instances="[]"
   for i in $chosen; do
+    if [[ -n "${gone_rerun["$c/$i"]:-}" ]]; then
+      # nothing of it is declared any more: the namespace of the audit copy, no deployment, no schedule
+      obj="$(jq -cn --arg n "$i" --arg ns "$(instance_ns_known "$REPO" "$c" "$i")" \
+        '{name:$n, namespace:$ns, secretsOwner:false, postgresVersion:"", highAvailability:false, readReplicas:0, scheduledBackups:false, backupMode:"none",
+          enableSSL:false, egressToFqdns:[], networkPolicy:"none", ferret:false, ferretReadOnlyReplicas:0, deleted:true}')"
+      instances="$(jq -c --argjson o "$obj" '. + [$o]' <<<"$instances")"
+      continue
+    fi
     ha="$(fleet_instance_value "$REPO" "$c" "$i" '.instance.highAvailability.enabled' true)"
     rr="$(fleet_instance_value "$REPO" "$c" "$i" '.instance.highAvailability.readReplicas' 0)"
     [[ "$ha" == "true" ]] || rr=0

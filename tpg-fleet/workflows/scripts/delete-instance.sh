@@ -14,7 +14,7 @@
 # The Azure Blob backup repository is kept unless purgeBackups=true (Round 23, locked decision 4):
 #   - before the delete (2b2), while the operator runs: every PostgresBackup of the instance is expired
 #     (spec.expire=true, newest first, lib.sh backup_expire_all); what pgBackRest declines is reported, not a
-#     failure; no answer in time fails the run before anything is deleted (BACKUP_EXPIRE_TIMEOUT)
+#     failure; no answer in time (BACKUP_EXPIRE_TIMEOUT) or an API error (BACKUP_EXPIRE_ERROR) fails the run before anything is deleted
 #   - after the instance and its backup location are gone (4b): every blob under the container and repoPath of
 #     the location is deleted (Azure Blob REST, the storage key from Vault, lib.sh blob_delete_prefix)
 #   - a repoPath that another PostgresBackupLocation on ANY registered cluster also uses (also a folder inside
@@ -24,8 +24,16 @@
 #     INVALID_OPTIONS), a location that cannot be read (PURGE_LOCATION_UNKNOWN), the repository root as repoPath
 #     (PURGE_REPOPATH_REFUSED), no storage key in Vault (NO_VAULT_SECRET), a location on another storage
 #     account than the fleet's (PURGE_ACCOUNT_MISMATCH)
-#   - the container and repoPath are copied into the audit copy (deleted.backupLocation), so a re-run finds them
-#     after the location object is gone
+#   - the container, repoPath, endpoint, Secret name and storage account of the location are copied into the audit
+#     copy (deleted.backupLocation), so a re-run finds them after the location object is gone, and compares the
+#     account with the fleet's (PURGE_ACCOUNT_MISMATCH); a non-default Secret whose account cannot be determined is
+#     refused (PURGE_ACCOUNT_UNKNOWN)
+#   - the sharing check runs twice: at the start (the refusal and the plan) and again right before the blobs are
+#     deleted (a location that appeared meanwhile keeps them: BACKUP_REPO_SHARED)
+#   - a re-run after BLOB_PURGE_FAILED (the Postgres, the entry and the location are gone) names the instance again
+#     with purgeBackups=true: tpg-delete-instance (discover.sh) and tpg-delete-apps accept it because the audit copy
+#     records the repository; this script then finishes the blob purge only (blob requests are retried on
+#     429, 5xx and curl failures)
 # Namespace (Round 23): the instance's namespace is read from clusters/fleet.yaml (instance.namespace,
 # default pg-<instance>; the copy in clusters/deleted/ when the entry is gone). Instances may share a
 # namespace, and then
@@ -128,20 +136,25 @@ fi
 #      purgeBackups; everything that can refuse a purge is decided here, before anything changes
 LOC="${I}-backup-location"
 LOC_KNOWN=false; LOC_CONT=""; LOC_PATH=""; LOC_EP=""
+LOC_SECRET=""; LOC_ACCT=""
 if location_repo "$NS" "$LOC"; then
   LOC_KNOWN=true; LOC_CONT="$BL_CONTAINER"; LOC_PATH="$BL_PATH"; LOC_EP="$BL_ENDPOINT"; LOC_SECRET="$BL_SECRET"
-elif acopy="$(deleted_copy "$WORK/repo" "$C" "$I")" && [[ -n "$(yq -r '.deleted.backupLocation.container // ""' "$acopy")" ]]; then
+  LOC_ACCT="$(_secret_account "$NS" "${LOC_SECRET:-backup-storage}")"   # empty when the Secret cannot be read: judged below
+elif deleted_backup_repo "$WORK/repo" "$C" "$I"; then
   # a re-run: the location object is gone, the audit copy of the first run has what it pointed to
+  acopy="$(deleted_copy "$WORK/repo" "$C" "$I")"
   LOC_KNOWN=true; LOC_CONT="$(yq -r '.deleted.backupLocation.container' "$acopy")"; LOC_PATH="$(yq -r '.deleted.backupLocation.repoPath // "/"' "$acopy")"
-  LOC_EP="$(yq -r '.deleted.backupLocation.endpoint // "blob.core.windows.net"' "$acopy")"; LOC_SECRET="backup-storage"
+  LOC_EP="$(yq -r '.deleted.backupLocation.endpoint // "blob.core.windows.net"' "$acopy")"
+  LOC_SECRET="$(yq -r '.deleted.backupLocation.secret // "backup-storage"' "$acopy")"; LOC_ACCT="$(yq -r '.deleted.backupLocation.accountName // ""' "$acopy")"
+  # a copy that does not record the account (written before Round 23 review, or the Secret was unreadable then): the Secret may still be there
+  [[ -n "$LOC_ACCT" ]] || LOC_ACCT="$(_secret_account "$NS" "$LOC_SECRET")"
 fi
-PURGE_BLOBS=false; REPO_NOTE=""
+PURGE_BLOBS=false; REPO_NOTE=""; EXPIRE_WORD="no backups expired"   # how 4b words a kept repository: "backups expired" once the expire ran
 if [[ "$PURGE_BACKUPS" == "true" ]]; then
   [[ "$LOC_KNOWN" == "true" ]] \
     || fail PURGE_LOCATION_UNKNOWN "PostgresBackupLocation ${NS}/${LOC} does not exist and no audit copy in clusters/deleted/${C} records its container and repoPath, so the backups cannot be found; set purgeBackups=false (the blobs stay), or delete them by hand"
   [[ "$(repo_norm "$LOC_PATH")" != "/" ]] \
     || fail PURGE_REPOPATH_REFUSED "the repoPath of ${LOC} is the root of container ${LOC_CONT}; purgeBackups never deletes a whole container (set purgeBackups=false and delete the blobs by hand)"
-  LOC_ACCT="$(_secret_account "$NS" "${LOC_SECRET:-backup-storage}")"
   if repo_shared "$C" "$NS" "$LOC" "$LOC_CONT" "$LOC_PATH" "$LOC_EP" "$LOC_ACCT"; then
     REPO_NOTE="repository ${LOC_CONT}${LOC_PATH} is also used by ${REPO_SHARED_WITH}"
   else
@@ -150,8 +163,16 @@ if [[ "$PURGE_BACKUPS" == "true" ]]; then
       || fail NO_VAULT_SECRET "backup-storage (tpg/shared/backup-storage): the storage account is needed to delete the blobs of ${LOC_CONT}${LOC_PATH}"
     vault_secret backup-storage accountKey >/dev/null \
       || fail NO_VAULT_SECRET "backup-storage (tpg/shared/backup-storage): the storage key is needed to delete the blobs of ${LOC_CONT}${LOC_PATH}"
-    [[ -z "$LOC_ACCT" || "$LOC_ACCT" == "$ST_ACCOUNT" ]] \
-      || fail PURGE_ACCOUNT_MISMATCH "the Secret ${LOC_SECRET:-backup-storage} in ${NS} names storage account ${LOC_ACCT}, the key in Vault is the fleet's account ${ST_ACCOUNT}; the blobs are not deleted"
+    # the account behind the Secret of the location (read now, or recorded in the audit copy of a re-run) must be the
+    # account of the key in Vault. An unreadable account is only accepted for the fleet's own Secret backup-storage
+    # (synced from that same Vault entry); any other Secret could point anywhere
+    if [[ -z "$LOC_ACCT" ]]; then
+      [[ "${LOC_SECRET:-backup-storage}" == "backup-storage" ]] \
+        || fail PURGE_ACCOUNT_UNKNOWN "the storage account of Secret ${LOC_SECRET} (backup location ${LOC}) cannot be determined (the Secret in ${NS} cannot be read and the audit copy does not record it), so the key in Vault (account ${ST_ACCOUNT}) may not belong to it; the blobs are not deleted"
+    else
+      [[ "$LOC_ACCT" == "$ST_ACCOUNT" ]] \
+        || fail PURGE_ACCOUNT_MISMATCH "the Secret ${LOC_SECRET:-backup-storage} of ${LOC} names storage account ${LOC_ACCT}, the key in Vault is the fleet's account ${ST_ACCOUNT}; the blobs are not deleted"
+    fi
   fi
   notes+=("purgeBackups: ${LOC_CONT}${LOC_PATH}")
 fi
@@ -194,6 +215,7 @@ fi
 if [[ "$PURGE_BACKUPS" == "true" ]]; then
   if [[ "$EXISTS" != "true" ]]; then
     notes+=("no backups expired: Postgres ${I} does not run (the operator cannot expire)")
+    [[ -f "$f" ]] || notes+=("re-run: the Postgres and its fleet.yaml entry are already deleted; only the blob purge is finished")
   elif [[ "$(pg_state "$I")" != "Running" ]]; then
     # the operator expires only while the instance runs. Its blobs go anyway when the repository is its own;
     # a repository another location uses would keep backups of this instance that nobody can expire any more
@@ -201,13 +223,15 @@ if [[ "$PURGE_BACKUPS" == "true" ]]; then
       || fail BACKUP_EXPIRE_IMPOSSIBLE "currentState=$(pg_state "$I"): the operator cannot expire backups, and ${REPO_NOTE:-the repository is shared}; nothing was deleted"
     notes+=("no backups expired: currentState=$(pg_state "$I") (the blobs are deleted anyway)")
   elif backup_expire_all "$NS" "$I" "$TIMEOUT"; then
+    EXPIRE_WORD="backups expired"
     notes+=("${BE_EXPIRED} backups expired$([[ "$BE_SKIPPED" -eq 0 ]] || echo ", ${BE_SKIPPED} without a pgBackRest label skipped")")
     if [[ "${#BE_DECLINED[@]}" -gt 0 ]]; then
       notes+=("pgBackRest declined to expire ${#BE_DECLINED[@]}: $(printf '%s; ' "${BE_DECLINED[@]}" | sed 's/; $//')")
       record_entry "warning.${C}.${I}" WARNING BACKUP_EXPIRE_DECLINED "$(printf '%s; ' "${BE_DECLINED[@]}" | sed 's/; $//')"
     fi
   else
-    fail BACKUP_EXPIRE_TIMEOUT "nothing was deleted; $(printf '%s; ' "${BE_FAILED[@]}" | sed 's/; $//')"
+    # no answer in time (TIMEOUT), or the backups/the expire could not be read or set (ERROR): two different fixes
+    fail "BACKUP_EXPIRE_${BE_FAIL_OUTCOME:-ERROR}" "nothing was deleted; $(printf '%s; ' "${BE_FAILED[@]}" | sed 's/; $//')"
   fi
 fi
 
@@ -232,9 +256,10 @@ if [[ -f "$f" ]]; then
   drel="clusters/deleted/${C}/${I}-$(date -u +%Y%m%d%H%M).yaml"
   C="$C" I="$I" yq '.clusters[strenv(C)].instances[strenv(I)]' "$WORK/repo/$FLEET_REL" > "$WORK/repo/$drel"
   W="$WF" T="$(date -u +%Y-%m-%dT%H:%M:%SZ)" S="$stanza" yq -i '.deleted = {"workflow": strenv(W), "time": strenv(T), "stanzaName": strenv(S)}' "$WORK/repo/$drel"
-  # where the backups are (Round 23): a re-run with purgeBackups finds the repository here after the location object is gone
-  [[ "$LOC_KNOWN" != "true" ]] || BC="$LOC_CONT" BP="$LOC_PATH" BE="${LOC_EP:-blob.core.windows.net}" \
-    yq -i '.deleted.backupLocation = {"container": strenv(BC), "repoPath": strenv(BP), "endpoint": strenv(BE)}' "$WORK/repo/$drel"
+  # where the backups are (Round 23): a re-run with purgeBackups finds the repository here after the location object is gone,
+  # and the storage account its Secret named ("" when it could not be read), to compare with the fleet's account
+  [[ "$LOC_KNOWN" != "true" ]] || BC="$LOC_CONT" BP="$LOC_PATH" BE="${LOC_EP:-blob.core.windows.net}" BS="${LOC_SECRET:-backup-storage}" BA="$LOC_ACCT" \
+    yq -i '.deleted.backupLocation = {"container": strenv(BC), "repoPath": strenv(BP), "endpoint": strenv(BE), "secret": strenv(BS), "accountName": strenv(BA)}' "$WORK/repo/$drel"
   C="$C" I="$I" yq -i 'del(.clusters[strenv(C)].instances[strenv(I)])' "$WORK/repo/$FLEET_REL"
   rm -rf "$WORK/fleet"   # nothing to write back: the entry is gone
   git_commit_push "$WORK/repo" "delete ${C}/${I} (${WF})" "$FLEET_REL" "$drel" || fail GIT_PUSH_FAILED "pushMode=${PUSH_MODE:-direct}"
@@ -259,6 +284,15 @@ tk -n "$NS" delete postgresbackuplocation "${I}-backup-location" --ignore-not-fo
 #      container and repoPath (unless another location uses the repository: then the blobs stay)
 if [[ "$PURGE_BACKUPS" == "true" ]]; then
   if [[ "$PURGE_BLOBS" == "true" ]]; then
+    # a lot has happened since the check at 1b (expires, hand-over, push and the wait for a pull request, the
+    # Application removal, the Postgres delete): look again before the first blob goes. A location that uses the
+    # repository now keeps the blobs
+    if repo_shared "$C" "$NS" "$LOC" "$LOC_CONT" "$LOC_PATH" "$LOC_EP" "$LOC_ACCT"; then
+      PURGE_BLOBS=false
+      REPO_NOTE="repository ${LOC_CONT}${LOC_PATH} is now also used by ${REPO_SHARED_WITH} (found just before the blobs were to be deleted)"
+    fi
+  fi
+  if [[ "$PURGE_BLOBS" == "true" ]]; then
     # the storage key lives in this shell only (Vault Agent file -> variable -> python3 environment); it is
     # not logged, not recorded and not in an argument
     ST_KEY="$(vault_secret backup-storage accountKey)" || fail NO_VAULT_SECRET "backup-storage (tpg/shared/backup-storage)"
@@ -270,7 +304,7 @@ if [[ "$PURGE_BACKUPS" == "true" ]]; then
       fail BLOB_PURGE_FAILED "${BLOB_ERROR} (${BLOB_DELETED} deleted); the instance is deleted, run tpg-delete-instance again with purgeBackups=true to finish"
     fi
   else
-    notes+=("backups expired, blobs KEPT: ${REPO_NOTE}")
+    notes+=("${EXPIRE_WORD}, blobs KEPT: ${REPO_NOTE}")
     record_entry "warning.${C}.${I}.repo" WARNING BACKUP_REPO_SHARED "${REPO_NOTE}: the blobs under ${LOC_CONT}${LOC_PATH} were not deleted"
   fi
 fi

@@ -267,7 +267,29 @@ blob_container_status() {
 BLOB_DELETED=0; BLOB_ERROR=""
 blob_date() { LC_ALL=C TZ=GMT date '+%a, %d %b %Y %H:%M:%S GMT'; }
 
-blob_list_page() {
+# A request that answers HTTP 429, 5xx or nothing (curl failure, HTTP 000) is tried again: 4 tries in all, waiting
+# BLOB_RETRY_BASE * 1, 2, 4 seconds between them (1, 2, 4 s; the tests set the base to 0). Any other status is
+# the answer (403 key rejected, 404 gone, 2xx done) and is returned at once. Every try signs its own request
+blob_retry() {
+  # blob_retry COMMAND [ARGS...] -> the HTTP status COMMAND printed on its last try
+  local code="" try wait=${BLOB_RETRY_BASE:-1}
+  for try in 1 2 3 4; do
+    code="$("$@")"
+    [[ "$code" =~ ^0+$ ]] && code=000   # curl failed: its -w printed 000 and the fallback another one
+    case "$code" in
+      000|429|5??) ;;
+      *) printf '%s' "$code"; return 0 ;;
+    esac
+    [[ "$try" -lt 4 ]] || break
+    log "  HTTP ${code} from the storage account (try ${try} of 4), waiting ${wait}s"
+    sleep "$wait"
+    wait=$((wait * 2))
+  done
+  printf '%s' "${code:-000}"
+}
+
+blob_list_page() { blob_retry _blob_list_page "$@"; }
+_blob_list_page() {
   # blob_list_page ACCOUNT KEY CONTAINER PREFIX MARKER MAXRESULTS ENDPOINT OUT_XML -> HTTP status of List Blobs
   # (flat listing of the blobs whose name starts with PREFIX, one page, from MARKER); the XML goes to OUT_XML
   local account="$1" key="$2" container="$3" prefix="$4" marker="$5" max="$6" endpoint="$7" out="$8" date auth canon url
@@ -282,9 +304,10 @@ blob_list_page() {
     -H "x-ms-date: ${date}" -H "x-ms-version: 2021-08-06" "$url" || printf '000'
 }
 
-blob_delete_one() {
+blob_delete_one() { blob_retry _blob_delete_one "$@"; }
+_blob_delete_one() {
   # blob_delete_one ACCOUNT KEY CONTAINER ENCODED_BLOB_PATH ENDPOINT -> HTTP status of Delete Blob
-  # (202: deleted; 404: already gone). The snapshots of the blob go with it.
+  # (202: deleted; 404: already gone; 429, 5xx and curl failures are tried again, blob_retry). The snapshots of the blob go with it.
   local account="$1" key="$2" container="$3" path="$4" endpoint="$5" date auth
   date="$(blob_date)"
   auth="$(blob_shared_key_auth "$account" "$key" "$date" "/${container}/${path}" DELETE 'x-ms-delete-snapshots:include\n')"
@@ -352,7 +375,9 @@ PY
   # nothing may be left: list the prefix again
   code="$(blob_list_page "$account" "$key" "$container" "$prefix" "" 1 "$endpoint" "$page")"
   [[ "$code" == 200 ]] || { BLOB_ERROR="the check listing of ${container}/${prefix} answered HTTP ${code}"; return 1; }
-  left="$(python3 -c 'import sys, xml.etree.ElementTree as ET; print(len(list(ET.parse(sys.argv[1]).getroot().iter("Blob"))))' "$page")"
+  left="$(python3 -c 'import sys, xml.etree.ElementTree as ET; print(len(list(ET.parse(sys.argv[1]).getroot().iter("Blob"))))' "$page" 2>/dev/null)" || left=""
+  # an answer that cannot be parsed leaves "left" empty, and an empty string is not zero: only a number counts
+  [[ "$left" =~ ^[0-9]+$ ]] || { BLOB_ERROR="the check listing of ${container}/${prefix} could not be read (the answer is not a blob list), so an empty prefix is not proven"; return 1; }
   [[ "$left" -eq 0 ]] || { BLOB_ERROR="${left} blob(s) are still under ${container}/${prefix} after the delete"; return 1; }
   return 0
 }
@@ -1550,13 +1575,19 @@ latest_cr() {
 major_of() { sed -E 's/^[^0-9]*([0-9]+).*/\1/' <<<"$1"; }
 
 # ----------------------------------------------------------------- instance operations
+# jq filter: an item (PostgresBackup, PostgresRestore, PostgresVersionUpgrade) that is an unfinished operation. One that
+# asks to be expired (spec.expire=true, Round 23) or sits in an expired phase is not: the operator may keep it
+OP_ACTIVE_JQ='select(((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed|Expired|Expiring)$") | not) and ((.spec.expire // false) != true))'
 busy_operations() {
-  # busy_operations INSTANCE -> kinds with an unfinished operation (empty when idle)
+  # busy_operations INSTANCE -> kinds with an unfinished operation (empty when idle). A PostgresBackup that
+  # asks to be expired (spec.expire=true, Round 23) or is in an expired phase (Expired, Expiring) is not an
+  # operation: the operator may keep such an object, and it must not block the later operations
+  # (OPERATION_IN_PROGRESS) for good
   local ns kind n
   ns="$(instance_ns "$CLUSTER" "$1")" || { printf 'unknown-namespace '; return 0; }   # busy until the namespace can be read
   for kind in postgresbackup postgresrestore postgresversionupgrade; do
     n="$(tk -n "$ns" get "$kind" -o json 2>/dev/null \
-      | jq -r '[.items[] | select((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed)$") | not)] | length')"
+      | jq -r "[.items[] | ${OP_ACTIVE_JQ}] | length")"
     [[ "${n:-0}" -eq 0 ]] || printf '%s ' "$kind"
   done
 }
@@ -1572,7 +1603,12 @@ busy_operations() {
 # incrementals after it up to the next differential or full (backup_dependents).
 # LAB ITEM: how the operator reports the end of an expire (it may delete the PostgresBackup object or set a
 # condition) and what it does when pgBackRest declines (the last full backup, a set another set needs) is not
-# in the CRD; _backup_expire_state is the one place that reads it. Verify it on the lab cluster (a lab item of Round 23).
+# in the CRD; _backup_expire_state is the one place that reads it. Verify it on the lab cluster (a lab item of Round 23):
+#   - does the operator keep the object after an expire (phase Expired or Expiring) or delete it? A kept object
+#     with spec.expire=true is not an unfinished operation (busy_operations leaves it out)
+#   - does it write conditions with observedGeneration? _backup_expire_state trusts only conditions whose
+#     observedGeneration is at least metadata.generation: an older Expired=False (a re-run where spec.expire is
+#     already true) is no answer, and without a fresh signal the step waits and times out like for any expire
 BACKUP_EXPIRE_OUTCOME=""; BACKUP_EXPIRE_DETAIL=""
 
 backup_list() {
@@ -1613,10 +1649,15 @@ backup_dependents() {
 _backup_expire_state() {
   # _backup_expire_state < POSTGRESBACKUP_JSON -> "EXPIRED", "DECLINED <message>" or "PENDING": what the object
   # says after spec.expire was set. A condition (or the phase) that names expire decides: true or an Expired
-  # phase is EXPIRED, false or a failed phase is DECLINED with the operator's message. LAB ITEM (see above)
+  # phase is EXPIRED, false or a failed phase is DECLINED with the operator's message. Only conditions the
+  # operator wrote for the current generation of the object count (observedGeneration at least
+  # metadata.generation; a condition without one is as old as generation 0): an Expired=False of an earlier
+  # generation, still on the object when spec.expire was already true, is not read as a refusal. LAB ITEM (see above)
   jq -r '
-    def conds: [.status.conditions[]? | select(((.type // "") + " " + (.reason // "")) | test("expire"; "i"))];
-    def msg: ([.status.conditions[]? | select(.status == "False" or ((.reason // "") | test("fail|declin|error"; "i"))) | .message] | map(select(. != "")) | join("; "));
+    (.metadata.generation // 0) as $gen
+    | def fresh: ((.observedGeneration // 0) >= $gen);
+    def conds: [.status.conditions[]? | select(fresh) | select(((.type // "") + " " + (.reason // "")) | test("expire"; "i"))];
+    def msg: ([.status.conditions[]? | select(fresh) | select(.status == "False" or ((.reason // "") | test("fail|declin|error"; "i"))) | .message] | map(select(. != "")) | join("; "));
     if ((.status.phase // "") | test("^expired$"; "i")) or (conds | any(.status == "True" and ((.reason // "") | test("fail|declin|error"; "i") | not))) then "EXPIRED"
     elif (conds | any(.status == "False")) or ((.status.phase // "") | test("fail|declin"; "i")) then "DECLINED " + (msg | if . == "" then "pgBackRest did not expire the backup (no message on the object)" else . end)
     else "PENDING" end'
@@ -1671,17 +1712,18 @@ backup_expire() {
   return 3
 }
 
-BE_EXPIRED=0; BE_DECLINED=(); BE_FAILED=(); BE_SKIPPED=0
+BE_EXPIRED=0; BE_DECLINED=(); BE_FAILED=(); BE_SKIPPED=0; BE_FAIL_OUTCOME=""
 backup_expire_all() {
   # backup_expire_all NAMESPACE INSTANCE TIMEOUT_SECONDS (use_cluster first): expire every PostgresBackup of the
   # instance that has a pgBackRest label, newest first, so a differential or incremental goes before the full it
   # depends on and no expire cascades. Sets BE_EXPIRED (count), BE_DECLINED ("name: operator message", pgBackRest
-  # refused: reported, not a failure), BE_FAILED ("name: reason": no answer in time, an API error) and BE_SKIPPED
+  # refused: reported, not a failure), BE_FAILED ("name: reason": no answer in time, an API error; BE_FAIL_OUTCOME
+  # says which: TIMEOUT or ERROR) and BE_SKIPPED
   # (backups without a label: a failed backup has nothing in the repository). A backup that gets no answer (or an
   # API error) stops the loop. Returns 0 when BE_FAILED is empty, 1 when the backups cannot be read or one failed
   local list b name
-  BE_EXPIRED=0; BE_DECLINED=(); BE_FAILED=(); BE_SKIPPED=0
-  list="$(backup_list "$1" "$2")" || { BE_FAILED+=("the PostgresBackups of ${2} cannot be read in ${1}"); return 1; }
+  BE_EXPIRED=0; BE_DECLINED=(); BE_FAILED=(); BE_SKIPPED=0; BE_FAIL_OUTCOME=""
+  list="$(backup_list "$1" "$2")" || { BE_FAILED+=("the PostgresBackups of ${2} cannot be read in ${1}"); BE_FAIL_OUTCOME=ERROR; return 1; }
   BE_SKIPPED="$(jq '[.[] | select(.kind == "")] | length' <<<"$list")"
   while read -r b; do
     [[ -n "$b" ]] || continue
@@ -1690,7 +1732,7 @@ backup_expire_all() {
     case "$BACKUP_EXPIRE_OUTCOME" in
       EXPIRED|MISSING) BE_EXPIRED=$((BE_EXPIRED + 1)) ;;   # gone by itself: the operator got there first
       DECLINED) BE_DECLINED+=("${name}: ${BACKUP_EXPIRE_DETAIL}") ;;
-      *) BE_FAILED+=("${name}: ${BACKUP_EXPIRE_OUTCOME} ${BACKUP_EXPIRE_DETAIL}"); break ;;   # no answer or an API error: stop, do not pile up expires
+      *) BE_FAILED+=("${name}: ${BACKUP_EXPIRE_OUTCOME} ${BACKUP_EXPIRE_DETAIL}"); BE_FAIL_OUTCOME="$BACKUP_EXPIRE_OUTCOME"; break ;;   # no answer or an API error: stop, do not pile up expires
     esac
   done < <(jq -c 'map(select(.kind != "")) | reverse | .[]' <<<"$list")
   [[ "${#BE_FAILED[@]}" -eq 0 ]]
@@ -1723,15 +1765,23 @@ repo_overlap() {  # repo_overlap PATH1 PATH2 -> 0 when they are the same folder 
 }
 
 REPO_SHARED_WITH=""
+_kubectl_no_such_resource() {
+  # _kubectl_no_such_resource ERROR_TEXT: 0 when kubectl's error says the API server has no such resource - a
+  # NotFound for the CRD, or "the server doesn't have a resource type" - and nothing else
+  [[ "$1" == *"(NotFound)"* || "$1" == *"the server doesn't have a resource type"* ]]
+}
 repo_shared() {
   # repo_shared CLUSTER NAMESPACE LOCATION [CONTAINER REPOPATH ENDPOINT ACCOUNT]: 0 when the repository
   # (storage account, container, repoPath - also a folder inside or around it) of the PostgresBackupLocation is
   # used by another PostgresBackupLocation on ANY registered cluster, or when that cannot be ruled out (a
-  # cluster that cannot be scanned counts as sharing); 1 when none does. REPO_SHARED_WITH names them
+  # cluster that cannot be scanned counts as sharing); 1 when none does. Fails closed: a cluster has no
+  # locations only when the API server says so (NotFound for the CRD, "the server doesn't have a resource
+  # type"); any other error of a lookup, a list jq cannot parse and an answer that is no list at all mean
+  # "not scanned" and the repository counts as shared. REPO_SHARED_WITH names them
   # (cluster/namespace/location). The location itself (cluster, namespace, name) is not counted. Without
   # CONTAINER.. the location is read (location_repo; ACCOUNT then is the account of the Secret
   # in its namespace). Leaves the current cluster (use_cluster) as it was
-  local c="$1" ns="$2" loc="$3" cont="${4:-}" rp="${5:-}" ep="${6:-}" acct="${7:-}" saved="${CLUSTER:-}" clist cc rows ons oname ocont orp_ oep osec oacct rc=1
+  local c="$1" ns="$2" loc="$3" cont="${4:-}" rp="${5:-}" ep="${6:-}" acct="${7:-}" saved="${CLUSTER:-}" clist cc rows parsed err errf ons oname ocont orp_ oep osec oacct rc=1
   REPO_SHARED_WITH=""
   if [[ -z "$cont" ]]; then
     use_cluster "$c" || { REPO_SHARED_WITH="cluster ${c} cannot be used"; return 0; }
@@ -1749,13 +1799,25 @@ repo_shared() {
     if ! use_cluster "$cc" 2>/dev/null; then
       REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (kubeconfig unavailable: not scanned)"; rc=0; continue
     fi
-    if ! tk get crd postgresbackuplocations.sql.tanzu.vmware.com >/dev/null 2>&1; then
-      # no CRD: either no operator, or the API is not reachable; only a reachable API proves "none here"
-      tk get --raw=/readyz >/dev/null 2>&1 || { REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (API server not reachable: not scanned)"; rc=0; }
-      continue
+    # no CRD: only the answer of the API server proves "none here" (NotFound); a timeout, a refused or reset
+    # connection, a 401/403 or a 5xx does not, whatever /readyz says a moment later
+    mkdir -p "$WORK"; errf="$WORK/repo-shared.err"
+    if ! tk get crd postgresbackuplocations.sql.tanzu.vmware.com >/dev/null 2>"$errf"; then
+      err="$(cat "$errf" 2>/dev/null || true)"
+      if _kubectl_no_such_resource "$err"; then continue; fi
+      REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (CRD lookup failed: $(head -c 120 <<<"$err" | tr '\n' ' '): not scanned)"; rc=0; continue
     fi
-    if ! rows="$(tk get postgresbackuplocation -A -o json 2>/dev/null)"; then
-      REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (locations not readable: not scanned)"; rc=0; continue
+    if ! rows="$(tk get postgresbackuplocation -A -o json 2>"$errf")"; then
+      err="$(cat "$errf" 2>/dev/null || true)"
+      if _kubectl_no_such_resource "$err"; then continue; fi
+      REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (locations not readable: $(head -c 120 <<<"$err" | tr '\n' ' '): not scanned)"; rc=0; continue
+    fi
+    # the rows, one location per line; jq must succeed and the answer must be a list (no rows from a parse failure)
+    if ! parsed="$(jq -r '(.items | if type == "array" then . else error("no items list") end)[]
+        | select(.spec.storage.azure.container != null)
+        | [.metadata.namespace, .metadata.name, .spec.storage.azure.container, (.spec.storage.azure.repoPath // "/"),
+           (.spec.storage.azure.endpoint // "blob.core.windows.net"), (.spec.storage.azure.secret.name // "backup-storage")] | @tsv' <<<"$rows" 2>/dev/null)"; then
+      REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (locations not readable: the answer is no list of locations: not scanned)"; rc=0; continue
     fi
     while IFS=$'\t' read -r ons oname ocont orp_ oep osec; do
       [[ -n "$ons" ]] || continue
@@ -1766,9 +1828,7 @@ repo_shared() {
       oacct="$(_secret_account "$ons" "$osec")"
       [[ -z "$acct" || -z "$oacct" || "$acct" == "$oacct" ]] || continue
       REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }${cc}/${ons}/${oname} (${orp_})"; rc=0
-    done < <(jq -r '.items[]? | select(.spec.storage.azure.container != null)
-        | [.metadata.namespace, .metadata.name, .spec.storage.azure.container, (.spec.storage.azure.repoPath // "/"),
-           (.spec.storage.azure.endpoint // "blob.core.windows.net"), (.spec.storage.azure.secret.name // "backup-storage")] | @tsv' <<<"$rows")
+    done <<<"$parsed"
   done
   CLUSTER="$saved"
   return "$rc"
@@ -2580,6 +2640,16 @@ deleted_copy() {
   done
   [[ -n "$best" ]] || return 1
   printf '%s' "$best"
+}
+
+deleted_backup_repo() {
+  # deleted_backup_repo REPO CLUSTER INSTANCE -> 0 when the newest audit copy of the deleted entry of INSTANCE
+  # (deleted_copy) records where its backups are (deleted.backupLocation.container, written by delete-instance.sh):
+  # a re-run with purgeBackups=true can find the repository after the Postgres, the entry and the location
+  # object are gone. 1 without a copy or without that record
+  local copy
+  copy="$(deleted_copy "$@")" || return 1
+  [[ -n "$(yq -r '.deleted.backupLocation.container // ""' "$copy")" ]]
 }
 
 live_postgres_namespaces() {
