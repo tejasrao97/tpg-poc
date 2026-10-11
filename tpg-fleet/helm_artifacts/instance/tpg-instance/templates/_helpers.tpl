@@ -151,6 +151,32 @@ the ApplicationSet made of the fleet branch; without that file (a render by hand
 {{- end -}}
 
 {{- /*
+tpg.restorePatchRef (the root context): the current restore-patch file of the instance, a path
+relative to this chart, or "" (Round 23, phase 6b revision). tpg-restore stores the spec file of
+a restored instance (targetInstanceSpecFilePath) in restore-patch/ and records it in
+clusters/fleet.yaml as
+  clusters.<cluster>.instances.<instance>.restorePatch   {current: restore-patch/<file>.yaml,
+                                                          previous: {path, commit}}
+Only current is applied; read like the patch records (tpg.patchRef): from the clusters value file
+at the synced commit, else from .Values.restorePatch.
+*/ -}}
+{{- define "tpg.restorePatchRef" -}}
+{{- $v := .Values -}}
+{{- $node := "" -}}
+{{- if hasKey $v "clusters" -}}
+{{- /* dig on the nested map: .Values itself is chartutil.Values, which dig cannot read */ -}}
+{{-   $node = dig (toString $v.cluster.name) "instances" (toString $v.instance.name) "restorePatch" "" (default dict $v.clusters) -}}
+{{- else -}}
+{{-   $node = get $v "restorePatch" -}}
+{{- end -}}
+{{- if kindIs "map" $node -}}
+{{-   default "" $node.current -}}
+{{- else if $node -}}
+{{-   fail (printf "restorePatch of %s must be {current: <file>, previous: {path, commit}}" (toString $v.instance.name)) -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
 tpg.patchFile (dict "root" $ "file" PATH "what" LABEL): an overlay or patch file of this
 chart parsed as YAML (a map). Patch files live in helm_artifacts/instance/tpg-instance/patches/, overlay
 files in helm_artifacts/instance/tpg-instance/overlays/.
@@ -166,22 +192,30 @@ Returns YAML; fails the render when the file is missing or not a YAML map.
 
 {{- /*
 tpg.kindPatch (dict "root" $ "key" KEY): the spec fragment the instance's current
-postgres overlay file and then its current postgres patch file hold for one object
-(Round 15, D81; Round 22), as YAML ({} when none; where both set a field the patch wins).
+postgres overlay file, then its current postgres patch file, then its current restore-patch
+file hold for one object (Round 15, D81; Round 22; Round 23 restore-patch), as YAML ({} when
+none; where several set a field the later one wins: overlay, patch, restore-patch).
 KEY is the kind (Postgres, PostgresBackupLocation, PostgresFerretDocumentDB) or
 PostgresBackupSchedule/full | PostgresBackupSchedule/incremental. The file holds one
 YAML document per object: apiVersion, kind and spec (a schedule also
 metadata.name: <instance>-backup-<type> or backup-<type>). The workflows check the
 documents before they reference the file (workflows/scripts/patchcheck.py); an
 unknown kind fails the render here as well. The templates merge the fragment into
-the object they render (tpg.deepMerge), so an overlay or patch wins over the values it
-overlaps (the workflows report PATCH_OVERRIDES_VALUE).
+the object they render (tpg.deepMerge), so an overlay, patch or restore-patch wins over the values it
+overlaps (the workflows report PATCH_OVERRIDES_VALUE). The restore-patch (tpg-restore, one Postgres
+document: the spec of the restored instance) comes last: it is what the PostgresRestore created, so
+the render carries it over everything the entry's values and its other files say.
 */ -}}
 {{- define "tpg.kindPatch" -}}
 {{- $out := dict -}}
-{{- range $grp := list "overlays" "patches" -}}
-{{- $f := include "tpg.patchRef" (dict "root" $.root "kind" "postgres" "group" $grp) -}}
-{{- $what := ternary "postgres overlay" "postgres patch" (eq $grp "overlays") -}}
+{{- range $grp := list "overlays" "patches" "restorePatch" -}}
+{{- $f := "" -}}
+{{- if eq $grp "restorePatch" -}}
+{{-   $f = include "tpg.restorePatchRef" $.root -}}
+{{- else -}}
+{{-   $f = include "tpg.patchRef" (dict "root" $.root "kind" "postgres" "group" $grp) -}}
+{{- end -}}
+{{- $what := get (dict "overlays" "postgres overlay" "patches" "postgres patch" "restorePatch" "restore-patch") $grp -}}
 {{- if $f -}}
 {{-   $raw := $.root.Files.Get $f -}}
 {{-   if not $raw }}{{ fail (printf "%s file %s not found in the chart (helm_artifacts/instance/tpg-instance/%s)" $what $f $f) }}{{ end -}}

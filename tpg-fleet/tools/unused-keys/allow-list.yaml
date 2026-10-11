@@ -34,6 +34,15 @@ fleet:
   instance.overlays.postgresValues.current:
     reason: the current values overlay file (Round 22); read by the chart (tpg.ctx) and by the workflows
     readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl
+  instance.restorePatch.current:
+    reason: the current restore-patch file, the spec file tpg-restore restored the instance with (Round 23); read by the chart (tpg.kindPatch, applied last) and by the workflows
+    readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl
+  instance.restorePatch.previous.path:
+    reason: the restore-patch file before the current one, kept until a third replaces it; read by the workflows and scripts/validate.sh only
+    readBy: workflows/scripts/lib.sh
+  instance.restorePatch.previous.commit:
+    reason: the commit that added the previous restore-patch file; read by the workflows only
+    readBy: workflows/scripts/lib.sh
   cluster.operator.version:
     reason: the operator chart version; read by the tpg-operator ApplicationSet and the workflows
     readBy: bootstrap/appsets/tpg-operator.yaml

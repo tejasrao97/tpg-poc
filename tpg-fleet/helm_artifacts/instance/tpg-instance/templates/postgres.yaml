@@ -1,9 +1,10 @@
 {{- /*
 The Postgres object: rendered from the values (with the current values overlay
 and patch files applied, tpg.ctx), then the Postgres documents of the instance's
-current postgres overlay file and then its patch file (tpg.kindPatch,
-postgresOverlayFilePath, postgresPatchFilePath) are merged into spec, so they win
-over the values they overlap (the patch over the overlay) (storageSize, resources, ...). Fields that
+current postgres overlay file, then its patch file, then its restore-patch file (tpg.kindPatch,
+postgresOverlayFilePath, postgresPatchFilePath, and the spec file tpg-restore stored) are merged
+into spec, so they win over the values they overlap (the patch over the overlay, the restore-patch
+over both) (storageSize, resources, ...). Fields that
 belong to other workflows (postgresVersion, highAvailability) or cannot change on
 a running instance are refused by the workflows before the file is referenced.
 

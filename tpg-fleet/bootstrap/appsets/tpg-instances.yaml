@@ -16,7 +16,7 @@
 #                                        applies that branch's patch before the merge
 #   values (below)                       cluster.name, pg-backups-<cluster>, and the
 #                                        cluster and instance overrides from fleet.yaml
-#                                        on the fleet branch (without patches and overlays)
+#                                        on the fleet branch (without patches, overlays and restorePatch)
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -75,7 +75,7 @@ spec:
             {{- $cluster := dig "clusters" .name (dict) . -}}
             {{- $base := dict "cluster" (dict "name" .name) "backup" (dict "container" (printf "pg-backups-%s" .name)) -}}
             {{- $clusterOverrides := deepCopy (omit $cluster "instances" "operator") -}}
-            {{- $instance := omit (deepCopy .instance.values) "patches" "overlays" -}}
+            {{- $instance := omit (deepCopy .instance.values) "patches" "overlays" "restorePatch" -}}
             {{- $_ := set $instance "instance" (mergeOverwrite (dig "instance" (dict) $instance) (dict "name" .instance.name)) -}}
             {{- toJson (mergeOverwrite $base $clusterOverrides $instance) -}}
       destination:

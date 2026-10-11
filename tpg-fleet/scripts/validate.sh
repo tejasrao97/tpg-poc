@@ -92,6 +92,18 @@ for ff in clusters/fleet.yaml clusters/fleet.example.yaml; do
         if [[ "$k" == postgres ]]; then patch_file_check postgres "helm_artifacts/instance/tpg-instance/$f"; else patch_file_check values "helm_artifacts/instance/tpg-instance/$f"; fi
       done
       done
+      # Round 23 (tpg-restore): the restore-patch of the instance, {current, previous: {path, commit}}; the chart applies current
+      if C="$c" I="$i" yq -e '.clusters[strenv(C)].instances[strenv(I)].restorePatch // {} | keys | any_c(. != "current" and . != "previous")' "$ff" >/dev/null 2>&1; then
+        echo "${ff}: ${c}/${i} restorePatch holds more than current and previous" >&2
+        exit 1
+      fi
+      for rp in $(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].restorePatch // {} | (.current, .previous.path) | select(. != null and . != "")' "$ff"); do
+        [[ -f "helm_artifacts/instance/tpg-instance/$rp" ]] \
+          || { echo "${ff}: ${c}/${i} restorePatch names helm_artifacts/instance/tpg-instance/${rp}, which does not exist" >&2; exit 1; }
+        [[ "$rp" == restore-patch/* ]] \
+          || { echo "${ff}: ${c}/${i} restorePatch names ${rp}: a restore-patch file lives in helm_artifacts/instance/tpg-instance/restore-patch/" >&2; exit 1; }
+        patch_file_check postgres "helm_artifacts/instance/tpg-instance/$rp"
+      done
     done
   done
   echo "ok ${ff}"
@@ -105,6 +117,22 @@ for e in "helm_artifacts/operator/${g}/clusters"/*.yaml; do
     || { echo "${e}: ${c} has no current operator values ${g%es} in clusters/fleet.yaml; remove it (tpg-patch patchMode=clear does)" >&2; exit 1; }
 done
 done
+
+# every file of helm_artifacts/instance/tpg-instance/restore-patch/ is recorded: as restorePatch.current or .previous.path of an
+# instance of clusters/fleet.yaml or clusters/fleet.example.yaml, or in an audit copy under clusters/deleted/ (tpg-delete-instance)
+recorded_rp="$(
+  yq -r '.clusters // {} | to_entries[] | (.value.instances // {}) | to_entries[] | .value.restorePatch // {} | (.current, .previous.path) | select(. != null and . != "")' \
+    clusters/fleet.yaml clusters/fleet.example.yaml
+  for d in clusters/deleted/*/*.yaml; do
+    [[ -f "$d" ]] || continue
+    yq -r '.restorePatch // {} | (.current, .previous.path) | select(. != null and . != "")' "$d"
+  done)"
+for f in helm_artifacts/instance/tpg-instance/restore-patch/*.yaml; do
+  [[ -f "$f" ]] || continue
+  grep -qFx -- "restore-patch/$(basename "$f")" <<<"$recorded_rp" \
+    || { echo "${f} is not recorded as restorePatch.current or restorePatch.previous.path in clusters/fleet.yaml, clusters/fleet.example.yaml or an audit copy of clusters/deleted/; remove it (tpg-restore writes and retires these files)" >&2; exit 1; }
+done
+echo "ok restore-patch files (every recorded file exists, every file is recorded)"
 
 # values_for FLEET_FILE CLUSTER INSTANCE -> the Helm values the tpg-instances ApplicationSet passes
 # shellcheck disable=SC2016  # yq variables, not shell
@@ -145,7 +173,7 @@ declare -A owners=()   # "<file> <cluster> <namespace>" -> how many instances re
 for ff in clusters/fleet.yaml clusters/fleet.example.yaml; do
 for c in $(yq -r '.clusters | keys | .[]' "$ff"); do
   for i in $(C="$c" yq -r '.clusters[strenv(C)].instances // {} | keys | .[]' "$ff"); do
-    values_for "$ff" "$c" "$i" | yq 'del(.patches) | del(.overlays)' > "$OUT/values/$c-$i.yaml"
+    values_for "$ff" "$c" "$i" | yq 'del(.patches) | del(.overlays) | del(.restorePatch)' > "$OUT/values/$c-$i.yaml"
     # the value files of the tpg-instances ApplicationSet: the fleet file carries the patch references (Round 14)
     set -- -f clusters/_template/cluster.yaml -f clusters/_template/instance.yaml -f "$ff" -f "$OUT/values/$c-$i.yaml"
     ns="$(yq -r '.instance.namespace // ""' "$OUT/values/$c-$i.yaml")"; ns="${ns:-pg-$i}"   # Round 23: instance.namespace, default pg-<instance>
@@ -198,7 +226,12 @@ got="$(helm template billing-db helm_artifacts/instance/tpg-instance -f clusters
   -f clusters/fleet.example.yaml -f "$OUT/values/aks-tpg-poc-01-billing-db.yaml" --namespace finance \
   | yq 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number')"
 [[ "$got" == "4" ]] || { echo "values overlay not merged: fullRetention is '${got}', expected 4" >&2; exit 1; }
-echo "ok postgres and values patch and overlay files (the current files of clusters/fleet.example.yaml)"
+# the restore-patch (tpg-restore) is applied last and only its current file
+got="$(helm template orders-db-dr helm_artifacts/instance/tpg-instance -f clusters/_template/cluster.yaml -f clusters/_template/instance.yaml \
+  -f clusters/fleet.example.yaml -f "$OUT/values/aks-tpg-poc-02-orders-db-dr.yaml" --namespace orders-dr \
+  | yq 'select(.kind == "Postgres") | .spec.storageSize + " " + .spec.logLevel')"
+[[ "$got" == "100Gi Debug" ]] || { echo "restore-patch not merged: storageSize and logLevel are '${got}', expected '100Gi Debug' (the current file wins over the entry's 50Gi; the previous file is not applied)" >&2; exit 1; }
+echo "ok postgres and values patch and overlay files and the restore-patch (the current files of clusters/fleet.example.yaml)"
 
 echo "== chart: enableSSL of the backup location"
 # Always rendered, false by default (clusters/_template/cluster.yaml and the

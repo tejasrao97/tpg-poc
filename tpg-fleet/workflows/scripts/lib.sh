@@ -2250,7 +2250,8 @@ patch_current_paths() {  # patch_current_paths REPO -> every current patch file 
     | (
       ((($c.operator.patches.values.current // ""), ($c.operator.overlays.values.current // "")) | select(. != "")),
       (($c.instances // {}) | to_entries[] | .value as $e | (($e.patches // {}), ($e.overlays // {})) | to_entries[]
-        | (.value.current // "") | select(. != "") | "helm_artifacts/instance/tpg-instance/" + .)
+        | (.value.current // "") | select(. != "") | "helm_artifacts/instance/tpg-instance/" + .),
+      (($c.instances // {}) | to_entries[] | (.value.restorePatch.current // "") | select(. != "") | "helm_artifacts/instance/tpg-instance/" + .)
     )' "$1/$FLEET_REL" 2>/dev/null | sort -u
 }
 
@@ -2266,9 +2267,10 @@ patch_restore_referenced() {
   done < <(patch_current_paths "$repo")
 }
 
-patch_kind_path() {  # patch_kind_path CLUSTER INSTANCE KIND [GROUP] -> yq path of the kind node (postgres, postgresValues, operator)
+patch_kind_path() {  # patch_kind_path CLUSTER INSTANCE KIND [GROUP] -> yq path of the kind node (postgres, postgresValues, operator, restorePatch)
   local g="${4:-$PATCH_GROUP}"
   if [[ "$3" == operator ]]; then printf '.clusters["%s"].operator.%s.values' "$1" "$g"
+  elif [[ "$3" == restorePatch ]]; then printf '.clusters["%s"].instances["%s"].restorePatch' "$1" "$2"   # tpg-restore: no kind level, no group
   else printf '.clusters["%s"].instances["%s"].%s.%s' "$1" "$2" "$g" "$3"; fi
 }
 
@@ -2313,6 +2315,42 @@ patch_set_current() {
     | ${path}.current = strenv(NEW)
     | (select(strenv(NEW) == \"\") | ${path}) |= del(.current)
     | (select(strenv(OLD) != \"\") | ${path}.previous) = {\"path\": strenv(OLD), \"commit\": strenv(SHA)}" "$repo/$FLEET_REL"
+}
+
+# ---- restore-patch (Round 23, tpg-restore): the spec file of a restored instance, stored in the chart and
+# recorded as clusters.<c>.instances.<i>.restorePatch {current, previous: {path, commit}} (chart-relative paths,
+# no kind level, no group). The chart applies current last (overlay, patch, restore-patch). The file that falls
+# out of the two-generation window is deleted (its commit stays in previous.commit and in Git): the folder holds
+# the recorded files only, which scripts/validate.sh checks.
+RESTORE_PATCH_DIR="helm_artifacts/instance/tpg-instance/restore-patch"
+restore_patch_store() {
+  # restore_patch_store REPO INSTANCE SPEC_JSON -> the chart-relative path restore-patch/<instance>-restore-<uid>.yaml
+  # (the stored-name scheme of patch_store); writes the file: one kind: Postgres document, the spec of the spec
+  # file as it is given to the PostgresRestore, no metadata. 1 when no unused name was found.
+  local repo="$1" i="$2" n uid
+  mkdir -p "$repo/$RESTORE_PATCH_DIR"
+  for _ in 1 2 3 4 5 6 7 8; do
+    uid="$(patch_uid)"; n="restore-patch/$(patch_stored_name "${i}-restore.yaml" "$uid")"
+    [[ -e "$repo/helm_artifacts/instance/tpg-instance/$n" ]] && continue
+    jq -n --argjson s "$3" '{apiVersion: "sql.tanzu.vmware.com/v1", kind: "Postgres", spec: $s}' \
+      | yq -p=json -o=yaml '.' > "$repo/helm_artifacts/instance/tpg-instance/$n" || return 1
+    printf '%s' "$n"; return 0
+  done
+  log "restore_patch_store: no unused name for ${i} after 8 tries"; return 1
+}
+restore_patch_previous() {  # restore_patch_previous REPO CLUSTER INSTANCE -> restorePatch.previous.path (chart-relative), empty when none
+  C="$2" I="$3" yq -r '.clusters[strenv(C)].instances[strenv(I)].restorePatch.previous.path // ""' "$1/$FLEET_REL" 2>/dev/null
+}
+restore_patch_set() {
+  # restore_patch_set REPO CLUSTER INSTANCE NEW: NEW (a path from restore_patch_store, or empty to retire) becomes the
+  # current restore-patch; the former current becomes previous (patch_set_current) and the file that was previous
+  # is deleted
+  local repo="$1" gone
+  gone="$(restore_patch_previous "$repo" "$2" "$3")"
+  patch_set_current "$repo" "$2" "$3" restorePatch "$4" || return 1
+  if [[ -n "$gone" && "$gone" != "$(restore_patch_previous "$repo" "$2" "$3")" && "$gone" != "$4" ]]; then
+    rm -f "${repo:?}/helm_artifacts/instance/tpg-instance/${gone:?}"
+  fi
 }
 
 operator_effective_rel() { printf '%s/%s.yaml' "$PATCH_EFFECTIVE_DIR" "$1"; }   # CLUSTER (the current patch_group)
@@ -2452,7 +2490,7 @@ patch_values_errors() {
   # patch_values_errors FILE NAME CLUSTER INSTANCE MODE -> one error per line: the
   # chart values a postgresValues patch may not set
   local f="$1" n="$2" k
-  for k in .instance.name .instance.postgresVersion .instance.highAvailability .instance.serviceType .instance.disableInitialBackup .backup.repoPath .cluster .patches .overlays .valuesOverride; do
+  for k in .instance.name .instance.postgresVersion .instance.highAvailability .instance.serviceType .instance.disableInitialBackup .backup.repoPath .cluster .patches .overlays .restorePatch .valuesOverride; do
     yq -e "${k} == null" "$f" >/dev/null 2>&1 || echo "${n}: ${k#.} cannot be set by a values ${PATCH_NOUN}$( [[ "$5" == create ]] && printf ' (it comes from the inputs; instance.serviceType is replaced by instance.exposure)')"
   done
   for k in .backup.enableSSL .backup.caBundle; do

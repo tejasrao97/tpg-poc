@@ -73,3 +73,16 @@ clusters:
             previous:
               path: patches/example-values-retention-ex4m0.yaml
               commit: 4f2c1e9a7b3d5c8e0f1a2b3c4d5e6f7a8b9c0d1e
+      # tpg-restore with a spec file (targetInstanceSpecFilePath, Round 23): the new instance copies the
+      # entry of its source and records the spec file it was restored with as restorePatch, which the
+      # chart applies last (after the overlay and the patch); a later tpg-patch moves it to previous
+      orders-db-dr:
+        instance:
+          namespace: orders-dr
+          postgresVersion: postgres-17.6
+          storageSize: 50Gi
+        restorePatch:
+          current: restore-patch/example-restore-orders-db-dr1x7.yaml
+          previous:
+            path: restore-patch/example-restore-orders-db-dr0a2.yaml
+            commit: 9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a39281706

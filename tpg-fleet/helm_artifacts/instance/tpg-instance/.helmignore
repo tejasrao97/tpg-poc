@@ -1,3 +1,5 @@
 # Files the chart does not package or render. restore-specs/ holds the spec files of tpg-restore
-# (README.md there); the chart never reads them.
+# (README.md there); the chart never reads them. restore-patch/ is NOT listed: the chart reads the
+# stored restore-patch files of restored instances (.Files.Get, templates/_helpers.tpl), so they
+# must be packaged with it.
 restore-specs/
