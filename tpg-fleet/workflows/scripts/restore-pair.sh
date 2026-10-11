@@ -90,21 +90,23 @@ result_guard "$RKEY"
 
 REPO="$WORK/repo"
 PLAN=(); NOTES=(); WARNS=()
-plan() { PLAN+=("$*"); log "plan: $*"; }
+plan() { PLAN+=("$*"); }
+dump_plan() { plan_text >&2; }
 note() { NOTES+=("$*"); log "$*"; }
 join_list() {  # join_list ITEM...: "a; b; c" (empty without items)
   local out="" n
   for n in "$@"; do [[ -n "$n" ]] || continue; out="${out:+${out}; }${n}"; done
   printf '%s' "$out"
 }
-plan_text() { printf '%s\n' "pair ${LABEL} (method ${METHOD}, dryRun ${DRY})" "${PLAN[@]/#/  }"; }
+plan_text() { printf '%s\n' "pair ${LABEL} (method ${METHOD}, dryRun ${DRY})"; printf '%s\n' "${PLAN[@]}" | sed 's/^/  /'; }
 plan_save() { record_entry "plan.restore.${TC}.${TI}" PLANNED "" "$(plan_text)"; }
 fail() {   # fail REASON [DETAIL]: the pair is refused or broke; nothing further is attempted
   local w; w="$(join_list ${WARNS[@]+"${WARNS[@]}"})"
+  dump_plan
   record "$RKEY" FAILED "$1" "${2:-}${w:+ [warnings: ${w}]}"; exit 1
 }
 block() {  # block REASON DETAIL: the matrix does not allow this pair (only this pair is stopped)
-  plan "BLOCKED ${1}: ${2}"; plan_save
+  plan "BLOCKED ${1}: ${2}"; plan_save; dump_plan
   record "$RKEY" BLOCKED "$1" "$2"; exit 1
 }
 warn() {   # warn CODE DETAIL: shown in the report (Warnings), the pair goes on
@@ -302,7 +304,7 @@ get_obj "$TNS" postgres "$TI" || fail TARGET_UNREADABLE "Postgres ${TNS}/${TI} o
 TGT_EXISTS=false; TGT_PG=""
 [[ -z "$OBJ" ]] || { TGT_EXISTS=true; TGT_PG="$OBJ"; }
 
-ENTRY_NEW=false; TARGET_SPEC=""; T_OWNER=""; SPEC_JSON=""
+ENTRY_NEW=false; TARGET_SPEC=""; T_OWNER=""; SPEC_JSON=""; BUSY=""
 if [[ "$TGT_EXISTS" == true ]]; then
   [[ -z "$SPEC" ]] || fail TARGET_SPEC_FILE_REFUSED "${TNS}/${TI} exists on ${TC}: targetInstanceSpecFilePath (${SPEC}) is for a new instance; remove the key (the restore overwrites the data of the existing instance, its spec stays)"
   if [[ "$CONFIRM" != "$TI" ]]; then
@@ -312,6 +314,10 @@ if [[ "$TGT_EXISTS" == true ]]; then
     warn CONFIRMATION_MISSING "the target ${TC}/${TNS}/${TI} exists: a real run (dryRun=false) is refused unless the pair sets confirm: ${TI}"
   fi
   T_PGV="$(jq -r '.spec.postgresVersion.name // ""' <<<"$TGT_PG")"
+  BUSY="$(busy_operations "$TI" | sed 's/postgresrestore//' | tr -s ' ' | sed 's/^ //;s/ $//')"
+  if [[ -n "$BUSY" && "$DRY" == true ]]; then
+    warn OPERATION_IN_PROGRESS "${TC}/${TI} has an unfinished ${BUSY}: a real run is refused until it finished"
+  fi
   plan "target: existing Postgres ${TC}/${TNS}/${TI} (version ${T_PGV:-unknown}); its data is overwritten$( [[ "$IN_PLACE" == true ]] && echo " (in place)" ); no spec in the PostgresRestore"
 else
   # a live Postgres of that name in another namespace of the cluster would clash with the Application tpg-<cluster>-<instance>
@@ -347,7 +353,7 @@ fi
 # for a spec file) and decide who owns the shared Secrets of the namespace. Run on the clone of the plan, and again on a
 # fresh clone under the fleet lock right before the push, so two new targets of one namespace never both own them.
 prepare_entry() {
-  local f="$REPO/$FLEET_REL" others
+  local f="$REPO/$FLEET_REL" others ha
   if [[ "$SRC_FLEET" == true ]]; then
     # The restored instance inherits the source's settings, its backup scheduler included (backup.scheduled, backup.operatorSchedules,
     # D70), but not FerretDB (D71): a restored copy does not start serving MongoDB clients on its own (turn it on with a
@@ -370,16 +376,18 @@ prepare_entry() {
   fi
   if [[ -n "$SPEC_JSON" ]]; then
     # the fields of the spec file that clusters/fleet.yaml has a value for are written there too, so the chart renders them
+    # (highAvailability only when the file has it: an absent block keeps the fleet default)
+    ha="$(jq -c 'if .highAvailability == null then empty else (.highAvailability.enabled // false) as $e
+      | {enabled: $e, readReplicas: (if $e then (.highAvailability.readReplicas // 1) else 0 end)} end' <<<"$SPEC_JSON")"
     # shellcheck disable=SC2016  # yq variables, not shell
-    TC_="$TC" TI_="$TI" S_="$SPEC_JSON" yq -i '
+    TC_="$TC" TI_="$TI" S_="$SPEC_JSON" HA_="$ha" yq -i '
       (strenv(S_) | from_json) as $s
       | with(select($s.postgresVersion.name != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.postgresVersion = $s.postgresVersion.name)
       | with(select($s.storageSize != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.storageSize = $s.storageSize)
       | with(select($s.walStorageSize != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.walStorageSize = $s.walStorageSize)
       | with(select($s.storageClassName != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.storageClassName = $s.storageClassName)
       | with(select($s.resources != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.resources = $s.resources)
-      | with(select($s.highAvailability != null); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.highAvailability =
-          (($s.highAvailability.enabled // false) as $e | {"enabled": $e, "readReplicas": (if $e then ($s.highAvailability.readReplicas // 1) else 0 end)}))' "$f" || return 1
+      | with(select(strenv(HA_) != ""); .clusters[strenv(TC_)].instances[strenv(TI_)].instance.highAvailability = (strenv(HA_) | from_json))' "$f" || return 1
   fi
   # who renders the ServiceAccount tpg-vso and the VaultStaticSecrets regsecret and backup-storage: exactly one instance per namespace
   others="$(fleet_ns_owners "$REPO" "$TC" "$TNS" | grep -vFx -- "$TI" || true)"
@@ -481,7 +489,7 @@ find_copy() {  # find_copy: COPY_NAME and COPY_CREATE for the target namespace (
   to_tgt
   rows="$(tk -n "$TNS" get postgresbackuplocation -o json 2>/dev/null | jq -r '.items[]? | select(.spec.storage.azure.container != null)
     | [.metadata.name, .spec.storage.azure.container, (.spec.storage.azure.repoPath // "/"),
-       (.spec.storage.azure.endpoint // "blob.core.windows.net"), ((.spec.backupSync.enabled // true) | tostring)] | @tsv' 2>/dev/null || true)"
+       (.spec.storage.azure.endpoint // "blob.core.windows.net"), (if .spec.backupSync.enabled == false then "false" else "true" end)] | @tsv' 2>/dev/null || true)"
   while IFS=$'\t' read -r name cont path ep sync; do
     [[ -n "$name" ]] || continue
     if [[ "$cont" == "$LOC_CONT" && "$ep" == "$LOC_EP" && "$(repo_norm "$path")" == "$(repo_norm "$LOC_PATH")" ]]; then
@@ -517,7 +525,7 @@ render_obj() {  # render_obj KIND VALUES_JSON: RENDERED = the object as YAML (CH
   printf '%s' "$2" > "$WORK/render-values.json"
   out="$(helm template ref "$REPO/helm_artifacts/instance/crd-reference" -f "$WORK/render-values.json" 2>"$WORK/render.err")" \
     || fail CHART_RENDER_FAILED "${1}: $(tr '\n' ' ' <"$WORK/render.err" | cut -c1-300)"
-  RENDERED="$(K="$1" yq 'select(.kind == strenv(K))' <<<"$out")"
+  RENDERED="$(K="$1" yq 'select(.kind == strenv(K))' <<<"$out" | sed '/^---$/d;/^# Source:/d')"
 }
 RNAME="${TI}-restore-$(date -u +%Y%m%d%H%M%S)"
 tinst="$(jq -cn --arg n "$TI" --argjson new "$( [[ "$TGT_EXISTS" == true ]] && echo false || echo true )" --argjson spec "${TARGET_SPEC:-null}" \
@@ -558,13 +566,15 @@ fi
 # ---- 7. dry run: the plan is recorded, nothing was changed
 if [[ "$DRY" == true ]]; then
   plan_save
-  { printf 'dry run plan for %s\n' "$LABEL"; printf '%s\n' "${PLAN[@]/#/  }"; } >&2
+  dump_plan
   w="$(join_list ${WARNS[@]+"${WARNS[@]}"})"
   record "$RKEY" SUCCEEDED DRY_RUN "would restore ${SC}/${SNS}/${SI} into ${TC}/${TNS}/${TI} ($( [[ "$METHOD" == backup ]] && echo "backup ${SBK}" || echo "pitr ${METHOD}" ), $( [[ "$TGT_EXISTS" == true ]] && echo "existing target" || echo "new instance" )); nothing was changed; the plan is in plan.restore.${TC}.${TI}${w:+; warnings: ${w}}"
   exit 0
 fi
 
 # ======================================================================== a real restore from here
+plan_save
+dump_plan
 # an unfinished restore of this target: wait two minutes, then leave the pair alone
 in_progress() {
   local r
@@ -576,9 +586,8 @@ in_progress() {
   esac
 }
 to_tgt
-if [[ "$TGT_EXISTS" == true ]]; then
-  busy="$(busy_operations "$TI" | sed 's/postgresrestore//' | tr -s ' ' | sed 's/^ //;s/ $//')"
-  [[ -z "$busy" ]] || fail OPERATION_IN_PROGRESS "${TC}/${TI} has an unfinished ${busy} (kubectl -n ${TNS} get ${busy// /,}): restore after it finished"
+if [[ "$TGT_EXISTS" == true && -n "$BUSY" ]]; then
+  fail OPERATION_IN_PROGRESS "${TC}/${TI} has an unfinished ${BUSY} (kubectl -n ${TNS} get ${BUSY// /,}): restore after it finished"
 fi
 if in_progress >/dev/null; then
   log "a restore of ${TI} is still in progress, waiting 2 minutes"
@@ -618,7 +627,7 @@ if [[ "$ENTRY_NEW" == true ]]; then
   PUSHED_REV="${PUSHED_REVISION:-}"
   # never two owners of the shared Secrets (concurrent pull requests into one namespace)
   n_owners="$(fleet_ns_owners "$REPO" "$TC" "$TNS" | grep -c . || true)"
-  if [[ "$n_owners" -gt 1 ]]; then
+  if [[ "$n_owners" -gt 1 && "$(_flag_get "$REPO" "$TC" "$TI")" != false ]]; then
     fail NAMESPACE_OWNER_CONFLICT "after the push ${FLEET_REL} names $(fleet_ns_owners "$REPO" "$TC" "$TNS" | paste -sd, -) as owners of the shared Secrets of ${TNS} on ${TC}; set instance.sharedSecretsOwner: false on all but one of them and run again (nothing was synced)"
   fi
   to_tgt
