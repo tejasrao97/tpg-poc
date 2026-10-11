@@ -622,6 +622,21 @@ OUT="$(yq 'select(.kind == "NetworkPolicy")' <<<"$SAVE_OUT")"
 f9 && ok "23 re-review: f9 passes for the real pair (every NetworkPolicy of the render is checked)" || bad "f9 pair" "$OUT"
 OUT="$SAVE_OUT"
 
+# Round 23 phase 6a follow-up: restore-specs/ holds the spec files of tpg-restore; the chart never reads them
+# (.helmignore keeps the folder out of the packaged chart), so a file there changes no render
+rm -rf "$TMP/rs"; mkdir -p "$TMP/rs"; cp -r "$CHART" "$TMP/rs/tpg-instance"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability:\n    enabled: true\n' > "$TMP/rs/tpg-instance/restore-specs/probe.yaml"
+render ''
+BEFORE="$OUT"
+RC=0; AFTER="$(helm template i1 "$TMP/rs/tpg-instance" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" \
+  -f "$TMP/base.yaml" -f "$TMP/v.yaml" --namespace pg-i1 2>&1)" || RC=$?
+[[ "$RC" -eq 0 && "$AFTER" == "$BEFORE" ]] && ok "restore-specs: a spec file in the folder changes no render" || bad "restore-specs render" "$AFTER"
+if (cd "$TMP/rs" && helm package tpg-instance -d out >/dev/null 2>&1); then
+  PKG="$(tar -tzf "$TMP"/rs/out/*.tgz)"
+  ! grep -q 'restore-specs' <<<"$PKG" && grep -q 'tpg-instance/patches/' <<<"$PKG" \
+    && ok "restore-specs: .helmignore keeps the folder out of the packaged chart (patches/ is still in it)" || bad "restore-specs: package" "$PKG"
+else bad "restore-specs: helm package failed"; fi
+
 echo
 echo "chart: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]
