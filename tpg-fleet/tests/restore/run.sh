@@ -67,9 +67,7 @@ clusters:
         instance:
           namespace: pg-dr-existing
           postgresVersion: postgres-17.6
-  c3-unreachable-in-fleet-only: {}
 YAML
-sed -i '/c3-unreachable-in-fleet-only/d' "$TMP/fleet.base/clusters/fleet.yaml"
 cat > "$RSD/orders-dr.yaml" <<'YAML'
 apiVersion: sql.tanzu.vmware.com/v1
 kind: Postgres
@@ -260,7 +258,6 @@ tk() {
     *) return 0 ;;
   esac
 }
-instance_effective_real="$(declare -f instance_effective)"
 PRELUDE
 sed -e "s#@TMP@#$TMP#g" -e "s#@ROOT@#$ROOT#g" -e "s#@VAULT_KEY@#$VAULT_KEY#g" "$TMP/prelude.tmpl" > "$TMP/prelude.sh"
 # backup-instance.sh stub (the post-restore backup): records the call and a result under RESULT_KEY
@@ -299,7 +296,7 @@ run() {  # run PAIR_JSON [VAR=VALUE...]: restore-pair.sh; OUT, RC. P_DRY_RUN def
   rm -rf "$TMP/work"
   RC=0; OUT="$(cd "$TMP" && env P_DRY_RUN=true P_TIMEOUT=100 P_PR_TIMEOUT=10 "${@:2}" P_PAIR="$1" bash "$TMP/restore-pair.sh" tpg-restore-x 2>&1)" || RC=$?
   RUN_N=$((RUN_N + 1)); [[ "${SHOW_RUN:-}" != list ]] || printf 'run %s: %s dry=%s\n' "$RUN_N" "$(jq -r '.label' <<<"$1")" "$(grep -o 'P_DRY_RUN=[a-z]*' <<<"$*" | tail -1)" >&2
-  [[ "$RUN_N" != "${SHOW_RUN:-0}" ]] || { printf '%s\n' "$OUT" | sed 's/^/  > /' >&2; cat "$TMP/events" | sed 's/^/  ev> /' >&2; }   # SHOW_RUN=N prints the log of the Nth run
+  [[ "$RUN_N" != "${SHOW_RUN:-0}" ]] || { printf '%s\n' "$OUT" | sed 's/^/  > /' >&2; sed 's/^/  ev> /' "$TMP/events" >&2; }   # SHOW_RUN=N prints the log of the Nth run
 }
 RUN_N=0
 RK=""
@@ -318,7 +315,7 @@ plan_block() {  # plan_block HEADER_REGEX -> the YAML block that follows the pla
   awk -v h="$1" '$0 ~ h {f=1; next} f && /^      / {sub(/^      /, ""); print; next} f {exit}' "$TMP/rec/plan.restore.${RKP:-$RK}.detail" 2>/dev/null | sed 's/^result\.//' || true
 }
 restore_yaml() { plan_block 'PostgresRestore .* on '; }
-snapshot() { (cd "$TMP/cl" && find . -type f | sort | xargs cat | sha256sum | cut -c1-16; cat "$TMP/fleet.repo/clusters/fleet.yaml" | sha256sum | cut -c1-16) | paste -sd' ' -; }
+snapshot() { (cd "$TMP/cl" && find . -type f | sort | xargs cat | sha256sum | cut -c1-16; sha256sum < "$TMP/fleet.repo/clusters/fleet.yaml" | cut -c1-16) | paste -sd' ' -; }
 nothing_changed() {  # nothing_changed LABEL SNAPSHOT_BEFORE: the clusters, the fleet repository and the Argo CD calls are as they were
   local after; after="$(snapshot)"
   if [[ "$after" == "$2" ]] && ! grep -qE '^(apply|push|sync|adopt|delete|label|lock)' "$TMP/events"; then ok "$1: read-only (no object changed, nothing pushed, no Argo CD call)"
@@ -381,12 +378,12 @@ Y="$(restore_yaml)"
 echo "== 1b. every PITR type renders into spec.pitr"
 reset
 RK=c2.orders-dr
-PITR_KEYS_latest="$LATEST"
-PITR_KEYS_time=$'pitrEnabled: true\nbestEffort: true\npitrConfig:\n  type: time\n  timestamp: 2024-06-01T00:00:00Z'
-PITR_KEYS_lsn=$'pitrEnabled: true\nbestEffort: false\npitrConfig:\n  type: lsn\n  target: 0/3000060'
-PITR_KEYS_transaction=$'pitrEnabled: true\nbestEffort: true\npitrConfig:\n  type: transaction\n  target: "987654"'
+declare -A PITR_KEYS=([latest]="$LATEST"
+  [time]=$'pitrEnabled: true\nbestEffort: true\npitrConfig:\n  type: time\n  timestamp: 2024-06-01T00:00:00Z'
+  [lsn]=$'pitrEnabled: true\nbestEffort: false\npitrConfig:\n  type: lsn\n  target: 0/3000060'
+  [transaction]=$'pitrEnabled: true\nbestEffort: true\npitrConfig:\n  type: transaction\n  target: "987654"')
 for typ in latest time lsn transaction; do
-  keys="PITR_KEYS_${typ}"; keys="${!keys}"
+  keys="${PITR_KEYS[$typ]}"
   mk c1/pg-orders/orders-db '' c2/pg-dr/orders-dr "$keys"; run "$PJ"
   expect "pitr $typ: SUCCEEDED/DRY_RUN" SUCCEEDED DRY_RUN
   Y="$(RKP=c2.orders-dr restore_yaml)"
@@ -445,7 +442,6 @@ expect "another cluster, source cluster unreadable: SOURCE_BACKUP_UNVERIFIED (re
 rm -f "$TMP/flags/tkfail.c1.postgresbackup"
 mk c1/pg-orders/orders-db 'sourceBackupName: orders-failed' c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ"
 expect "another cluster, source backup Failed: BACKUP_NOT_SUCCEEDED" FAILED BACKUP_NOT_SUCCEEDED "phase Failed"
-mk c1/pg-orders/orders-db 'sourceBackupName: orders-full-1' c1/pg-orders/orders-db-ns2 "$BACKUP_T"
 mk c1/pg-orders/orders-db 'sourceBackupName: other-inst-full' c1/pg-orders/orders-copy "$BACKUP_T"; RK=c1.orders-copy; run "$PJ"
 expect "a backup of another instance: a warning, the pair goes on" SUCCEEDED DRY_RUN
 [[ -e "$TMP/rec/warning.c1.orders-copy.BACKUP_OF_OTHER_INSTANCE.status" ]] && ok "BACKUP_OF_OTHER_INSTANCE is a warning" || bad "other instance warning"
@@ -467,7 +463,7 @@ expect "source gone, only the location given: PITR_SOURCE_UNKNOWN (the stanza is
 reset
 mk c1/pg-orders/orders-db '' c2/pg-dr/orders-dr $'pitrEnabled: true\npitrConfig:\n  type: latest\n  sourceBackupConfig:\n    srcBackupLocationName: orders-db-backup-location\n    srcStanzaName: pg-orders-orders-db-0000'; run "$PJ"
 expect "given location and stanza equal to what the cluster reports: no warning" SUCCEEDED DRY_RUN
-ls "$TMP/rec" | grep -q '^warning\.' && bad "warning without a difference" "$(ls "$TMP/rec")" || ok "…and none is recorded"
+compgen -G "$TMP/rec/warning.*" >/dev/null && bad "warning without a difference" "$(ls "$TMP/rec")" || ok "…and none is recorded"
 reset
 mk c1/pg-orders/orders-db '' c2/pg-dr/orders-dr $'pitrEnabled: true\npitrConfig:\n  type: latest\n  sourceBackupConfig:\n    srcStanzaName: other-stanza'; run "$PJ"
 expect "a given stanza that differs from the live one: the pair goes on" SUCCEEDED DRY_RUN
@@ -475,7 +471,6 @@ expect "a given stanza that differs from the live one: the pair goes on" SUCCEED
   && ok "SRC_STANZA_DIFFERS is a warning naming both values" || bad "stanza warning" "$(ls "$TMP/rec")"
 Y="$(RKP=c2.orders-dr restore_yaml)"; [[ "$(yq '.spec.pitr.sourceBackupLocation.stanzaName' <<<"$Y")" == other-stanza ]] && ok "the given stanza wins" || bad "given wins" "$Y"
 reset
-seed_extra() { :; }
 mkdir -p "$TMP/cl/c1/postgresbackuplocation/pg-orders"
 jq '.metadata.name = "elsewhere"' "$TMP/cl/c1/postgresbackuplocation/pg-orders/orders-db-backup-location.json" > "$TMP/cl/c1/postgresbackuplocation/pg-orders/elsewhere.json"
 mk c1/pg-orders/orders-db '' c2/pg-dr/orders-dr $'pitrEnabled: true\npitrConfig:\n  type: latest\n  sourceBackupConfig:\n    srcBackupLocationName: elsewhere'; run "$PJ"
@@ -596,11 +591,9 @@ expect "a spec file field the entry does not render: the pair goes on" SUCCEEDED
 [[ -e "$TMP/rec/warning.c2.orders-dr.SPEC_FILE_NOT_IN_ENTRY.status" ]] && grep -q pgConfig "$TMP/rec/warning.c2.orders-dr.SPEC_FILE_NOT_IN_ENTRY.detail" && ok "SPEC_FILE_NOT_IN_ENTRY names the field (pgConfig)" || bad "not in entry" "$(ls "$TMP/rec")"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-loc.yaml]'; run "$PJ"
 expect "a spec file backupLocation that does not exist: BACKUP_LOCATION_MISSING" FAILED BACKUP_LOCATION_MISSING "shared-location"
-mk c1/pg-orders/orders-db 'sourceBackupName: orders-full-1' c1/pg-wrong/orders-copy "$BACKUP_T"
 reset
 mk c1/pg-orders-wrong/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; RK=c2.orders-dr; run "$PJ"
 expect "a source namespace that is not the entry's: SOURCE_NAMESPACE_MISMATCH" FAILED SOURCE_NAMESPACE_MISMATCH "declares orders-db on c1 in namespace pg-orders"
-mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c3/pg-dr/orders-dr "$BACKUP_T" 2>/dev/null && :
 reset
 # the owner rules and the namespace Secrets
 mkdir -p "$TMP/cl/c2/secret/pg-dr"
@@ -678,6 +671,13 @@ set_flag sync.names "orders-full-1"
 run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
 expect "keepSourceLocation=false: SUCCEEDED" SUCCEEDED "" "removed (keepSourceLocation=false)"
 [[ ! -f "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-orders-orders-db.json" ]] && ev_has '^delete c2 postgresbackuplocation pg-dr/restore-src' && ok "the copy is deleted after the success" || bad "copy not deleted" "$(cat "$TMP/events")"
+reset
+set_flag sync.names "orders-full-1"
+mkdir -p "$TMP/cl/c2/postgresrestore/pg-dr"
+printf '%s' '{"kind":"PostgresRestore","metadata":{"name":"other-restore","namespace":"pg-dr"},"spec":{"targetInstance":{"name":"other"}},"status":{"phase":"Running"}}' > "$TMP/cl/c2/postgresrestore/pg-dr/other-restore.json"
+run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
+expect "keepSourceLocation=false while another restore of the namespace is unfinished: SUCCEEDED, the copy is kept" SUCCEEDED "" "kept although keepSourceLocation=false" "other-restore"
+[[ -f "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-orders-orders-db.json" ]] && ! ev_has '^delete' && ok "…nothing is deleted" || bad "copy deleted under a running restore" "$(cat "$TMP/events")"
 reset
 set_flag sync.names "orders-full-1"
 mkdir -p "$TMP/cl/c2/postgresbackuplocation/pg-dr"
@@ -789,7 +789,7 @@ expect "an existing target with confirm: SUCCEEDED" SUCCEEDED "" "restored c1/pg
 ! ev_has '^push' && ! ev_has '^adopt' && ok "an existing target: no fleet entry is written, no adoption sync" || bad "existing target touched fleet" "$(cat "$TMP/events")"
 Y="$(jq -c '.spec' "$TMP/cl/c2/postgresrestore/pg-dr-existing/"*.json)"
 [[ "$(jq 'has("targetInstance") and (.targetInstance | has("spec") | not)' <<<"$Y")" == true ]] && ok "…and its PostgresRestore carries no instance spec" || bad "existing target restore spec" "$Y"
-ls "$TMP/cl/c2/secret/pg-dr-existing" | grep -q . && ok "…the copy's Secret backup-storage is the namespace's own (Vault Secrets Operator): nothing created" || bad "secret"
+compgen -G "$TMP/cl/c2/secret/pg-dr-existing/*" >/dev/null && ok "…the copy's Secret backup-storage is the namespace's own (Vault Secrets Operator): nothing created" || bad "secret"
 reset
 set_flag sync.names "orders-full-1"
 mkdir -p "$TMP/cl/c2/postgresbackup/pg-dr-existing"
@@ -797,7 +797,6 @@ printf '%s' '{"kind":"PostgresBackup","metadata":{"name":"nightly","namespace":"
 run "$PJ" P_DRY_RUN=false
 expect "a backup is running on the existing target: OPERATION_IN_PROGRESS" FAILED OPERATION_IN_PROGRESS "postgresbackup"
 reset
-printf '%s' '{"kind":"PostgresRestore","metadata":{"name":"dr-db-restore-old","namespace":"pg-dr-existing"},"spec":{"targetInstance":{"name":"dr-db"}},"status":{"phase":"Running"}}' > /dev/null
 mkdir -p "$TMP/cl/c2/postgresrestore/pg-dr-existing"
 printf '%s' '{"kind":"PostgresRestore","metadata":{"name":"dr-db-restore-old","namespace":"pg-dr-existing","creationTimestamp":"2026-10-01T00:00:00Z"},"spec":{"targetInstance":{"name":"dr-db"}},"status":{"phase":"Running"}}' > "$TMP/cl/c2/postgresrestore/pg-dr-existing/dr-db-restore-old.json"
 run "$PJ" P_DRY_RUN=false
@@ -828,7 +827,7 @@ expect "an earlier restore copy of the Secret is updated" SUCCEEDED ""
 reset
 # an existing target in a namespace that has no Secret backup-storage (the fleet does not manage it): created from Vault, in memory
 set_flag sync.names "orders-full-1"
-jq 'del(.spec)' /dev/null 2>/dev/null; mkdir -p "$TMP/cl/c2/postgres/pg-bare"
+mkdir -p "$TMP/cl/c2/postgres/pg-bare"
 printf '%s' '{"kind":"Postgres","metadata":{"name":"bare-db","namespace":"pg-bare"},"spec":{"postgresVersion":{"name":"postgres-17.6"}},"status":{"currentState":"Running"}}' > "$TMP/cl/c2/postgres/pg-bare/bare-db.json"
 yq -i '.clusters.c2.instances.bare-db.instance = {"namespace": "pg-bare", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
 RK=c2.bare-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-bare/bare-db $'pitrEnabled: false\nconfirm: bare-db'; run "$PJ" P_DRY_RUN=false

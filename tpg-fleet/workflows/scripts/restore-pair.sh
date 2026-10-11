@@ -381,7 +381,7 @@ prepare_entry() {
     # the fields of the spec file that clusters/fleet.yaml has a value for are written there too, so the chart renders them
     # (highAvailability only when the file has it: an absent block keeps the fleet default)
     ha="$(jq -c 'if .highAvailability == null then empty else (.highAvailability.enabled // false) as $e
-      | {enabled: $e, readReplicas: (if $e then (.highAvailability.readReplicas // 1) else 0 end)} end' <<<"$SPEC_JSON")"
+      | {enabled: $e, readReplicas: (if $e then (if .highAvailability.readReplicas == null then 1 else .highAvailability.readReplicas end) else 0 end)} end' <<<"$SPEC_JSON")"
     # shellcheck disable=SC2016  # yq variables, not shell
     TC_="$TC" TI_="$TI" S_="$SPEC_JSON" HA_="$ha" yq -i '
       (strenv(S_) | from_json) as $s
@@ -788,7 +788,11 @@ fi
 if [[ "$SAME_NS" != true ]]; then
   if [[ "$KEEP" == false && "$COPY_MADE" == true ]]; then
     to_tgt
-    if tk -n "$TNS" delete postgresbackuplocation "$COPY_NAME" --ignore-not-found >/dev/null 2>&1; then
+    # another pair of this run (or anyone) may still restore from the same copy: it is removed only when no restore is unfinished here
+    unfinished="$(tk -n "$TNS" get postgresrestore -o json 2>/dev/null | jq -r "[.items[]? | ${OP_ACTIVE_JQ} | .metadata.name] | join(\",\")" 2>/dev/null || true)"
+    if [[ -n "$unfinished" ]]; then
+      note "source backup location ${TNS}/${COPY_NAME} kept although keepSourceLocation=false: the restore(s) ${unfinished} in ${TNS} are not finished and may still use it; delete it by hand afterwards"
+    elif tk -n "$TNS" delete postgresbackuplocation "$COPY_NAME" --ignore-not-found >/dev/null 2>&1; then
       note "source backup location ${TNS}/${COPY_NAME} removed (keepSourceLocation=false)"
       if [[ "$COPY_SECRET_MADE" == true && "$LOC_SECRET" != backup-storage ]]; then tk -n "$TNS" delete secret "$LOC_SECRET" --ignore-not-found >/dev/null 2>&1 || true; fi
     else
