@@ -63,7 +63,7 @@ expect "pairs: has-batches is true" "$(cat /tmp/has-batches)" 'true'
 (cd "$TMP" && P_PAIRS='[]' bash "$TMP/plan.sh" wf false 2 all >/dev/null 2>&1)
 expect "pairs: has-batches is false without a pair" "$(cat /tmp/has-batches)" 'false'
 # without P_PAIRS the script still plans clusters (the inventory above): one script, two item kinds
-expect "clusters are still planned when P_PAIRS is empty" "$(P_PAIRS= plan "$INV" 2 batches)" '[["c0","c1"],["c2","c3"]]'
+expect "clusters are still planned when P_PAIRS is empty" "$(P_PAIRS='' plan "$INV" 2 batches)" '[["c0","c1"],["c2","c3"]]'
 echo
 echo "rollout: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

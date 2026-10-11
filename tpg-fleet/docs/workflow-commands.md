@@ -1800,7 +1800,7 @@ ln -s ~/src/tpg-fleet/scripts/submit/tpg-patch.sh ~/bin/tpg-patch && tpg-patch
 TPG_FLEET_DIR=~/src/tpg-fleet bash /opt/tools/tpg-patch.sh
 ```
 
-Some inputs depend on an earlier answer: `tpg-upgrade.sh` asks `instances` for `component=postgres`, `tpg-restore.sh` asks the recovery point of the chosen `mode`, `tpg-scale-instance.sh` asks whether the run scales instances (`instances` and `replicas`), changes only the cap (`maxReadReplicas`), or both, and `tpg-patch.sh` does not submit before a patch file input is set (and `instances` for instance patch files).
+Some inputs depend on an earlier answer: `tpg-upgrade.sh` asks `instances` for `component=postgres`, `tpg-scale-instance.sh` asks whether the run scales instances (`instances` and `replicas`), changes only the cap (`maxReadReplicas`), or both, and `tpg-patch.sh` does not submit before a patch file input is set (and `instances` for instance patch files).
 
 **Local files (Round 14, Round 15).** `tpg-patch.sh`, `tpg-create-instance.sh`, `tpg-day0.sh` and `tpg-rotate-credential.sh` read every local file the path inputs and `clusterMap` name (absolute, `~/` or relative to the current directory; `repo:` files are left to the workflow; nothing with `patchMode=clear`) through `pack-patch-files.sh -o`; the prompts take plain names or one path and send the bracketed form (`[orders-db, billing-db]`, `[./ca.pem]`), so a file that is missing or does not fit its input is refused before anything is submitted, and send their contents as `patchFiles`; you never type that input. The equivalent commands they print are the parameter-file form of section 7:
 
