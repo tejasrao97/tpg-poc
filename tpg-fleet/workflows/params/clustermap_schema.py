@@ -334,7 +334,7 @@ RESTORE_EXAMPLE = """\
           postRestoreBackup: true
 
 # 4. In place, point-in-time recovery to a log sequence number (type lsn, or transaction with a
-#    transaction ID in target)
+#    transaction ID in target), with a spec file whose values override the existing instance's
 - sourceClusterConfig:
     aks-tpg-poc-02:
       pg-shop:
@@ -349,6 +349,7 @@ RESTORE_EXAMPLE = """\
             type: lsn
             target: 0/3000060
           confirm: shop-db
+          targetInstanceSpecFilePath: [./shop-db.yaml]
 
 # 5. A named backup into a new instance of the same namespace (pitrEnabled is false when absent)
 - sourceClusterConfig:

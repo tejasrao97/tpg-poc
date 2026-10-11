@@ -327,7 +327,8 @@ invalid "a spec file that is not .yaml or .yml is refused" "must be the path of 
 rm_run "$(X '' "$LATEST"$'\ntargetInstanceSpecFilePath: [repo:../orders-dr.yaml]')"
 invalid "a repo: path with .. is refused" "(no leading /, no ..)"
 rm_run "$(IP "$SRCB" "$BACKUP"$'\nconfirm: orders-db\ntargetInstanceSpecFilePath: [./orders-dr.yaml]')"
-invalid "a spec file for an in-place restore (an existing target) is refused" "targetInstanceSpecFilePath: not allowed for an existing target"
+valid "a spec file for an in-place restore is accepted (its values override the existing instance's; Round 23 phase 6b revision)"
+field "the in-place pair carries the spec file" '.target.specFile' "./orders-dr.yaml"
 rm_run "$(IP "$SRCB" "$BACKUP"$'\nconfirm: orders-db')"
 valid "in place with the confirmation is accepted"
 rm_run "$(IP "$SRCB" "$BACKUP")" --confirm-required

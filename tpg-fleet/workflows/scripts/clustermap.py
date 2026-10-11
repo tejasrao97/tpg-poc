@@ -735,9 +735,6 @@ def restore_pair_errors(i, pair, keys, registered, confirm_required):
                 if "pitrConfig.timestamp" in tv:
                     errors.append(f"{tw}.pitrConfig.timestamp: not allowed with pitrConfig.type: {typ} (use pitrConfig.target)")
 
-    if in_place and "targetInstanceSpecFilePath" in tv:
-        errors.append(f"{tw}.targetInstanceSpecFilePath: not allowed for an existing target (the target is the source instance, "
-                      "restored in place); a spec file is for a new instance")
     conf = tv.get("confirm", "")
     if conf and conf != ti:
         errors.append(f"{tw}.confirm: '{conf}' must repeat the target instance name {ti}")

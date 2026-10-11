@@ -397,6 +397,7 @@ if jsonschema is not None:
         "a named backup with pitrEnabled absent (the default is false)": [rp({"sourceBackupName": "b-full"}, {})],
         "a named backup with pitrEnabled absent and other keys": [rp({"sourceBackupName": "b-full"}, {"confirm": "b", "postRestoreBackup": True})],
         "in place": [rp(None, with_(LATEST, confirm="a"), src=("c1", "pg-a", "a"), tgt=("c1", "pg-a", "a"))],
+        "a spec file for an in-place restore": [rp(None, with_(LATEST, confirm="a", targetInstanceSpecFilePath=["./a.yaml"]), src=("c1", "pg-a", "a"), tgt=("c1", "pg-a", "a"))],
         "a spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.yaml"]))],
         "a repo spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:" + RSD + "a.yaml"]))],
         "a repo spec file in a subfolder, .yml": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["repo:" + RSD + "team/a.yml"]))],
@@ -465,7 +466,6 @@ if jsonschema is not None:
     vbad = {
         "a named backup (pitrEnabled false) without sourceBackupName": [rp(None, {"pitrEnabled": False})],
         "a named backup (pitrEnabled absent) without sourceBackupName": [rp(None, {})],
-        "a spec file for an in-place restore": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.yaml"]), src=("c1", "pg-a", "a"), tgt=("c1", "pg-a", "a"))],
     }
     for what, m in vbad.items():
         if not restore_validate(m):
