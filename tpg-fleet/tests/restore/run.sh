@@ -773,6 +773,14 @@ RK=c2.orders-a; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr-new/orders-a
 expect "two owners after the pushes (pull requests merged side by side): NAMESPACE_OWNER_CONFLICT before any sync" FAILED NAMESPACE_OWNER_CONFLICT "instance.sharedSecretsOwner: false"
 ! ev_has '^(sync|apply c2 postgresrestore)' && ok "…nothing was synced or restored" || bad "acted after the conflict" "$(cat "$TMP/events")"
 
+reset
+set_flag sync.names "orders-full-1"
+yq -i '.clusters.c2.instances.declared-db.instance = {"namespace": "pg-declared", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
+RK=c2.declared-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-declared/declared-db "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
+expect "an instance declared in clusters/fleet.yaml but not deployed: restored into, SUCCEEDED" SUCCEEDED "" "restored c1/pg-orders/orders-db into c2/pg-declared/declared-db"
+! ev_has '^push' && ev_has 'resources=:ServiceAccount:pg-declared/tpg-vso' && ev_has '^adopt c2 declared-db' \
+  && ok "…its entry is kept (no push); its Application provides the shared objects and adopts the restored instance" || bad "declared target" "$(cat "$TMP/events")"
+
 echo "-- confirm, in-progress and busy targets"
 reset
 RK=c2.dr-db; set_flag sync.names "orders-full-1"

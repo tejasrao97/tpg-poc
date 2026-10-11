@@ -212,10 +212,11 @@ if [[ -n "$SBK" ]]; then
 fi
 if [[ "$METHOD" == backup ]]; then
   if [[ -z "$SB" ]]; then
+    sb_why="does not exist"; [[ -z "$SB_ERR" ]] || sb_why="could not be read (${SB_ERR})"
     if [[ "$SAME_NS" == true ]]; then
-      fail BACKUP_NOT_FOUND "PostgresBackup ${SNS}/${SBK} on ${SC} ${SB_ERR:+could not be read (${SB_ERR})}${SB_ERR:-does not exist}: a named backup restored inside the source namespace must exist and be Succeeded now; list them with kubectl -n ${SNS} get postgresbackup"
+      fail BACKUP_NOT_FOUND "PostgresBackup ${SNS}/${SBK} on ${SC} ${sb_why}: a named backup restored inside the source namespace must exist and be Succeeded now; list them with kubectl -n ${SNS} get postgresbackup"
     fi
-    fail SOURCE_BACKUP_UNVERIFIED "PostgresBackup ${SNS}/${SBK} on ${SC} ${SB_ERR:+could not be read (${SB_ERR})}${SB_ERR:-does not exist}: a restore into another namespace or cluster first checks that the source backup exists and is Succeeded, and refuses when it cannot"
+    fail SOURCE_BACKUP_UNVERIFIED "PostgresBackup ${SNS}/${SBK} on ${SC} ${sb_why}: a restore into another namespace or cluster first checks that the source backup exists and is Succeeded, and refuses when it cannot"
   fi
   sphase="$(jq -r '.status.phase // ""' <<<"$SB")"
   [[ "$sphase" == Succeeded ]] || fail BACKUP_NOT_SUCCEEDED "PostgresBackup ${SNS}/${SBK} on ${SC} is in phase ${sphase:-<none>}, not Succeeded"
@@ -252,7 +253,7 @@ if [[ "$METHOD" != backup ]]; then
   to_src
   if bj="$(tk -n "$SNS" get postgresbackup -o json 2>/dev/null)"; then
     oldest="$(jq -r --arg i "$SI" '[.items[]? | select(.spec.sourceInstance.name == $i and .spec.type == "full"
-      and .status.phase == "Succeeded" and .status.timeStarted != null) | .status.timeStarted | fromdateiso8601] | min // empty' <<<"$bj")"
+      and .status.phase == "Succeeded" and .status.timeStarted != null) | .status.timeStarted | fromdateiso8601] | min // empty' <<<"$bj")" || oldest=""
     if [[ -z "$oldest" ]]; then
       if [[ "$SRC_LIVE" == true ]]; then fail NO_FULL_BACKUP "no Succeeded full backup of ${SI} on ${SC} (${SNS}): there is nothing to recover from"; fi
       warn RECOVERY_WINDOW_UNVERIFIED "no Succeeded full backup of ${SI} is listed in ${SNS} on ${SC}; the recovery point is not checked against them"
@@ -632,6 +633,9 @@ if [[ "$ENTRY_NEW" == true ]]; then
   if [[ "$n_owners" -gt 1 && "$(_flag_get "$REPO" "$TC" "$TI")" != false ]]; then
     fail NAMESPACE_OWNER_CONFLICT "after the push ${FLEET_REL} names $(fleet_ns_owners "$REPO" "$TC" "$TNS" | paste -sd, -) as owners of the shared Secrets of ${TNS} on ${TC}; set instance.sharedSecretsOwner: false on all but one of them and run again (nothing was synced)"
   fi
+fi
+# a new instance, or one declared in clusters/fleet.yaml but not deployed: its Application provides the shared objects and the backup location
+if [[ "$TGT_EXISTS" == false ]]; then
   to_tgt
   tk create namespace "$TNS" --dry-run=client -o yaml | tk apply -f - >/dev/null || fail TARGET_PREPARE_FAILED "namespace ${TNS} on ${TC}"
   tk label namespace "$TNS" tpg.fleet/managed=true --overwrite >/dev/null || fail TARGET_PREPARE_FAILED "label of namespace ${TNS} on ${TC}"
@@ -763,7 +767,7 @@ done
 pg_wait_ready "$TI" "$READY_TIMEOUT" || fail "TARGET_${POD_WATCH_REASON:-NOT_RUNNING}" "$TI: ${POD_WATCH_DETAIL:-}"
 
 # ---- 5 (real) the new instance is adopted by its Application
-if [[ "$ENTRY_NEW" == true ]]; then
+if [[ "$TGT_EXISTS" == false ]]; then
   if sync_instance_app "$TC" "$TI" "$SYNC_TIMEOUT" "$PUSHED_REV"; then
     note "Application tpg-${TC}-${TI} synced: the instance is managed by Argo CD"
   else
