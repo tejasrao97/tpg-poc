@@ -571,46 +571,51 @@ plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-owner.yaml]'
 rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "v-owner.yaml: instance.sharedSecretsOwner cannot be set by a values patch" \
   && ok "23 a values patch with instance.sharedSecretsOwner is refused (the workflows move the owner)" || bad "23 owner patch" "$(cat "$TMP/records") $OUT"
 
-# ---- Round 23 (tpg-restore): a patch on an instance restored with a spec file replaces its restore-patch
-echo "== 24 restore-patch: a tpg-patch file retires the restore-patch tpg-restore stored"
+# ---- Round 23 (tpg-restore): a patch on a restored instance. tpg-patch never retires or touches its restore-patch (it also patches other
+# kinds); the chart applies the Postgres patch file after the restore-patch and the entry's later changes
+echo "== 24 restored instance: tpg-patch leaves the restore-patch alone (no retirement)"
 BASE_SAVED2="$(git -C "$REPO" rev-parse HEAD)"
 RPD="$REPO/helm_artifacts/instance/tpg-instance/restore-patch"
 mkdir -p "$RPD"
-printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  logLevel: Debug\n' > "$RPD/restored-db-restore-aaaaa.yaml"
-printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  logLevel: Info\n' > "$RPD/restored-db-restore-zzzzz.yaml"
-yq -i '.clusters.c1.instances["restored-db"] = {"instance": {"postgresVersion": "postgres-17.6"}, "restorePatch": {"current": "restore-patch/restored-db-restore-aaaaa.yaml", "previous": {"path": "restore-patch/restored-db-restore-zzzzz.yaml", "commit": "abc123"}}}' "$REPO/clusters/fleet.yaml"
-git -C "$REPO" -c user.email=t@t -c user.name=t add -A && git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm "restored-db restored with a spec file"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  storageSize: 50Gi\n  logLevel: Debug\n' > "$RPD/restored-db-restore-aaaaa.yaml"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  logLevel: Info\n' > "$RPD/restored-db-restore-zzzzz.yaml"
+yq -i '.clusters.c1.instances["restored-db"] = {"instance": {"postgresVersion": "postgres-17.6", "storageSize": "50Gi", "restored": true, "highAvailability": {"enabled": false, "readReplicas": 0}}, "restorePatch": {"current": "restore-patch/restored-db-restore-aaaaa.yaml", "mode": "base", "previous": {"path": "restore-patch/restored-db-restore-zzzzz.yaml", "commit": "abc123"}}}' "$REPO/clusters/fleet.yaml"
+git -C "$REPO" -c user.email=t@t -c user.name=t add -A && git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm "restored-db restored"
 RSHA="$(git -C "$REPO" rev-parse HEAD)"
 rpyaml() { yq -o=json -I=0 '.clusters.c1.instances["restored-db"].restorePatch' "$TMP/work/repo/clusters/fleet.yaml"; }
+RP_BEFORE="$(yq -o=json -I=0 '.clusters.c1.instances["restored-db"].restorePatch' "$REPO/clusters/fleet.yaml")"
 plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_VALUES_PATCH='[retention.yaml]' P_PATCH_FILES="$(pack retention.yaml)" S_INV=restored-db
-! rec "precheck.c1|BLOCKED" | grep -q . && rec "warning.c1.restored-db.RESTORE_PATCH_RETIRED|WARNING" | grep -q "replaces the restore-patch helm_artifacts/instance/tpg-instance/restore-patch/restored-db-restore-aaaaa.yaml" \
-  && ok "24 a values patch on a restored instance is planned and warns that the restore-patch is retired (RESTORE_PATCH_RETIRED)" || bad "24 plan values" "$(cat "$TMP/records") $OUT"
-! yq -e 'select(.kind == "Postgres") | .spec.logLevel' "$TMP/dryrun.yaml" >/dev/null 2>&1 \
-  && ok "24 …the render after the patch no longer carries the restore-patch (no logLevel Debug)" || bad "24 render after" "$(yq 'select(.kind == "Postgres") | .spec' "$TMP/dryrun.yaml")"
+! rec "precheck.c1|BLOCKED" | grep -q . && ! grep -q "RESTORE_PATCH_RETIRED" "$TMP/records" \
+  && ok "24 a values patch on a restored instance is planned without a restore-patch warning (nothing is retired any more)" || bad "24 plan values" "$(cat "$TMP/records") $OUT"
 cluster P_PUSH_MODE=direct P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[restored-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_INV=restored-db
 W="$TMP/work/repo"
-[[ "$(rpyaml)" == "{\"previous\":{\"path\":\"restore-patch/restored-db-restore-aaaaa.yaml\",\"commit\":\"$RSHA\"}}" ]] \
-  && ok "24 restorePatch.current moved to restorePatch.previous (with the commit that added it), current is gone" || bad "24 refs" "$(rpyaml) $OUT"
-[[ -f "$W/helm_artifacts/instance/tpg-instance/restore-patch/restored-db-restore-aaaaa.yaml" && ! -e "$W/helm_artifacts/instance/tpg-instance/restore-patch/restored-db-restore-zzzzz.yaml" ]] \
-  && git -C "$W" show --name-status --format= HEAD | grep -q '^D.*restored-db-restore-zzzzz.yaml' \
-  && ok "24 the file that was previous is deleted in the same commit; the one that became previous stays" || bad "24 files" "$(git -C "$W" show --name-status --format= HEAD)"
-rec "result.c1.restored-db|SUCCEEDED" | grep -q . && ok "24 the instance is synced and SUCCEEDED" || bad "24 result" "$(cat "$TMP/records")"
+[[ "$(rpyaml)" == "$RP_BEFORE" ]] && ok "24 restorePatch (current, previous, mode) is as it was after a values patch" || bad "24 refs" "$(rpyaml) $OUT"
+[[ -f "$W/helm_artifacts/instance/tpg-instance/restore-patch/restored-db-restore-aaaaa.yaml" && -f "$W/helm_artifacts/instance/tpg-instance/restore-patch/restored-db-restore-zzzzz.yaml" ]] \
+  && ! git -C "$W" show --name-status --format= HEAD | grep -q 'restore-patch/' \
+  && ok "24 both restore-patch files exist and the commit does not touch the restore-patch folder" || bad "24 files" "$(git -C "$W" show --name-status --format= HEAD)"
+[[ "$(yq '.clusters.c1.instances["restored-db"].instance.restored' "$W/clusters/fleet.yaml")" == true ]] && ok "24 instance.restored stays true" || bad "24 restored flag"
 git -C "$REPO" reset -q --hard "$RSHA"
 plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_POSTGRES_PATCH='[mem.yaml]' P_PATCH_FILES="$(pack mem.yaml)" S_INV=restored-db
+! rec "precheck.c1|BLOCKED" | grep -q . \
+  && yq -e 'select(.kind == "Postgres") | .spec.resources.data.limits.memory == "8Gi" and .spec.logLevel == "Debug" and .spec.storageSize == "50Gi"' "$TMP/dryrun.yaml" >/dev/null \
+  && ok "24 a Postgres patch on a restored instance: the dry run carries the patch over the restore-patch (limits 8Gi) and the restore-patch's own fields (logLevel Debug, storageSize 50Gi)" || bad "24 postgres plan" "$(cat "$TMP/records") $(yq 'select(.kind == "Postgres") | .spec' "$TMP/dryrun.yaml")"
 cluster P_PUSH_MODE=direct P_POSTGRES_PATCH='[mem.yaml]' P_INSTANCES='[restored-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack mem.yaml)" S_INV=restored-db
-[[ "$(rpyaml | jq -c 'has("current")')" == false && "$(rpyaml | jq -r '.previous.path')" == restore-patch/restored-db-restore-aaaaa.yaml \
-   && "$(yq -r '.clusters.c1.instances["restored-db"].patches.postgres.current' "$W/clusters/fleet.yaml")" =~ ^patches/restored-db-postgres- ]] \
-  && ok "24 a Postgres patch file retires it as well: the patch is current, the restore-patch previous" || bad "24 postgres patch" "$(rpyaml) $OUT"
+[[ "$(rpyaml)" == "$RP_BEFORE" && "$(yq -r '.clusters.c1.instances["restored-db"].patches.postgres.current' "$W/clusters/fleet.yaml")" =~ ^patches/restored-db-postgres- ]] \
+  && ok "24 …recorded as the instance's patch; restorePatch untouched (the patch does not retire it)" || bad "24 postgres patch" "$(rpyaml) $OUT"
 git -C "$REPO" reset -q --hard "$RSHA"
 plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_CLEAR_KINDS='[postgresValues]' P_PATCH_MODE=clear S_INV=restored-db
 cluster P_PUSH_MODE=direct P_CLEAR_KINDS='[postgresValues]' P_PATCH_MODE=clear P_INSTANCES='[restored-db]' P_CLUSTERS='[c1]' S_INV=restored-db
-[[ "$(rpyaml | jq -r '.current')" == restore-patch/restored-db-restore-aaaaa.yaml ]] \
+[[ "$(rpyaml)" == "$RP_BEFORE" ]] \
   && ok "24 patchMode=clear does not touch the restore-patch" || bad "24 clear" "$(rpyaml) $OUT"
 git -C "$REPO" reset -q --hard "$BASE_SAVED2"
 printf 'restorePatch:\n  current: restore-patch/x.yaml\n' > "$L/v-rp.yaml"
 plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-rp.yaml]' P_PATCH_FILES="$(pack v-rp.yaml)" S_DIFF=0
 rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "v-rp.yaml: restorePatch cannot be set by a values patch" \
   && ok "24 a values patch with restorePatch is refused (only tpg-restore writes it)" || bad "24 values restorePatch" "$(cat "$TMP/records") $OUT"
+printf 'instance:\n  restored: true\n' > "$L/v-restored.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-restored.yaml]' P_PATCH_FILES="$(pack v-restored.yaml)" S_DIFF=0
+rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "v-restored.yaml: instance.restored cannot be set by a values patch" \
+  && ok "24 a values patch with instance.restored is refused (only tpg-restore writes it)" || bad "24 values restored" "$(cat "$TMP/records") $OUT"
 
 echo
 echo "tests/patch: ${PASS} passed, ${FAIL} failed"

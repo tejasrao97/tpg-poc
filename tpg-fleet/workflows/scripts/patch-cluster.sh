@@ -96,7 +96,7 @@ for x in "${changed[@]+"${changed[@]}"}"; do if [[ "$x" == operator ]]; then ops
 
 # ---- 2 one commit
 fleet_yaml_style "$REPO/$FLEET_REL"
-git -C "$REPO" add -A -- "$FLEET_REL" "$PATCH_INSTANCE_DIR" "$PATCH_OPERATOR_DIR" "$RESTORE_PATCH_DIR"
+git -C "$REPO" add -A -- "$FLEET_REL" "$PATCH_INSTANCE_DIR" "$PATCH_OPERATOR_DIR"
 if git -C "$REPO" diff --cached --quiet; then
   for x in "${all[@]}"; do record "$(key_of "$x")" SUCCEEDED NO_CHANGE "nothing to commit"; done
   exit 0
@@ -113,7 +113,7 @@ if [[ "$PUSH_MODE" == "pr" ]]; then
   fi
   SHA="$PR_SHA"; OFF=(--off-branch)
 else
-  if ! git_commit_push "$REPO" "$msg" "$FLEET_REL" "$PATCH_INSTANCE_DIR" "$PATCH_OPERATOR_DIR" "$RESTORE_PATCH_DIR"; then
+  if ! git_commit_push "$REPO" "$msg" "$FLEET_REL" "$PATCH_INSTANCE_DIR" "$PATCH_OPERATOR_DIR"; then
     fail_all GIT_PUSH_FAILED "pushMode=direct" "${all[@]}"; exit 1
   fi
   SHA="$PUSHED_REVISION"
@@ -166,7 +166,7 @@ revert_in_git() {
     return 1
   fi
   patch_restore_referenced "$REPO" "$c" >/dev/null || { log "the stored patch files could not be restored"; return 1; }
-  git -C "$REPO" add -A -- "$FLEET_REL" "$PATCH_INSTANCE_DIR" "$PATCH_OPERATOR_DIR" "$RESTORE_PATCH_DIR"
+  git -C "$REPO" add -A -- "$FLEET_REL" "$PATCH_INSTANCE_DIR" "$PATCH_OPERATOR_DIR"
   git -C "$REPO" commit --quiet -m "Revert \"${msg}\"" -m "This reverts commit ${c}: ${reason_now}." || return 1
   git_push_head "$REPO"
 }

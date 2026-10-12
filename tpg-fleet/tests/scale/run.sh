@@ -17,6 +17,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 for t in python3 jq yq; do command -v "$t" >/dev/null || { echo "SKIP tests/scale: $t not installed" >&2; exit 0; }; done
+HAVE_HELM=true; command -v helm >/dev/null || HAVE_HELM=false
 yq --version 2>&1 | grep -q mikefarah || { echo "SKIP tests/scale: yq is not mikefarah yq v4" >&2; exit 0; }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 PASS=0; FAIL=0
@@ -24,8 +25,10 @@ ok()  { printf 'ok   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL %s\n' "$1"; [[ -z "${2:-}" ]] || printf '%s\n' "$2" | sed 's/^/       | /' | tail -15; FAIL=$((FAIL + 1)); }
 
 REPO="$TMP/repo"
-mkdir -p "$REPO/clusters"
+mkdir -p "$REPO/clusters" "$REPO/helm_artifacts"
 cp -r "$ROOT/clusters/_template" "$REPO/clusters/"
+cp -r "$ROOT/helm_artifacts/instance" "$REPO/helm_artifacts/"
+rm -f "$REPO"/helm_artifacts/instance/tpg-instance/restore-patch/example-*
 cat > "$TMP/fleet.base.yaml" <<'YAML'
 clusters:
   c1:
@@ -33,6 +36,9 @@ clusters:
     instances:
       orders-db: {instance: {highAvailability: {enabled: true, readReplicas: 2}}}
       billing-db: {instance: {highAvailability: {enabled: false, readReplicas: 0}}}
+      restored-db:
+        instance: {restored: true, postgresVersion: postgres-17.6, storageSize: 50Gi, highAvailability: {enabled: true, readReplicas: 1}}
+        restorePatch: {current: restore-patch/restored-db-restore-aaaaa.yaml, mode: base}
   c2:
     cluster: {maxReadReplicas: 4}
     operator: {version: v4.5.0}
@@ -184,6 +190,30 @@ rec result.c2.orders-db | grep -q "NOT_RUN||an earlier batch failed; clusters/fl
 rm -f "$TMP/pushed.yaml"
 OUT="$(bash "$TMP/scale.sh" restore wf-test 2>&1)" || true
 [[ ! -f "$TMP/pushed.yaml" ]] && ok "a second restore finds nothing left to do" || bad "a second restore" "$OUT"
+
+echo "== 8: a restored instance (tpg-restore, Round 23): the entry fields the scale writes override its restore-patch in the render"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  storageSize: 50Gi\n  logLevel: Debug\n  highAvailability:\n    enabled: true\n    readReplicas: 1\n' \
+  > "$REPO/helm_artifacts/instance/tpg-instance/restore-patch/restored-db-restore-aaaaa.yaml"
+render_pushed() {  # render_pushed INSTANCE -> the Postgres spec (JSON) the chart renders from the pushed clusters/fleet.yaml
+  local r="$TMP/render-repo"; rm -rf "$r"; mkdir -p "$r/clusters"; cp -r "$REPO/helm_artifacts" "$r/"; cp -r "$ROOT/clusters/_template" "$r/clusters/"; cp "$TMP/pushed.yaml" "$r/clusters/fleet.yaml"
+  ( source "$TMP/prelude.sh"; instance_render "$r" c1 "$1" | yq -o=json -I=0 'select(.kind == "Postgres") | .spec' )
+}
+inventory c1:restored-db
+plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_REPLICAS=3 P_PUSH_MODE=direct
+[[ "$(pushed '.clusters.c1.instances["restored-db"].instance.highAvailability.readReplicas')" == 3 && "$(pushed '.clusters.c1.instances["restored-db"].instance.restored')" == true \
+   && "$(pushed '.clusters.c1.instances["restored-db"].restorePatch.current')" == restore-patch/restored-db-restore-aaaaa.yaml ]] \
+  && ok "scaling a restored instance writes instance.highAvailability like any other and leaves restored and restorePatch alone" || bad "restored scale entry" "$OUT"
+if [[ "$HAVE_HELM" == true ]]; then
+  RS="$(render_pushed restored-db)"
+  [[ "$(jq -r '.highAvailability.readReplicas' <<<"$RS")" == 3 && "$(jq -r '.logLevel' <<<"$RS")" == Debug && "$(jq -r '.storageSize' <<<"$RS")" == 50Gi && "$(jq 'has("walStorageSize")' <<<"$RS")" == false ]] \
+    && ok "…and the chart renders the 3 read replicas over the restore-patch's 1, the rest of the restore-patch as it is (no chart default filled in)" || bad "restored scale render" "$RS"
+  plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_REPLICAS=0 P_PUSH_MODE=direct
+  RS="$(render_pushed restored-db)"
+  [[ "$(pushed '.clusters.c1.instances["restored-db"].instance.highAvailability.enabled')" == false && "$(jq 'has("highAvailability")' <<<"$RS")" == false && "$(jq -r '.logLevel' <<<"$RS")" == Debug ]] \
+    && ok "…scaling to a single node renders no highAvailability block over the restore-patch's HA" || bad "restored scale to 0" "$RS"
+else
+  echo "SKIP the chart render of the restored scale: helm not installed"
+fi
 
 echo
 echo "tests/scale: ${PASS} passed, ${FAIL} failed"

@@ -16,14 +16,16 @@ What goes here, and what does not:
   the namespace come from the pair. The fragment is checked like a Postgres patch document, field by
   field against the CRD (`patchcheck.py spec`), and it is the spec of the restored instance
   (`postgresrestore.spec.targetInstance.spec`, as it is, not merged over a chart render). Give a complete
-  instance spec: a field the file leaves out comes from the chart (the entry) when Argo CD renders the instance.
+  instance spec: Argo CD renders the restored instance from this spec (as its restore-patch), so a field
+  the file leaves out stays unset, the chart does not fill it in from its defaults (only the fleet's
+  `backupLocation` and `imagePullSecret` are always rendered).
 - Only tpg-restore reads this folder, and it accepts a spec file for a **new** target and for an
   **in-place** restore; any other existing target refuses the key (`TARGET_SPEC_FILE_REFUSED`).
 - **Not** a patch or an overlay: nothing in the chart reads these files (`.Files.Get` is never given a
   path in this folder, and `.helmignore` keeps the folder out of the packaged chart), no instance entry
   of `clusters/fleet.yaml` lists them, and editing a file changes no running instance. What a run stores
   from a spec file is a copy in `../restore-patch/` (the instance's **restore-patch**, which the chart does
-  read and applies last, see its README). For a running instance use tpg-patch (`../patches/`); for the
+  read and renders the restored instance from, see its README). For a running instance use tpg-patch (`../patches/`); for the
   first render of a new instance use the overlays of tpg-day0 and tpg-create-instance (`../overlays/`).
 - Add files through a reviewed commit, with a name that says what they are for (for example
   `orders-db-dr.yaml`). Only `.yaml` and `.yml` files of this folder are accepted by a run: no `..`, no

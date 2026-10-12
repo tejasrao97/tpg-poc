@@ -1,7 +1,7 @@
 # Example restore-patch file in the stored form, referenced by clusters/fleet.example.yaml. tpg-restore
-# writes these (<instance>-restore-<uid>.yaml) from the spec file of a pair: one kind: Postgres
-# document, the spec exactly as the PostgresRestore got it (spec.targetInstance.spec), no metadata.
-# The chart merges it into the Postgres spec after the values, the overlay and the patch.
+# writes these (<instance>-restore-<uid>.yaml): one kind: Postgres document, the spec of the restored
+# Postgres (the spec file of the pair, or the spec read from the cluster after the restore), no metadata.
+# The chart renders the Postgres of the restored instance from it.
 apiVersion: sql.tanzu.vmware.com/v1
 kind: Postgres
 spec:

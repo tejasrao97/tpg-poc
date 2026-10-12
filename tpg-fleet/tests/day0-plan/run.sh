@@ -849,6 +849,62 @@ rm -rf "$TMP/work"
 PRECHECK_MODE=create S_OPERATOR=ours S_TRACKED=yes S_APPRES=yes S_SECRETS="team-db/regsecret=foreign" bash "$TMP/day0-precheck.sh" wf c1 > "$TMP/out" 2>&1 || true
 rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT" | grep -q . && ok "23 review: the create-instance mode blocks as well" || bad "create mode" "$(cat "$TMP/records")"
 
+# ---- Round 23 (tpg-restore, second revision): a restored instance (instance.restored true) is BLOCKED INSTANCE_RESTORED, that
+# instance only: tpg-day0 neither writes its entry nor deploys it; the other instances of the run go ahead
+reset
+yq -i '.clusters.c1.instances["restored-db"] = {"instance": {"postgresVersion": "postgres-17.6", "restored": true, "storageSize": "50Gi", "highAvailability": {"enabled": false, "readReplicas": 0}},
+  "restorePatch": {"current": "restore-patch/restored-db-restore-aaaaa.yaml", "mode": "base"}}' "$TMP/fleet.yaml"
+RESTORED_BEFORE="$(yq -o=json -I=0 '.clusters.c1.instances["restored-db"]' "$TMP/fleet.yaml")"
+restored_checks() {  # restored_checks LABEL: restored-db is BLOCKED and untouched in the plan, orders-db is planned, nothing blocks the cluster
+  local l="$1"
+  rec "result.c1.restored-db|BLOCKED|INSTANCE_RESTORED" | grep -q "tpg-scale-instance" && rec "result.c1.restored-db|BLOCKED|INSTANCE_RESTORED" | grep -q "tpg-upgrade component=postgres" \
+    && rec "result.c1.restored-db|BLOCKED|INSTANCE_RESTORED" | grep -q "tpg-patch" \
+    && ok "23 restored ($l): restored-db is BLOCKED INSTANCE_RESTORED and the detail names tpg-scale-instance, tpg-upgrade and tpg-patch" || bad "restored $l blocked" "$(cat "$TMP/records") $(cat "$TMP/out")"
+  [[ "$(jq -c '.clusters.c1.instances["restored-db"]' /tmp/fleet.json)" == "$RESTORED_BEFORE" ]] \
+    && ok "23 restored ($l): its entry is exactly what it was in the plan" || bad "restored $l entry" "$(jq -c '.clusters.c1.instances["restored-db"]' /tmp/fleet.json)"
+  jq -e '.clusters.c1.instances["orders-db"].instance.storageSize == "80Gi"' /tmp/fleet.json >/dev/null && ! rec "block.c1" | grep -q . && ! rec "FAILED" | grep -q . \
+    && ok "23 restored ($l): the other instance is planned (storageSize 80Gi) and the cluster is not blocked" || bad "restored $l others" "$(cat "$TMP/records") $(jq -c '.clusters.c1.instances' /tmp/fleet.json)"
+}
+S_OPERATOR=ours S_RUNNING="orders-db restored-db" env P_CLUSTERS='[c1]' P_INSTANCES='[orders-db, restored-db]' P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 \
+  P_READ_REPLICAS=1 P_STORAGE_SIZE=80Gi bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+restored_checks "instances input"
+reset
+yq -i '.clusters.c1.instances["restored-db"] = {"instance": {"postgresVersion": "postgres-17.6", "restored": true, "storageSize": "50Gi", "highAvailability": {"enabled": false, "readReplicas": 0}},
+  "restorePatch": {"current": "restore-patch/restored-db-restore-aaaaa.yaml", "mode": "base"}}' "$TMP/fleet.yaml"
+S_OPERATOR=ours S_RUNNING="orders-db restored-db" env P_CLUSTERS='[c1]' P_OPERATOR_VERSION=v4.5.0 P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, storageSize: 80Gi}
+    restored-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 2, storageSize: 90Gi}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+restored_checks "clusterMap"
+# the run goes on to the commit: the restored entry is not in what is written, the other one is; a dry run pushes nothing
+cp /tmp/fleet.json "$TMP/planned.json"; cp /tmp/fleet-base.json "$TMP/base.json"
+: > "$TMP/records"; echo 'precheck.c1|PASSED||' >> "$TMP/records"; rm -f "$TMP/pushed.yaml"
+bash "$TMP/fleet-commit.sh" wf "$(cat "$TMP/planned.json")" "$(cat "$TMP/base.json")" > "$TMP/out" 2>&1 || true
+[[ "$(yq -o=json -I=0 '.clusters.c1.instances["restored-db"]' "$TMP/pushed.yaml")" == "$RESTORED_BEFORE" && "$(yq '.clusters.c1.instances["orders-db"].instance.storageSize' "$TMP/pushed.yaml")" == 80Gi ]] \
+  && ok "23 restored: what the commit writes leaves the restored entry as it was and carries the other instance's change" || bad "restored commit" "$(cat "$TMP/out") $(cat "$TMP/pushed.yaml" 2>/dev/null)"
+: > "$TMP/records"; echo 'precheck.c1|PASSED||' >> "$TMP/records"; rm -f "$TMP/pushed.yaml"
+P_DRY_RUN=true bash "$TMP/fleet-commit.sh" wf "$(cat "$TMP/planned.json")" "$(cat "$TMP/base.json")" > "$TMP/out" 2>&1 || true
+[[ ! -f "$TMP/pushed.yaml" ]] && rec "result.git|SUCCEEDED|DRY_RUN" | grep -q . && ok "23 restored: a dry run records the plan and pushes nothing" || bad "restored dry run" "$(cat "$TMP/records")"
+# the deployment (discover feeds day0-deploy) leaves it out; the gate fails the run
+: > "$TMP/records"
+S_OPERATOR=ours S_RUNNING="orders-db restored-db" env P_CLUSTERS='[c1]' P_INSTANCES='[orders-db, restored-db]' P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 \
+  P_READ_REPLICAS=1 P_STORAGE_SIZE=80Gi bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+RC=0; P_FILTER=none bash "$TMP/discover.sh" wf c1 "$(cat /tmp/fleet.json)" > "$TMP/out" 2>&1 || RC=$?
+[[ "$RC" -eq 0 ]] && jq -e '[.[0].instances[].name] == ["orders-db"]' /tmp/inventory.json >/dev/null && grep -q "c1/restored-db: restored by tpg-restore, blocked in the plan, left out" "$TMP/out" \
+  && ok "23 restored: discover leaves it out of the inventory, so it is not synced or verified" || bad "restored discover" "$(cat /tmp/inventory.json) $(cat "$TMP/out")"
+bash "$TMP/blocked-gate.sh" wf > "$TMP/out" 2>&1 && bad "restored gate" "$(cat "$TMP/out")" || { grep -q "c1.restored-db INSTANCE_RESTORED" "$TMP/out" && ok "23 restored: the gate fails the run and names the instance and the reason" || bad "restored gate text" "$(cat "$TMP/out")"; }
+# tpg-create-instance does not write a restored instance's entry either
+reset
+yq -i '.clusters.c1.instances["restored-db"] = {"instance": {"postgresVersion": "postgres-17.6", "restored": true, "storageSize": "50Gi"}, "restorePatch": {"current": "restore-patch/restored-db-restore-aaaaa.yaml", "mode": "base"}}' "$TMP/fleet.yaml"
+S_OPERATOR=ours S_RUNNING="orders-db restored-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    restored-db: {postgresVersion: "17.6", highAvailability: false, storageSize: 90Gi}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "result.c1.restored-db|BLOCKED|INSTANCE_RESTORED" | grep -q "tpg-create-instance neither writes its entry" \
+  && [[ "$(jq -r '.clusters.c1.instances["restored-db"].instance.storageSize' /tmp/fleet.json)" == 50Gi ]] \
+  && ok "23 restored: tpg-create-instance blocks it as well and leaves the entry (storageSize 50Gi) alone" || bad "restored create" "$(cat "$TMP/records") $(cat "$TMP/out")"
+
 echo
 echo "day0-plan: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

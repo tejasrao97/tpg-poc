@@ -92,11 +92,22 @@ for ff in clusters/fleet.yaml clusters/fleet.example.yaml; do
         if [[ "$k" == postgres ]]; then patch_file_check postgres "helm_artifacts/instance/tpg-instance/$f"; else patch_file_check values "helm_artifacts/instance/tpg-instance/$f"; fi
       done
       done
-      # Round 23 (tpg-restore): the restore-patch of the instance, {current, previous: {path, commit}}; the chart applies current
-      if C="$c" I="$i" yq -e '.clusters[strenv(C)].instances[strenv(I)].restorePatch // {} | keys | any_c(. != "current" and . != "previous")' "$ff" >/dev/null 2>&1; then
-        echo "${ff}: ${c}/${i} restorePatch holds more than current and previous" >&2
+      # Round 23 (tpg-restore): instance.restored marks an instance tpg-restore restored (workflow-owned); its restorePatch is
+      # {current, previous: {path, commit}, mode: base | over, postgresPatch}; the chart renders the Postgres from current. postgresPatch is a record
+      # of the postgres patch file current at an in-place restore, compared by name only (that file may be gone since): not checked
+      if C="$c" I="$i" yq -e '.clusters[strenv(C)].instances[strenv(I)].restorePatch // {} | keys | any_c(. != "current" and . != "previous" and . != "mode" and . != "postgresPatch")' "$ff" >/dev/null 2>&1; then
+        echo "${ff}: ${c}/${i} restorePatch holds more than current, previous, mode and postgresPatch" >&2
         exit 1
       fi
+      rmode="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].restorePatch.mode // "base"' "$ff")"
+      [[ "$rmode" == base || "$rmode" == over ]] \
+        || { echo "${ff}: ${c}/${i} restorePatch.mode is ${rmode}: base or over" >&2; exit 1; }
+      rflag="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.restored // false' "$ff")"
+      rcur="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].restorePatch.current // ""' "$ff")"
+      [[ "$rflag" == true && -z "$rcur" ]] \
+        && { echo "${ff}: ${c}/${i} has instance.restored: true but no restorePatch.current: the chart renders a restored instance from its restore-patch file" >&2; exit 1; }
+      [[ "$rflag" != true && -n "$rcur" ]] \
+        && { echo "${ff}: ${c}/${i} has restorePatch.current ${rcur} but not instance.restored: true (tpg-restore writes both; the chart ignores the restore-patch of an instance that is not marked restored)" >&2; exit 1; }
       for rp in $(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].restorePatch // {} | (.current, .previous.path) | select(. != null and . != "")' "$ff"); do
         [[ -f "helm_artifacts/instance/tpg-instance/$rp" ]] \
           || { echo "${ff}: ${c}/${i} restorePatch names helm_artifacts/instance/tpg-instance/${rp}, which does not exist" >&2; exit 1; }
@@ -226,11 +237,13 @@ got="$(helm template billing-db helm_artifacts/instance/tpg-instance -f clusters
   -f clusters/fleet.example.yaml -f "$OUT/values/aks-tpg-poc-01-billing-db.yaml" --namespace finance \
   | yq 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number')"
 [[ "$got" == "4" ]] || { echo "values overlay not merged: fullRetention is '${got}', expected 4" >&2; exit 1; }
-# the restore-patch (tpg-restore) is applied last and only its current file
+# a restored instance (tpg-restore) is rendered from its current restore-patch file: its fields, the fleet's backupLocation and imagePullSecret and
+# nothing of the chart defaults; the previous file is not applied; the entry's fields equal to the file's change nothing
 got="$(helm template orders-db-dr helm_artifacts/instance/tpg-instance -f clusters/_template/cluster.yaml -f clusters/_template/instance.yaml \
   -f clusters/fleet.example.yaml -f "$OUT/values/aks-tpg-poc-02-orders-db-dr.yaml" --namespace orders-dr \
-  | yq 'select(.kind == "Postgres") | .spec.storageSize + " " + .spec.logLevel')"
-[[ "$got" == "100Gi Debug" ]] || { echo "restore-patch not merged: storageSize and logLevel are '${got}', expected '100Gi Debug' (the current file wins over the entry's 50Gi; the previous file is not applied)" >&2; exit 1; }
+  | yq 'select(.kind == "Postgres") | .spec | (keys | join(",")) + " " + .storageSize + " " + .logLevel')"
+[[ "$got" == "backupLocation,imagePullSecret,logLevel,postgresVersion,resources,storageSize 100Gi Debug" ]] \
+  || { echo "restore-patch not rendered: the spec of the restored example is '${got}', expected 'backupLocation,imagePullSecret,logLevel,postgresVersion,resources,storageSize 100Gi Debug' (the current file is the base, no chart default is filled in, the previous file is not applied)" >&2; exit 1; }
 echo "ok postgres and values patch and overlay files and the restore-patch (the current files of clusters/fleet.example.yaml)"
 
 echo "== chart: enableSSL of the backup location"

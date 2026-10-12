@@ -2317,11 +2317,13 @@ patch_set_current() {
     | (select(strenv(OLD) != \"\") | ${path}.previous) = {\"path\": strenv(OLD), \"commit\": strenv(SHA)}" "$repo/$FLEET_REL"
 }
 
-# ---- restore-patch (Round 23, tpg-restore): the spec file of a restored instance, stored in the chart and
-# recorded as clusters.<c>.instances.<i>.restorePatch {current, previous: {path, commit}} (chart-relative paths,
-# no kind level, no group). The chart applies current last (overlay, patch, restore-patch). The file that falls
-# out of the two-generation window is deleted (its commit stays in previous.commit and in Git): the folder holds
-# the recorded files only, which scripts/validate.sh checks.
+# ---- restore-patch (Round 23, tpg-restore): the spec of a restored instance (the spec file of the pair, or the spec read
+# from the cluster after the restore), stored in the chart and recorded as clusters.<c>.instances.<i>.restorePatch
+# {current, previous: {path, commit}, mode: base | over, postgresPatch} (chart-relative paths, no kind level, no group),
+# with instance.restored: true in the same entry. The chart renders the Postgres of such an instance from the current
+# file (templates/_helpers.tpl tpg.restoredPostgres: mode base = the file is the base, mode over = the normal render
+# with the file over it). The file that falls out of the two-generation window is deleted (its commit stays in
+# previous.commit and in Git): the folder holds the recorded files only, which scripts/validate.sh checks.
 RESTORE_PATCH_DIR="helm_artifacts/instance/tpg-instance/restore-patch"
 restore_patch_store() {
   # restore_patch_store REPO INSTANCE SPEC_JSON -> the chart-relative path restore-patch/<instance>-restore-<uid>.yaml
@@ -2342,15 +2344,68 @@ restore_patch_previous() {  # restore_patch_previous REPO CLUSTER INSTANCE -> re
   C="$2" I="$3" yq -r '.clusters[strenv(C)].instances[strenv(I)].restorePatch.previous.path // ""' "$1/$FLEET_REL" 2>/dev/null
 }
 restore_patch_set() {
-  # restore_patch_set REPO CLUSTER INSTANCE NEW: NEW (a path from restore_patch_store, or empty to retire) becomes the
-  # current restore-patch; the former current becomes previous (patch_set_current) and the file that was previous
-  # is deleted
+  # restore_patch_set REPO CLUSTER INSTANCE NEW: NEW (a path from restore_patch_store) becomes the current restore-patch;
+  # the former current becomes previous (patch_set_current) and the file that was previous is deleted
   local repo="$1" gone
   gone="$(restore_patch_previous "$repo" "$2" "$3")"
   patch_set_current "$repo" "$2" "$3" restorePatch "$4" || return 1
   if [[ -n "$gone" && "$gone" != "$(restore_patch_previous "$repo" "$2" "$3")" && "$gone" != "$4" ]]; then
     rm -f "${repo:?}/helm_artifacts/instance/tpg-instance/${gone:?}"
   fi
+}
+restore_seed_json() {
+  # restore_seed_json MODE SPEC_JSON -> {"set": {entry instance keys}, "del": [keys to remove first]}: the fleet-equivalent fields
+  # of the restore-patch's spec as instance: keys of the entry (templates/_helpers.tpl tpg.restoredEntrySpec reads them back):
+  #   postgresVersion, storageClassName, storageSize, walStorageSize, resources  <- the same spec fields
+  #   highAvailability {enabled, readReplicas}   <- spec.highAvailability (absent: false, 0: a single node, explicit in the entry)
+  #   exposure, readOnlyExposure                 <- spec.serviceType / readOnlyServiceType (LoadBalancer + the internal
+  #                                                 annotation "true": internalLoadBalancer; LoadBalancer: loadBalancer;
+  #                                                 else clusterIP)
+  #   serviceAnnotations, readOnlyServiceAnnotations  <- the annotations of the spec verbatim (when not empty)
+  # mode base: the spec is the whole truth, so every key above that the spec lacks is removed from the entry (no value of the
+  # source's entry or of an earlier deployment survives); mode over: only the keys the spec sets are written. A serviceType
+  # the exposure keys cannot say (NodePort) leaves all service keys out (the chart then compares none of them).
+  jq -c --arg mode "$1" '
+    def exp($t; $a): if $t == "LoadBalancer" then (if (($a // {})["service.beta.kubernetes.io/azure-load-balancer-internal"] // "") == "true" then "internalLoadBalancer" else "loadBalancer" end) else "clusterIP" end;
+    . as $s
+    | ($mode == "base") as $base
+    | ["postgresVersion", "storageClassName", "storageSize", "walStorageSize", "resources", "highAvailability",
+       "exposure", "readOnlyExposure", "serviceAnnotations", "readOnlyServiceAnnotations"] as $keys
+    | (((($s.serviceType // "ClusterIP") | IN("ClusterIP", "LoadBalancer")) and (($s.readOnlyServiceType // "ClusterIP") | IN("ClusterIP", "LoadBalancer")))) as $svc_ok
+    | ($s.serviceType != null or $s.readOnlyServiceType != null or $s.serviceAnnotations != null or $s.readOnlyServiceAnnotations != null) as $svc_set
+    | ( {}
+        + (if ($s.postgresVersion.name // "") != "" then {postgresVersion: $s.postgresVersion.name} else {} end)
+        + (["storageClassName", "storageSize", "walStorageSize"] | map(select($s[.] != null) | {(.): $s[.]}) | add // {})
+        + (if ($s.resources // {}) != {} then {resources: $s.resources} else {} end)
+        + (if $base or $s.highAvailability != null
+             then {highAvailability: {enabled: ($s.highAvailability.enabled // false), readReplicas: ($s.highAvailability.readReplicas // 0)}} else {} end)
+        + (if $svc_ok and ($base or $svc_set)
+             then {exposure: exp($s.serviceType; $s.serviceAnnotations), readOnlyExposure: exp($s.readOnlyServiceType; $s.readOnlyServiceAnnotations)}
+               + (if ($s.serviceAnnotations // {}) != {} then {serviceAnnotations: $s.serviceAnnotations} else {} end)
+               + (if ($s.readOnlyServiceAnnotations // {}) != {} then {readOnlyServiceAnnotations: $s.readOnlyServiceAnnotations} else {} end)
+             else {} end) ) as $set
+    | {set: $set, del: ((if $base then $keys else [] end) + ($set | keys) | unique)}' <<<"$2"
+}
+restore_patch_record() {
+  # restore_patch_record REPO CLUSTER INSTANCE NEW MODE SPEC_JSON: NEW (a path from restore_patch_store) becomes the current
+  # restore-patch of the entry in clusters/fleet.yaml (the former current becomes previous), with restorePatch.mode MODE
+  # (base | over), instance.restored: true and the fleet-equivalent fields of the spec written into instance: (restore_seed_json).
+  # For mode over restorePatch.postgresPatch records the postgres patch file that is current now: the chart applies that one under
+  # the restore-patch and a file tpg-patch sets later over it. A re-restore replaces all of it.
+  local repo="$1" c="$2" i="$3" new="$4" mode="$5" spec="$6" f="$1/$FLEET_REL" pp="" seed
+  restore_patch_set "$repo" "$c" "$i" "$new" || return 1
+  [[ "$mode" != over ]] || pp="$(patch_ref "$f" "$c" "$i" postgres patches 2>/dev/null || true)"
+  seed="$(restore_seed_json "$mode" "$spec")" || return 1
+  # shellcheck disable=SC2016  # yq variables, not shell
+  C="$c" I="$i" M="$mode" PP="$pp" S="$seed" yq -i '
+    (strenv(S) | from_json) as $s
+    | .clusters[strenv(C)].instances[strenv(I)].instance =
+        (((.clusters[strenv(C)].instances[strenv(I)].instance // {}) | with_entries(select(.key as $k | ($s.del | contains([$k])) | not))) * $s.set)
+    | .clusters[strenv(C)].instances[strenv(I)].instance.restored = true
+    | .clusters[strenv(C)].instances[strenv(I)].restorePatch.mode = strenv(M)
+    | (select(strenv(PP) != "") | .clusters[strenv(C)].instances[strenv(I)].restorePatch.postgresPatch) = strenv(PP)
+    | (select(strenv(PP) == "") | .clusters[strenv(C)].instances[strenv(I)].restorePatch) |= del(.postgresPatch)' "$f" || return 1
+  fleet_yaml_style "$f"   # the merge above wrote JSON-style maps: block YAML as the rest of the file
 }
 
 operator_effective_rel() { printf '%s/%s.yaml' "$PATCH_EFFECTIVE_DIR" "$1"; }   # CLUSTER (the current patch_group)
@@ -2490,7 +2545,7 @@ patch_values_errors() {
   # patch_values_errors FILE NAME CLUSTER INSTANCE MODE -> one error per line: the
   # chart values a postgresValues patch may not set
   local f="$1" n="$2" k
-  for k in .instance.name .instance.postgresVersion .instance.highAvailability .instance.serviceType .instance.disableInitialBackup .backup.repoPath .cluster .patches .overlays .restorePatch .valuesOverride; do
+  for k in .instance.name .instance.postgresVersion .instance.highAvailability .instance.serviceType .instance.disableInitialBackup .backup.repoPath .cluster .patches .overlays .restorePatch .instance.restored .valuesOverride; do
     yq -e "${k} == null" "$f" >/dev/null 2>&1 || echo "${n}: ${k#.} cannot be set by a values ${PATCH_NOUN}$( [[ "$5" == create ]] && printf ' (it comes from the inputs; instance.serviceType is replaced by instance.exposure)')"
   done
   for k in .backup.enableSSL .backup.caBundle; do
@@ -3034,7 +3089,7 @@ instance_render() {
   # instance from it, Round 14), then the instance values without patches
   local vals
   vals="$(mktemp)"
-  instance_values "$1" "$2" "$3" | yq 'del(.patches) | del(.overlays)' > "$vals"
+  instance_values "$1" "$2" "$3" | yq 'del(.patches) | del(.overlays) | del(.restorePatch)' > "$vals"
   helm template "$3" "$1/helm_artifacts/instance/tpg-instance" --namespace "$(instance_ns_in "$1" "$2" "$3")" \
     -f "$1/$TEMPLATE_CLUSTER_REL" -f "$1/$TEMPLATE_INSTANCE_REL" -f "$1/$FLEET_REL" -f "$vals"
   local rc=$?

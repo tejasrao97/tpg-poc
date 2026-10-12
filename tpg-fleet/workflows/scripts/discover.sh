@@ -126,6 +126,11 @@ for c in ${wanted_list[@]+"${wanted_list[@]}"}; do
   fi
   instances="[]"
   for i in $chosen; do
+    if [[ "$(plan_block "result.${c}.${i}")" == INSTANCE_RESTORED\|* ]]; then
+      # restored by tpg-restore: the plan blocked it (INSTANCE_RESTORED) and the deployment leaves it alone
+      log "${c}/${i}: restored by tpg-restore, blocked in the plan, left out"
+      continue
+    fi
     if [[ -n "${gone_rerun["$c/$i"]:-}" ]]; then
       # nothing of it is declared any more: the namespace of the audit copy, no deployment, no schedule
       obj="$(jq -cn --arg n "$i" --arg ns "$(instance_ns_known "$REPO" "$c" "$i")" \

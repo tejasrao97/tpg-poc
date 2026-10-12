@@ -122,18 +122,6 @@ patch_repo_check() {
   rm -rf "${tmp:?}"
 }
 
-patch_retire_restore() {
-  # patch_retire_restore CLUSTER INSTANCE: a patch file of tpg-patch replaces the restore-patch tpg-restore stored for the
-  # instance (Round 23): restorePatch.current moves to restorePatch.previous in the same commit, so the chart stops applying it
-  local c="$1" i="$2" cur
-  cur="$(patch_ref "$REPO/$FLEET_REL" "$c" "$i" restorePatch 2>/dev/null || true)"
-  [[ -n "$cur" ]] || return 0
-  restore_patch_set "$REPO" "$c" "$i" "" || { C_ERRS+=("${c}/${i}: the restore-patch ${cur} could not be retired in ${FLEET_REL}"); return 0; }
-  log "${c}/${i}: the restore-patch ${cur} is retired (restorePatch.previous): the chart no longer applies it"
-  record_entry "warning.${c}.${i}.RESTORE_PATCH_RETIRED" WARNING RESTORE_PATCH_RETIRED \
-    "this patch replaces the restore-patch ${PATCH_CHART_PREFIX}${cur} that tpg-restore stored for ${i}: the chart renders the entry's values and this patch from now on, no longer the spec file the instance was restored with (restorePatch.previous keeps it)"
-}
-
 patch_prepare() {  # patch_prepare CLUSTER TARGETS (use_cluster first)
   local c="$1" t="$2" p m stored i n cl rc cur
   PREP_PLAN='{"instances":[],"operator":false}'
@@ -191,7 +179,6 @@ patch_prepare() {  # patch_prepare CLUSTER TARGETS (use_cluster first)
         fi
         [[ -n "$stored" ]] || log "${c}/${i}: no postgres patch file any more (every document cleared)"
         patch_set_current "$REPO" "$c" "$i" postgres "$stored"
-        [[ -z "$stored" ]] || patch_retire_restore "$c" "$i"
         continue
       fi
       p="$(jq -r --arg i "$i" '.instances[] | select(.name == $i) | .postgresValues.path' <<<"$t")"
@@ -212,7 +199,6 @@ patch_prepare() {  # patch_prepare CLUSTER TARGETS (use_cluster first)
           | del(.clusters[strenv(C)].instances[strenv(I)].valuesOverride | select(length == 0))' "$REPO/$FLEET_REL"
       fi
       patch_set_current "$REPO" "$c" "$i" postgresValues "$stored"
-      patch_retire_restore "$c" "$i"
     done
     # ---- the CA bundle of an enableSSL instance (Round 15, D86): a file, a Vault secret
     if jq -e --arg i "$i" '.instances[] | select(.name == $i) | .ca == true' <<<"$t" >/dev/null; then

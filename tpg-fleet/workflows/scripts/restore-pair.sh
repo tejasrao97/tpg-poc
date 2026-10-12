@@ -34,15 +34,26 @@
 #    spec.targetInstance.spec as it is, no merge over a chart render. Allowed for a new target and for an in-place restore; any
 #    other existing target refuses it (TARGET_SPEC_FILE_REFUSED). An existing target needs confirm = its name (CONFIRMATION_MISMATCH).
 #    A new target writes its entry to clusters/fleet.yaml (git_commit_push: pushMode): a copy of the source's entry
-#    (disableInitialBackup, backup.repoPath, FerretDB and restorePatch dropped, instance.namespace set), or a skeleton
-#    (namespace, the spec file's version) when the source is not there; the owner of the shared Secrets is decided like tpg-day0
-#    (exactly one per namespace). With a spec file the entry also records it as restorePatch.current: the spec file is stored as
-#    restore-patch/<instance>-restore-<uid>.yaml (one kind: Postgres document, apiVersion, kind and the spec as given) which the chart
-#    applies last (overlay, patch, restore-patch); for a new target in the same commit as the entry, for an existing entry (in place,
-#    or declared in fleet.yaml but not deployed) in a commit of its own after the restore succeeded (the former current becomes
-#    previous). Without a spec file: a new target gets the copied entry and the PostgresRestore only spec.targetInstance.name (the
-#    operator creates the instance and fills in its spec: LAB ITEM), an in-place restore only the name and writes nothing to
-#    fleet.yaml. The shared objects (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage) are only ever applied
+#    (disableInitialBackup, backup.repoPath, FerretDB, restorePatch, instance.restored and the Postgres patch and overlay files of
+#    the source dropped, instance.namespace set), or a skeleton (namespace, the spec file's version) when the source is not there;
+#    the owner of the shared Secrets is decided like tpg-day0 (exactly one per namespace).
+#    The restore-patch (Round 23, second revision): the spec the restored Postgres has is stored as
+#    restore-patch/<instance>-restore-<uid>.yaml (one kind: Postgres document, apiVersion, kind and spec) and recorded in the entry as
+#    restorePatch.current (the former current becomes previous and is no longer applied) with restorePatch.mode, together with
+#    instance.restored: true and the fleet-equivalent fields of the spec written into instance: (lib.sh restore_patch_record), so Argo CD
+#    renders the Postgres the restore made (templates/_helpers.tpl tpg.restoredPostgres):
+#      with a spec file   the spec file's spec. A new target (or an instance declared in fleet.yaml but not deployed): mode base; for a
+#                         new entry in the same commit as the entry, for a declared one in a commit of its own after the restore
+#                         succeeded. In place: mode over (the operator merged the file into the existing Postgres), in a commit of its
+#                         own after the restore succeeded
+#      without one        after the restore succeeded and the instance runs, the spec of the Postgres is read from the cluster
+#                         (the .spec only: status, metadata, managed fields and the like are not part of it; null values are dropped;
+#                         nothing else is stripped, the live spec is the truth) and stored the same way, mode base, in a commit of its own
+#                         (a failure to read or store it is the warning RESTORE_PATCH_NOT_RECORDED; a new target's adoption sync is then
+#                         left out, since the chart would render the copied entry over the restored Postgres)
+#    spec.targetInstance.spec of the PostgresRestore is the spec file's spec or absent (the name only: the operator creates the instance
+#    and fills in its spec: LAB ITEM how). An instance restored in place that has no entry in fleet.yaml is not managed by Argo CD: nothing is
+#    recorded. The shared objects (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage) are only ever applied
 #    by the Argo CD Application of their owner: a selective sync of those objects (and of the backup location of the new instance)
 #    before the restore, the whole Application after it (adoption).
 #  6 Another namespace or cluster: the source PostgresBackupLocation is copied into the target namespace
@@ -77,6 +88,7 @@
 #   warnings (report section Warnings): SRC_LOCATION_DIFFERS SRC_STANZA_DIFFERS CONFIRMATION_MISSING
 #   RECOVERY_WINDOW_UNVERIFIED BACKUP_LABEL_UNVERIFIED MATRIX_UNVERIFIED OPERATION_IN_PROGRESS ADOPTION_NOT_SYNCED
 #   POST_RESTORE_BACKUP_FAILED (the restore succeeded and the instance runs: the pair stays SUCCEEDED) RESTORE_PATCH_NOT_RECORDED
+#   SPEC_LOCATION_REPLACED
 #   SOURCE_LOCATION_NOT_REMOVED
 WF="$1"
 # shellcheck source=workflows/scripts/lib.sh
@@ -382,11 +394,13 @@ else
   fi
 fi
 
-# stage_restore_patch: the spec file as a restore-patch in the clone $REPO (restore-patch/<instance>-restore-<uid>.yaml) and
-# recorded as restorePatch.current in the instance's entry of clusters/fleet.yaml; the former current becomes previous
+# stage_restore_patch SPEC_JSON MODE: SPEC_JSON (the spec file's spec, or the spec read from the cluster) as a restore-patch in the clone $REPO
+# (restore-patch/<instance>-restore-<uid>.yaml), recorded as restorePatch.current of the instance's entry of clusters/fleet.yaml (the former
+# current becomes previous) with restorePatch.mode MODE (base | over), instance.restored: true and the fleet-equivalent fields of the spec
+# written into the entry (lib.sh restore_patch_record)
 RP_PATH=""
 stage_restore_patch() {
-  RP_PATH="$(restore_patch_store "$REPO" "$TI" "$SPEC_JSON")" && restore_patch_set "$REPO" "$TC" "$TI" "$RP_PATH"
+  RP_PATH="$(restore_patch_store "$REPO" "$TI" "$1")" && restore_patch_record "$REPO" "$TC" "$TI" "$RP_PATH" "$2" "$1"
 }
 
 # prepare_entry: write the entry of the new target to the clone in $REPO (a copy of the source's entry, or a skeleton
@@ -400,13 +414,20 @@ prepare_entry() {
     # D70), but not FerretDB (D71): a restored copy does not start serving MongoDB clients on its own (turn it on with a
     # tpg-patch values file). A copied values patch that turns FerretDB on is overridden with valuesOverride. It gets its own
     # pgBackRest repository path (the chart default /<namespace>/<instance>): the copy must not keep the source's pinned
-    # backup.repoPath, and no initial-backup skip of the source.
+    # backup.repoPath, and no initial-backup skip of the source. The Postgres patch and overlay files of the source changed the
+    # source's Postgres, not the restored one (its spec is the restore-patch): they are not copied. Nothing of the source's
+    # restore (instance.restored, restorePatch) is copied either.
     SC_="$SC" TC_="$TC" SI_="$SI" TI_="$TI" NS_="$TNS" yq -i '
       .clusters[strenv(TC_)].instances[strenv(TI_)] = .clusters[strenv(SC_)].instances[strenv(SI_)]
       | del(.clusters[strenv(TC_)].instances[strenv(TI_)].ferret)
       | del(.clusters[strenv(TC_)].instances[strenv(TI_)].backup.repoPath)
       | del(.clusters[strenv(TC_)].instances[strenv(TI_)].instance.disableInitialBackup)
       | del(.clusters[strenv(TC_)].instances[strenv(TI_)].restorePatch)
+      | del(.clusters[strenv(TC_)].instances[strenv(TI_)].instance.restored)
+      | del(.clusters[strenv(TC_)].instances[strenv(TI_)].patches.postgres)
+      | del(.clusters[strenv(TC_)].instances[strenv(TI_)].overlays.postgres)
+      | del(.clusters[strenv(TC_)].instances[strenv(TI_)].patches | select(length == 0))
+      | del(.clusters[strenv(TC_)].instances[strenv(TI_)].overlays | select(length == 0))
       | .clusters[strenv(TC_)].instances[strenv(TI_)].instance.namespace = strenv(NS_)
       | del(.clusters[strenv(TC_)].instances[strenv(TI_)].instance.sharedSecretsOwner)' "$f" || return 1
     if [[ "$(instance_effective "$REPO" "$TC" "$TI" '.ferret.enabled' false)" == "true" ]]; then
@@ -429,8 +450,8 @@ prepare_entry() {
     TC_="$TC" TI_="$TI" yq -i 'del(.clusters[strenv(TC_)].instances[strenv(TI_)].instance.sharedSecretsOwner)' "$f" || return 1
     T_OWNER=true; OWNER_NOTE=""
   fi
-  # the spec file of the pair is recorded with the entry, in the same commit
-  [[ -z "$SPEC_JSON" ]] || stage_restore_patch || return 1
+  # the spec file of the pair is recorded with the entry, in the same commit (a new instance: mode base)
+  [[ -z "$SPEC_JSON" ]] || stage_restore_patch "$SPEC_JSON" base || return 1
 }
 OWNER_NOTE=""
 if [[ "$ENTRY_NEW" == true ]]; then
@@ -441,13 +462,18 @@ if [[ "$ENTRY_NEW" == true ]]; then
 elif [[ "$TGT_FLEET" == true && "$TGT_EXISTS" == false ]]; then
   T_OWNER="$(_flag_get "$REPO" "$TC" "$TI")"; [[ "$T_OWNER" == false ]] || T_OWNER=true
 fi
-# an existing entry (in place, or declared but not deployed) records the spec file in a commit of its own after the restore
-if [[ -n "$SPEC_JSON" && "$ENTRY_NEW" != true ]]; then
-  if [[ "$TGT_FLEET" == true ]]; then
-    stage_restore_patch || fail FLEET_EDIT_FAILED "$FLEET_REL (restorePatch of ${TI})"
-  else
-    RP_NOTE="${TC}/${TI} has no entry in ${FLEET_REL}: the spec file is used for the restore only, no restore-patch is recorded (Argo CD does not manage this instance)"
-  fi
+# The restore-patch of an existing entry (in place, or declared in fleet.yaml but not deployed) is recorded in a commit of its own after the
+# restore succeeded: the spec file's spec, or the spec read from the cluster. Mode over for an in-place restore with a spec file (the operator
+# merged the file into the existing Postgres), base otherwise. An instance that has no entry is not managed by Argo CD: nothing is recorded.
+RP_MODE=base; [[ -z "$SPEC_JSON" || "$TGT_EXISTS" != true ]] || RP_MODE=over
+# Only a new instance and an in-place restore have a restore-patch: another existing instance keeps its spec, the restore overwrites its data only
+RP_APPLIES=true; [[ "$TGT_EXISTS" != true || "$IN_PLACE" == true ]] || RP_APPLIES=false
+if [[ "$RP_APPLIES" != true ]]; then
+  :
+elif [[ "$TGT_EXISTS" == true && "$TGT_FLEET" != true ]]; then
+  RP_NOTE="${TC}/${TI} has no entry in ${FLEET_REL}: $( [[ -n "$SPEC_JSON" ]] && echo "the spec file is used for the restore only" || echo "its spec is not read" ), no restore-patch is recorded (Argo CD does not manage this instance)"
+elif [[ "$TGT_FLEET" == true && -n "$SPEC_JSON" ]]; then
+  stage_restore_patch "$SPEC_JSON" "$RP_MODE" || fail FLEET_EDIT_FAILED "$FLEET_REL (restorePatch of ${TI})"
 fi
 
 if [[ "$TGT_EXISTS" == false ]]; then
@@ -467,14 +493,16 @@ if [[ "$TGT_EXISTS" == false ]]; then
   fi
   plan "target: new instance ${TC}/${TNS}/${TI}, version ${T_PGV:-unknown}; spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is" || echo "none, only the name: the operator creates the instance and fills in its spec (lab item: how it fills it)" ); ${FLEET_REL}: $( [[ "$ENTRY_NEW" == true ]] && echo "the entry would be added$( [[ "$SRC_FLEET" == true ]] && echo " (a copy of the entry of ${SC}/${SI})" || echo " (from the spec file)" ) (pushMode ${PUSH_MODE})" || echo "the entry already exists" ); shared Secrets of ${TNS}: $( [[ "$T_OWNER" == true ]] && echo "owned by ${TI}" || echo "owned by ${OWNER_NOTE:-another instance}" )"
 fi
-if [[ -n "$SPEC_JSON" ]]; then
-  if [[ "$ENTRY_NEW" == true ]]; then
-    plan "restore-patch: the spec file would be stored as helm_artifacts/instance/tpg-instance/restore-patch/${TI}-restore-<uid>.yaml and recorded as restorePatch.current of ${TC}/${TI} in the same commit as the entry; the chart applies it last (after the overlay and the patch)"
-  elif [[ -n "$RP_NOTE" ]]; then
-    plan "restore-patch: ${RP_NOTE}"
-  else
-    plan "restore-patch: the spec file would be stored as helm_artifacts/instance/tpg-instance/restore-patch/${TI}-restore-<uid>.yaml and recorded as restorePatch.current of ${TC}/${TI} in a commit of its own after the restore succeeded (pushMode ${PUSH_MODE}); a restore-patch it replaces becomes previous"
-  fi
+RP_WHAT="the spec file"; [[ -n "$SPEC_JSON" ]] || RP_WHAT="the spec of the restored Postgres, read from ${TC} once it runs"
+RP_PLAN="mode ${RP_MODE}, restorePatch.current of ${TC}/${TI}, instance.restored: true and the fleet-equivalent fields of the spec written into the entry; the chart renders the Postgres from it (its fields, backupLocation and imagePullSecret, then the later changes of the entry and the tpg-patch patch file)"
+if [[ "$RP_APPLIES" != true ]]; then
+  plan "restore-patch: none (${TC}/${TI} is an existing instance other than the source: the restore overwrites its data, its spec stays and is not recorded)"
+elif [[ "$ENTRY_NEW" == true && -n "$SPEC_JSON" ]]; then
+  plan "restore-patch: ${RP_WHAT} would be stored as helm_artifacts/instance/tpg-instance/restore-patch/${TI}-restore-<uid>.yaml in the same commit as the entry: ${RP_PLAN}"
+elif [[ -n "$RP_NOTE" ]]; then
+  plan "restore-patch: ${RP_NOTE}"
+else
+  plan "restore-patch: ${RP_WHAT} would be stored as helm_artifacts/instance/tpg-instance/restore-patch/${TI}-restore-<uid>.yaml in a commit of its own after the restore succeeded (pushMode ${PUSH_MODE}): ${RP_PLAN}; a restore-patch it replaces becomes previous and is no longer applied"
 fi
 
 # ---- 4. the matrix: standard -> lite, a lower minor version, another major version
@@ -526,6 +554,8 @@ fi
 if [[ -n "$SPEC_JSON" && -n "${T_BLN:-}" && "$T_BLN" != "${TI}-backup-location" ]]; then
   get_obj "$TNS" postgresbackuplocation "$T_BLN" || true
   [[ -n "$OBJ" ]] || fail BACKUP_LOCATION_MISSING "the spec file names backupLocation ${T_BLN}, which does not exist in ${TNS} on ${TC} (the fleet renders ${TI}-backup-location for the instance)"
+  # the fleet-managed references are always rendered (tpg.restoredPostgres): the restored instance is backed up through its own location
+  warn SPEC_LOCATION_REPLACED "the spec file names backupLocation ${T_BLN}; the chart renders ${TI}-backup-location for ${TI}, so the first sync of its Application points the instance at that location (the restore itself uses ${T_BLN})"
 fi
 
 # ---- 6. another namespace or cluster: the copy of the source backup location (reused when one exists)
@@ -811,31 +841,60 @@ while true; do
 done
 
 pg_wait_ready "$TI" "$READY_TIMEOUT" || fail "TARGET_${POD_WATCH_REASON:-NOT_RUNNING}" "$TI: ${POD_WATCH_DETAIL:-}"
-[[ "$TGT_EXISTS" == true || -n "$SPEC_JSON" ]] || note "no spec file: ${TI} was created by the operator from spec.targetInstance.name alone, which fills in its spec (lab item: not verified how)"
+[[ "$TGT_EXISTS" == true || -n "$SPEC_JSON" ]] || note "no spec file: ${TI} was created by the operator from spec.targetInstance.name alone, which fills in its spec (lab item: not verified how); the spec it has is read below"
 
-# ---- 5 (real) an existing entry (in place, or declared but not deployed) records the spec file as its restore-patch, now that the restore
-# succeeded: a commit of its own (pushMode applies), before the adoption sync of a declared instance
-if [[ -n "$SPEC_JSON" && "$ENTRY_NEW" != true ]]; then
-  if [[ -n "$RP_NOTE" ]]; then
-    note "$RP_NOTE"
-  else
+# ---- 5 (real) the restore-patch: the spec of the restored Postgres as the entry's restorePatch (lib.sh restore_patch_record, templates/_helpers.tpl
+# tpg.restoredPostgres). A new entry with a spec file recorded it in the commit of the entry. Everywhere else it is a commit of its own, now
+# that the restore succeeded and the instance runs (pushMode applies), before the adoption sync of a new or declared instance: the spec file's
+# spec, or without one the spec read from the cluster
+SNAP_SPEC=""; SNAP_ERR=""
+snapshot_spec() {  # snapshot_spec: SNAP_SPEC = the .spec of the restored Postgres on the target (JSON, nulls dropped), valid as a Postgres spec; 1 with SNAP_ERR
+  local f="$WORK/snapshot.json"
+  SNAP_SPEC=""; SNAP_ERR=""
+  to_tgt
+  get_obj "$TNS" postgres "$TI" || { SNAP_ERR="Postgres ${TNS}/${TI} on ${TC} could not be read: ${OBJ_ERR}"; return 1; }
+  [[ -n "$OBJ" ]] || { SNAP_ERR="Postgres ${TNS}/${TI} does not exist on ${TC}"; return 1; }
+  SNAP_SPEC="$(jq -c '(.spec // {}) | walk(if type == "object" then with_entries(select(.value != null)) else . end)' <<<"$OBJ")"
+  [[ "$SNAP_SPEC" != '{}' && "$SNAP_SPEC" != null ]] || { SNAP_ERR="Postgres ${TNS}/${TI} on ${TC} has no spec"; SNAP_SPEC=""; return 1; }
+  jq -c '[{apiVersion: "sql.tanzu.vmware.com/v1", kind: "Postgres", spec: .}]' <<<"$SNAP_SPEC" > "$f"
+  if ! SNAP_ERR="$(python3 "$TPG_LIB_DIR/patchcheck.py" spec "$f" --schemas "$(patch_schemas_path)" --name "the spec of ${TNS}/${TI}" | tr '\n' ';')"; then
+    SNAP_SPEC=""; return 1
+  fi
+  SNAP_ERR=""
+}
+RP_RECORDED=true   # false: the Application of the new or declared instance must not be synced (the chart would render it from the entry)
+if [[ "$RP_APPLIES" != true ]]; then
+  :   # another existing instance: nothing is recorded
+elif [[ "$ENTRY_NEW" == true && -n "$SPEC_JSON" ]]; then
+  :   # recorded with the entry
+elif [[ -n "$RP_NOTE" ]]; then
+  note "$RP_NOTE"
+else
+  RP_RECORDED=false
+  RP_SPEC="$SPEC_JSON"
+  if [[ -z "$RP_SPEC" ]]; then
+    if snapshot_spec; then RP_SPEC="$SNAP_SPEC"; note "no spec file: the spec of ${TI} was read from ${TC} (${#RP_SPEC} bytes) and is stored as its restore-patch"
+    else warn RESTORE_PATCH_NOT_RECORDED "the restore succeeded, but the spec of ${TC}/${TNS}/${TI} could not be read as the restore-patch: ${SNAP_ERR}$( [[ "$TGT_EXISTS" == true ]] || echo "; the Application tpg-${TC}-${TI} is not synced, since the chart would render the entry over the restored Postgres" )"; fi
+  fi
+  if [[ -n "$RP_SPEC" ]]; then
     rp_ok=false
     [[ "$PUSH_MODE" != direct ]] || fleet_lock_acquire || true
-    if git_clone "$REPO" >/dev/null 2>&1 && fleet_has_instance "$REPO" "$TC" "$TI" && stage_restore_patch \
-       && git_commit_push "$REPO" "restore: record the spec file of ${TC}/${TI} as its restore-patch (${WF})" "$FLEET_REL" "$RESTORE_PATCH_DIR"; then
+    if git_clone "$REPO" >/dev/null 2>&1 && fleet_has_instance "$REPO" "$TC" "$TI" && stage_restore_patch "$RP_SPEC" "$RP_MODE" \
+       && git_commit_push "$REPO" "restore: record the restore-patch of ${TC}/${TI} (${WF})" "$FLEET_REL" "$RESTORE_PATCH_DIR"; then
       rp_ok=true; PUSHED_REV="${PUSHED_REVISION:-$PUSHED_REV}"
     fi
     [[ "$PUSH_MODE" != direct ]] || fleet_lock_release
     if [[ "$rp_ok" == true ]]; then
-      note "the spec file is recorded as restorePatch.current of ${TC}/${TI} in ${FLEET_REL} (${RP_PATH}); the chart of Application tpg-${TC}-${TI} applies it last"
+      RP_RECORDED=true
+      note "the spec of ${TI} is recorded as restorePatch.current of ${TC}/${TI} in ${FLEET_REL} (${RP_PATH}, mode ${RP_MODE}); the chart of Application tpg-${TC}-${TI} renders the Postgres from it"
     else
-      warn RESTORE_PATCH_NOT_RECORDED "the restore succeeded, but the spec file could not be recorded as the restore-patch of ${TC}/${TI} in ${FLEET_REL} (pushMode ${PUSH_MODE}); the next sync of Application tpg-${TC}-${TI} renders the entry without it"
+      warn RESTORE_PATCH_NOT_RECORDED "the restore succeeded, but the spec could not be recorded as the restore-patch of ${TC}/${TI} in ${FLEET_REL} (pushMode ${PUSH_MODE}); the next sync of Application tpg-${TC}-${TI} renders the entry without it$( [[ "$TGT_EXISTS" == true ]] || echo " (not synced by this run)" )"
     fi
   fi
 fi
 
 # ---- 5 (real) the new instance is adopted by its Application
-if [[ "$TGT_EXISTS" == false ]]; then
+if [[ "$TGT_EXISTS" == false && "$RP_RECORDED" == true ]]; then
   if sync_instance_app "$TC" "$TI" "$SYNC_TIMEOUT" "$PUSHED_REV"; then
     note "Application tpg-${TC}-${TI} synced: the instance is managed by Argo CD"
   else

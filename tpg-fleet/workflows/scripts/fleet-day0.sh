@@ -23,7 +23,9 @@
 #                                                       operatorSchedules with operator, D70)
 #   clusters.<cluster>.instances.<instance>.ferret.*    ferret and its keys (D71; false removes the block)
 #   clusters.<cluster>.instances.<instance>.network.*   networkPolicy and its rules
-# Existing entries keep their other settings.
+# Existing entries keep their other settings. An instance that tpg-restore restored (instance.restored: true in its entry) is
+# BLOCKED INSTANCE_RESTORED, that instance only (Round 23): its entry is not written, discover.sh leaves it out of the deployment,
+# the other instances of the run go ahead; tpg-scale-instance, tpg-upgrade (postgres) and tpg-patch are the workflows that change it.
 #
 # Namespace (Round 23, locked decision 8): the clusterMap key namespace, default pg-<instance>,
 # is written as instance.namespace for a new instance and is immutable: a different value for
@@ -89,6 +91,7 @@ source /scripts/lib.sh
 patch_group overlays                # tpg-day0 and tpg-create-instance take overlay files (Round 22)
 MODE="${FLEET_MODE:-day0}"          # day0 | create (tpg-create-instance)
 WF_ID="day0"; [[ "$MODE" == "create" ]] && WF_ID="create-instance"
+WF_NAME="tpg-day0"; [[ "$MODE" == "create" ]] && WF_NAME="tpg-create-instance"
 result_guard result.git
 
 REPO="$WORK/repo"
@@ -406,6 +409,13 @@ for c in $(jq -r 'keys[]' "$WORK/effective.json"); do
   stop=""
   declare -A RUNNING=()
   for i in $(jq -r '.instances | keys[]' <<<"$entry"); do
+    # an instance tpg-restore restored (instance.restored, Round 23) is rendered from its restore-patch and changed by three
+    # workflows only: it is BLOCKED here (that instance only, its entry is not touched, nothing syncs it) and the others go ahead
+    if [[ "$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.restored // false' "$F" 2>/dev/null)" == "true" ]]; then
+      jq -cn --arg i "$i" --arg r "INSTANCE_RESTORED" --arg d "${i} on ${c} was restored by tpg-restore (instance.restored in ${FLEET_REL}): its Postgres is rendered from its restore-patch, so ${WF_NAME:-this workflow} neither writes its entry nor syncs it; change it with tpg-scale-instance (read replicas), tpg-upgrade component=postgres (version) or tpg-patch (patch files)" \
+        '{instance:$i, reason:$r, detail:$d}' >> "$WORK/instance-blocks.$c"
+      continue
+    fi
     pgv="$(jq -r --arg i "$i" '.instances[$i].postgresVersion // ""' <<<"$entry")"
     [[ -n "$pgv" ]] || { FAILED+=("${c}/${i}: postgresVersion is required"); continue; }
     cur_pgv="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.postgresVersion // ""' "$F")"
