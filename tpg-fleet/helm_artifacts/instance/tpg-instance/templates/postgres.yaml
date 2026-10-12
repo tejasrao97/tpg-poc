@@ -1,12 +1,15 @@
 {{- /*
 The Postgres object: rendered from the values (with the current values overlay
 and patch files applied, tpg.ctx), then the Postgres documents of the instance's
-current postgres overlay file, then its patch file, then its restore-patch file (tpg.kindPatch,
-postgresOverlayFilePath, postgresPatchFilePath, and the spec file tpg-restore stored) are merged
-into spec, so they win over the values they overlap (the patch over the overlay, the restore-patch
-over both) (storageSize, resources, ...). Fields that
+current postgres overlay file and then its patch file (tpg.kindPatch,
+postgresOverlayFilePath, postgresPatchFilePath) are merged into spec, so they win
+over the values they overlap (the patch over the overlay) (storageSize, resources, ...). Fields that
 belong to other workflows (postgresVersion, highAvailability) or cannot change on
 a running instance are refused by the workflows before the file is referenced.
+
+A restored instance (instance.restored true, tpg-restore, Round 23) is not rendered from the
+values: tpg.restoredPostgres builds the spec from its restore-patch file (see there for the
+algorithm of both modes); the metadata is the same.
 
 highAvailability (design decision D69) is written only for an HA instance:
 enabled true with readReplicas 1 or more. A single-node instance (enabled
@@ -17,23 +20,26 @@ highAvailability block: the operator treats the absent block as a single node
 reported OutOfSync (Round 12, item 5). enabled true with readReplicas 0, and
 readReplicas above 0 without enabled, fail the render (the workflows refuse
 both before they reach Git).
-A highAvailability block that does not say enabled true after the merge (a restore-patch with
-enabled false over an HA entry) is left out: a single node has no block.
 Last, tpg.prune leaves out every field that holds its zero default, patch
 file content included (templates/_prune.tpl).
 */ -}}
+{{- /* tpg.postgresMeta (ctx): the metadata of the Postgres object, restored or not */ -}}
+{{- define "tpg.postgresMeta" -}}
+name: {{ .Values.instance.name }}
+annotations:
+  argocd.argoproj.io/sync-wave: "1"
+  argocd.argoproj.io/sync-options: Prune=false,Delete=false
+  {{- /* Round 22: no initial backup at creation, only when the instance asks for it */}}
+  {{- if eq (toString (default false .Values.instance.disableInitialBackup)) "true" }}
+  sql.tanzu.vmware.com/skip-initial-backup: "true"
+  {{- end }}
+{{- end -}}
+
 {{- define "tpg.postgres" -}}
 apiVersion: sql.tanzu.vmware.com/v1
 kind: Postgres
 metadata:
-  name: {{ .Values.instance.name }}
-  annotations:
-    argocd.argoproj.io/sync-wave: "1"
-    argocd.argoproj.io/sync-options: Prune=false,Delete=false
-    {{- /* Round 22: no initial backup at creation, only when the instance asks for it */}}
-    {{- if eq (toString (default false .Values.instance.disableInitialBackup)) "true" }}
-    sql.tanzu.vmware.com/skip-initial-backup: "true"
-    {{- end }}
+  {{- include "tpg.postgresMeta" . | nindent 2 }}
 spec:
   postgresVersion:
     name: {{ .Values.instance.postgresVersion }}
@@ -60,9 +66,13 @@ spec:
     {{- toYaml .Values.instance.resources | nindent 4 }}
 {{- end -}}
 {{- $ctx := include "tpg.ctx" . | fromYaml -}}
-{{- $pg := include "tpg.postgres" $ctx | fromYaml -}}
-{{- $_ := include "tpg.deepMerge" (dict "dst" $pg.spec "src" (include "tpg.kindPatch" (dict "root" $ "key" "Postgres") | fromYaml)) }}
-{{- /* a restore-patch whose spec file says highAvailability.enabled false is a single node (no block): the entry's readReplicas must not survive the merge */ -}}
-{{- if and (hasKey $pg.spec "highAvailability") (ne (toString (dig "enabled" "" $pg.spec.highAvailability)) "true") }}{{ $_ := unset $pg.spec "highAvailability" }}{{ end }}
+{{- $mode := include "tpg.restoredMode" . -}}
+{{- $pg := dict -}}
+{{- if $mode -}}
+{{-   $pg = dict "apiVersion" "sql.tanzu.vmware.com/v1" "kind" "Postgres" "metadata" (include "tpg.postgresMeta" $ctx | fromYaml) "spec" (include "tpg.restoredPostgres" (dict "root" . "mode" $mode "ctx" $ctx) | fromYaml) -}}
+{{- else -}}
+{{-   $pg = include "tpg.postgres" $ctx | fromYaml -}}
+{{-   $_ := include "tpg.deepMerge" (dict "dst" $pg.spec "src" (include "tpg.kindPatch" (dict "root" $ "key" "Postgres") | fromYaml)) -}}
+{{- end -}}
 {{- $_ := include "tpg.prune" (dict "obj" $pg "root" $) }}
 {{ toYaml $pg }}

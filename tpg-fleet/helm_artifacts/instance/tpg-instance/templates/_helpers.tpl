@@ -151,29 +151,101 @@ the ApplicationSet made of the fleet branch; without that file (a render by hand
 {{- end -}}
 
 {{- /*
-tpg.restorePatchRef (the root context): the current restore-patch file of the instance, a path
-relative to this chart, or "" (Round 23, phase 6b revision). tpg-restore stores the spec file of
-a restored instance (targetInstanceSpecFilePath) in restore-patch/ and records it in
-clusters/fleet.yaml as
-  clusters.<cluster>.instances.<instance>.restorePatch   {current: restore-patch/<file>.yaml,
-                                                          previous: {path, commit}}
-Only current is applied; read like the patch records (tpg.patchRef): from the clusters value file
-at the synced commit, else from .Values.restorePatch.
+Restored instances (Round 23, tpg-restore). tpg-restore marks the entry of an instance it restored
+  clusters.<cluster>.instances.<instance>.instance.restored   true
+  clusters.<cluster>.instances.<instance>.restorePatch        {current: restore-patch/<file>.yaml,
+                                                               previous: {path, commit},
+                                                               mode: base | over,
+                                                               postgresPatch: patches/<file>.yaml}
+and stores the spec of the restored Postgres in restore-patch/ (the spec file of the pair, or the spec
+read from the cluster after the restore: one kind: Postgres document, no metadata). The entry is read
+like the patch records (tpg.patchRef): from the clusters value file at the synced commit, else (a
+render by hand) from .Values.instance.restored and .Values.restorePatch. Only restorePatch.current is
+applied; previous is the record of the restore before. The Postgres object of a restored instance is
+built by tpg.restoredPostgres (below); the other objects render as for any instance.
 */ -}}
-{{- define "tpg.restorePatchRef" -}}
+{{- /* tpg.restoredEntry (root): the entry of the instance in the clusters value file as YAML ({} without one) */ -}}
+{{- define "tpg.restoredEntry" -}}
+{{- $v := .Values -}}
+{{- $ent := dict -}}
+{{- if hasKey $v "clusters" -}}
+{{- /* dig on the nested map: .Values itself is chartutil.Values, which dig cannot read */ -}}
+{{-   $ent = dig (toString $v.cluster.name) "instances" (toString $v.instance.name) (dict) (default dict $v.clusters) -}}
+{{- end -}}
+{{- toYaml (default dict $ent) -}}
+{{- end -}}
+
+{{- /* tpg.restorePatchNode (root): the restorePatch record of the instance as YAML ({} when it has none) */ -}}
+{{- define "tpg.restorePatchNode" -}}
 {{- $v := .Values -}}
 {{- $node := "" -}}
 {{- if hasKey $v "clusters" -}}
-{{- /* dig on the nested map: .Values itself is chartutil.Values, which dig cannot read */ -}}
 {{-   $node = dig (toString $v.cluster.name) "instances" (toString $v.instance.name) "restorePatch" "" (default dict $v.clusters) -}}
 {{- else -}}
 {{-   $node = get $v "restorePatch" -}}
 {{- end -}}
 {{- if kindIs "map" $node -}}
-{{-   default "" $node.current -}}
+{{-   toYaml $node -}}
 {{- else if $node -}}
-{{-   fail (printf "restorePatch of %s must be {current: <file>, previous: {path, commit}}" (toString $v.instance.name)) -}}
+{{-   fail (printf "restorePatch of %s must be {current: <file>, previous: {path, commit}, mode: base|over}" (toString $v.instance.name)) -}}
+{{- else -}}
+{{-   "{}" -}}
 {{- end -}}
+{{- end -}}
+
+{{- /* tpg.restorePatchRef (root): the current restore-patch file, a path relative to this chart, or "" */ -}}
+{{- define "tpg.restorePatchRef" -}}
+{{- default "" (include "tpg.restorePatchNode" . | fromYaml).current -}}
+{{- end -}}
+
+{{- /*
+tpg.restoredMode (root): "" for an instance that is not restored; "base" or "over" for a restored one
+(restorePatch.mode, default base). instance.restored true without a current restore-patch fails the
+render: there is nothing to render the Postgres from.
+  base  the restore-patch IS the spec of the Postgres (a new instance restored with or without a spec
+        file, an in-place restore without one): nothing of the chart defaults, the entry, the overlays
+        or the values patches is filled in
+  over  an in-place restore with a spec file: the operator merged the file into the existing Postgres,
+        so the render is the normal one with the restore-patch over it
+*/ -}}
+{{- define "tpg.restoredMode" -}}
+{{- $v := .Values -}}
+{{- $flag := default false (get (default dict $v.instance) "restored") -}}
+{{- if hasKey $v "clusters" -}}
+{{-   $flag = default false (dig "instance" "restored" false (include "tpg.restoredEntry" . | fromYaml)) -}}
+{{- end -}}
+{{- if eq (toString $flag) "true" -}}
+{{-   $rp := include "tpg.restorePatchNode" . | fromYaml -}}
+{{-   if not $rp.current }}{{ fail (printf "instance.restored is true for %s but restorePatch.current is empty: tpg-restore records both (a restored instance is rendered from its restore-patch file)" (toString $v.instance.name)) }}{{ end -}}
+{{-   $m := toString (default "base" $rp.mode) -}}
+{{-   if not (has $m (list "base" "over")) }}{{ fail (printf "restorePatch.mode of %s must be base or over, got %q" (toString $v.instance.name) $m) }}{{ end -}}
+{{-   $m -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+tpg.restorePatchSpec (root): the spec of the current restore-patch file as YAML. The file holds one
+kind: Postgres document (apiVersion, kind, spec); anything else fails the render.
+*/ -}}
+{{- define "tpg.restorePatchSpec" -}}
+{{- $f := include "tpg.restorePatchRef" . -}}
+{{- $raw := .Files.Get $f -}}
+{{- if not $raw }}{{ fail (printf "restore-patch file %s not found in the chart (helm_artifacts/instance/tpg-instance/%s)" $f $f) }}{{ end -}}
+{{- $spec := dict -}}
+{{- $n := 0 -}}
+{{- range $doc := regexSplit "(?m)^---[ \t]*$" $raw -1 -}}
+{{-   $p := fromYaml $doc -}}
+{{-   if hasKey $p "Error" }}{{ fail (printf "restore-patch file %s: a document is not a YAML map: %s" $f $p.Error) }}{{ end -}}
+{{-   if $p -}}
+{{-     $k := toString (default "" $p.kind) -}}
+{{-     if not (has $k (list "Postgres" "PostgresBackupLocation" "PostgresBackupSchedule" "PostgresFerretDocumentDB")) }}{{ fail (printf "restore-patch file %s: kind %q is not a kind the tpg-instance chart renders" $f $k) }}{{ end -}}
+{{-     if ne $k "Postgres" }}{{ fail (printf "restore-patch file %s: kind %q is not Postgres: a restore-patch holds the one Postgres document of the restored instance" $f $k) }}{{ end -}}
+{{-     $n = add1 $n -}}
+{{-     $spec = deepCopy (default dict $p.spec) -}}
+{{-   end -}}
+{{- end -}}
+{{- if gt $n 1 }}{{ fail (printf "restore-patch file %s holds %d Postgres documents: a restore-patch holds one" $f $n) }}{{ end -}}
+{{- toYaml $spec -}}
 {{- end -}}
 
 {{- /*
@@ -191,31 +263,25 @@ Returns YAML; fails the render when the file is missing or not a YAML map.
 {{- end -}}
 
 {{- /*
-tpg.kindPatch (dict "root" $ "key" KEY): the spec fragment the instance's current
-postgres overlay file, then its current postgres patch file, then its current restore-patch
-file hold for one object (Round 15, D81; Round 22; Round 23 restore-patch), as YAML ({} when
-none; where several set a field the later one wins: overlay, patch, restore-patch).
+tpg.kindPatch (dict "root" $ "key" KEY ["groups" LIST]): the spec fragment the instance's current
+postgres overlay file and then its current postgres patch file hold for one object
+(Round 15, D81; Round 22), as YAML ({} when none; where both set a field the patch wins).
+groups says which of them ("overlays", "patches"; default both): the restored Postgres of an
+instance asks for its patch file alone, or for the overlay and the patch of different moments.
 KEY is the kind (Postgres, PostgresBackupLocation, PostgresFerretDocumentDB) or
 PostgresBackupSchedule/full | PostgresBackupSchedule/incremental. The file holds one
 YAML document per object: apiVersion, kind and spec (a schedule also
 metadata.name: <instance>-backup-<type> or backup-<type>). The workflows check the
 documents before they reference the file (workflows/scripts/patchcheck.py); an
 unknown kind fails the render here as well. The templates merge the fragment into
-the object they render (tpg.deepMerge), so an overlay, patch or restore-patch wins over the values it
-overlaps (the workflows report PATCH_OVERRIDES_VALUE). The restore-patch (tpg-restore, one Postgres
-document: the spec of the restored instance) comes last: it is what the PostgresRestore created, so
-the render carries it over everything the entry's values and its other files say.
+the object they render (tpg.deepMerge), so an overlay or patch wins over the values it
+overlaps (the workflows report PATCH_OVERRIDES_VALUE).
 */ -}}
 {{- define "tpg.kindPatch" -}}
 {{- $out := dict -}}
-{{- range $grp := list "overlays" "patches" "restorePatch" -}}
-{{- $f := "" -}}
-{{- if eq $grp "restorePatch" -}}
-{{-   $f = include "tpg.restorePatchRef" $.root -}}
-{{- else -}}
-{{-   $f = include "tpg.patchRef" (dict "root" $.root "kind" "postgres" "group" $grp) -}}
-{{- end -}}
-{{- $what := get (dict "overlays" "postgres overlay" "patches" "postgres patch" "restorePatch" "restore-patch") $grp -}}
+{{- range $grp := (default (list "overlays" "patches") .groups) -}}
+{{- $f := include "tpg.patchRef" (dict "root" $.root "kind" "postgres" "group" $grp) -}}
+{{- $what := ternary "postgres overlay" "postgres patch" (eq $grp "overlays") -}}
 {{- if $f -}}
 {{-   $raw := $.root.Files.Get $f -}}
 {{-   if not $raw }}{{ fail (printf "%s file %s not found in the chart (helm_artifacts/instance/tpg-instance/%s)" $what $f $f) }}{{ end -}}
@@ -261,4 +327,149 @@ value file) is left out of it. Templates render from it:
 {{- end -}}
 {{- $_ := include "tpg.deepMerge" (dict "dst" $v "src" (default dict .Values.valuesOverride)) -}}
 {{- toYaml (dict "Values" $v "Release" (dict "Namespace" .Release.Namespace "Name" .Release.Name)) -}}
+{{- end -}}
+
+{{- /*
+tpg.restoredEntrySpec (dict "ins" MAP): the Postgres spec fields the entry's instance block (MAP, the
+instance: of clusters.<cluster>.instances.<instance>, nothing of the chart defaults, the templates or
+the cluster) says, for the keys that are present in it, as YAML. The fleet-equivalent fields:
+  instance.postgresVersion                    spec.postgresVersion.name
+  instance.storageClassName                   spec.storageClassName
+  instance.storageSize                        spec.storageSize
+  instance.walStorageSize                     spec.walStorageSize
+  instance.resources                          spec.resources
+  instance.highAvailability.{enabled,readReplicas}   spec.highAvailability {enabled, readReplicas}
+  instance.exposure, readOnlyExposure,        spec.serviceType, serviceAnnotations,
+    serviceAnnotations, readOnlyServiceAnnotations    readOnlyServiceType, readOnlyServiceAnnotations
+                                                     (tpg.services; allowedSourceRanges and
+                                                     internalLoadBalancerSubnet are not read: a
+                                                     restored instance keeps the annotations of its
+                                                     restore-patch as serviceAnnotations)
+*/ -}}
+{{- define "tpg.restoredEntrySpec" -}}
+{{- $e := .ins -}}
+{{- $c := dict -}}
+{{- if $e.postgresVersion }}{{ $_ := set $c "postgresVersion" (dict "name" (toString $e.postgresVersion)) }}{{ end -}}
+{{- range $k := list "storageClassName" "storageSize" "walStorageSize" -}}
+{{-   with get $e $k }}{{ $_ := set $c $k . }}{{ end -}}
+{{- end -}}
+{{- if kindIs "map" $e.resources }}{{ if $e.resources }}{{ $_ := set $c "resources" (deepCopy $e.resources) }}{{ end }}{{ end -}}
+{{- if kindIs "map" $e.highAvailability -}}
+{{-   $_ := set $c "highAvailability" (dict "enabled" (eq (toString $e.highAvailability.enabled) "true") "readReplicas" (int (default 0 $e.highAvailability.readReplicas))) -}}
+{{- end -}}
+{{- $svc := false -}}
+{{- range $k := list "exposure" "readOnlyExposure" "serviceAnnotations" "readOnlyServiceAnnotations" }}{{ if hasKey $e $k }}{{ $svc = true }}{{ end }}{{ end -}}
+{{- if $svc -}}
+{{-   $s := include "tpg.services" (dict "Values" (dict "instance" (pick $e "exposure" "readOnlyExposure" "serviceAnnotations" "readOnlyServiceAnnotations"))) | fromYaml -}}
+{{-   range $k, $v := $s }}{{ $_ := set $c $k $v }}{{ end -}}
+{{-   range $k := list "serviceAnnotations" "readOnlyServiceAnnotations" }}{{ if not (hasKey $c $k) }}{{ $_ := set $c $k (dict) }}{{ end }}{{ end -}}
+{{-   if not (hasKey $c "readOnlyServiceType") }}{{ $_ := set $c "readOnlyServiceType" "ClusterIP" }}{{ end -}}
+{{- end -}}
+{{- toYaml $c -}}
+{{- end -}}
+
+{{- /*
+tpg.restoredNorm (dict "key" K "spec" MAP): the value of the spec field K in MAP as the JSON string two
+values are compared by (tpg.restoredPostgres): the field as it is, except that a value the operator or
+the chart treats as the default is the same as no value:
+  highAvailability       {enabled: bool (absent: false), readReplicas: int (absent: 0)}
+  serviceType, readOnlyServiceType   absent is ClusterIP
+  serviceAnnotations, readOnlyServiceAnnotations   absent is {}
+  any other field        absent is null
+*/ -}}
+{{- define "tpg.restoredNorm" -}}
+{{- $v := get .spec .key -}}
+{{- if eq .key "highAvailability" -}}
+{{-   $h := dict -}}
+{{-   if kindIs "map" $v }}{{ $h = $v }}{{ end -}}
+{{-   toJson (dict "enabled" (eq (toString (default false $h.enabled)) "true") "readReplicas" (int (default 0 $h.readReplicas))) -}}
+{{- else if or (eq .key "serviceType") (eq .key "readOnlyServiceType") -}}
+{{-   toJson (toString (default "ClusterIP" $v)) -}}
+{{- else if or (eq .key "serviceAnnotations") (eq .key "readOnlyServiceAnnotations") -}}
+{{-   toJson (default dict $v) -}}
+{{- else -}}
+{{-   toJson $v -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+tpg.restoredPostgres (dict "root" $ "mode" "base"|"over" "ctx" CTX): the spec of the Postgres object of a
+restored instance (Round 23, tpg-restore), as YAML. R is the spec of the current restore-patch file.
+
+mode base (R is the spec of the restored Postgres: the spec file of the pair, or the spec read from the
+cluster after the restore), in this order:
+  1 R as it is. A field R does not set stays unset: no chart default (storageClassName, walStorageSize,
+    resources, highAvailability, persistentVolumeClaimPolicy, ...), no value of the entry is filled in.
+  2 the fleet-managed references, always: backupLocation {name: <instance>-backup-location} and
+    imagePullSecret {name: regsecret} (they replace the ones in R: the instance is backed up through the
+    PostgresBackupLocation this chart renders and pulls with the Secret it renders)
+  3 later changes: for every field of tpg.restoredEntrySpec (the entry's instance block, nothing else):
+    the field is DIFFERENT when tpg.restoredNorm of the entry's value and of R's value are not equal
+    (compared as JSON; a field R lacks differs from any value the entry sets, except the defaults of
+    tpg.restoredNorm: highAvailability false/0, serviceType ClusterIP, empty annotations). A different
+    field replaces R's (a map is replaced as a whole; highAvailability is merged key by key). An equal
+    one changes nothing. tpg-restore writes the fleet-equivalent fields of R into the entry (and removes
+    the ones R lacks), so right after a restore nothing differs; tpg-scale-instance (highAvailability)
+    and tpg-upgrade component=postgres (postgresVersion) write the entry afterwards, and that is a
+    later change.
+  4 the instance's current postgres patch file (tpg-patch), merged over everything (tpg.kindPatch). The
+    overlays of the creation (postgresOverlayFilePath), the values overlay and the instance: keys of a
+    values patch do not apply to the Postgres of a restored instance.
+mode over (an in-place restore with a spec file: the operator merged the file into the existing
+Postgres, overwriting the fields it sets): the normal render (tpg.postgres), then
+  1 the postgres overlay file and the postgres patch file that was current at the restore
+    (restorePatch.postgresPatch); a patch file that tpg-patch set after the restore is not applied here
+  2 R merged over it (maps key by key, anything else replaces); a highAvailability block that does not
+    say enabled true is removed (a single node has no block, and the render's readReplicas must not
+    survive an R that says enabled false)
+  3 the fleet-managed references again, then the later changes as in base 3, but only for the fields R
+    sets (the render already carries the entry's values for the others)
+  4 the current postgres patch file when it is not the one of the restore
+Last, tpg.prune (postgres.yaml) leaves out every field that holds its zero default.
+*/ -}}
+{{- define "tpg.restoredPostgres" -}}
+{{- $root := .root -}}
+{{- $mode := .mode -}}
+{{- $name := toString $root.Values.instance.name -}}
+{{- $rp := include "tpg.restorePatchSpec" $root | fromYaml -}}
+{{- $node := include "tpg.restorePatchNode" $root | fromYaml -}}
+{{- $patch := include "tpg.patchRef" (dict "root" $root "kind" "postgres" "group" "patches") -}}
+{{- $patchAtRestore := eq $patch (toString (default "" $node.postgresPatch)) -}}
+{{- $spec := dict -}}
+{{- if eq $mode "over" -}}
+{{-   $spec = (include "tpg.postgres" .ctx | fromYaml).spec -}}
+{{-   $_ := include "tpg.deepMerge" (dict "dst" $spec "src" (include "tpg.kindPatch" (dict "root" $root "key" "Postgres" "groups" (ternary (list "overlays" "patches") (list "overlays") $patchAtRestore)) | fromYaml)) -}}
+{{- end -}}
+{{- $_ := include "tpg.deepMerge" (dict "dst" $spec "src" (deepCopy $rp)) -}}
+{{- if and (eq $mode "over") (hasKey $spec "highAvailability") (kindIs "map" $spec.highAvailability) (ne (toString (dig "enabled" "" $spec.highAvailability)) "true") }}{{ $_ := unset $spec "highAvailability" }}{{ end -}}
+{{- $_ := set $spec "backupLocation" (dict "name" (printf "%s-backup-location" $name)) -}}
+{{- $_ := set $spec "imagePullSecret" (dict "name" "regsecret") -}}
+{{- $ent := include "tpg.restoredEntry" $root | fromYaml -}}
+{{- $ins := dict -}}
+{{- if kindIs "map" $ent.instance }}{{ $ins = $ent.instance }}{{ end -}}
+{{- $cand := include "tpg.restoredEntrySpec" (dict "ins" $ins) | fromYaml -}}
+{{- range $k, $cv := $cand -}}
+{{-   if and (ne (include "tpg.restoredNorm" (dict "key" $k "spec" $cand)) (include "tpg.restoredNorm" (dict "key" $k "spec" $rp))) (or (eq $mode "base") (hasKey $rp $k)) -}}
+{{-     if eq $k "highAvailability" -}}
+{{-       $rr := int $cv.readReplicas -}}
+{{-       if and $cv.enabled (lt $rr 1) }}{{ fail (printf "instance.highAvailability.enabled is true with readReplicas %d: an HA instance needs readReplicas 1 or more (or set enabled false for a single node)" $rr) }}{{ end -}}
+{{-       if and (not $cv.enabled) (gt $rr 0) }}{{ fail (printf "instance.highAvailability.readReplicas is %d but enabled is not true: read replicas need highAvailability.enabled true" $rr) }}{{ end -}}
+{{-       if kindIs "map" (get $spec "highAvailability") -}}
+{{-         $_ := include "tpg.deepMerge" (dict "dst" (get $spec "highAvailability") "src" $cv) -}}
+{{-       else -}}
+{{-         $_ := set $spec "highAvailability" (deepCopy $cv) -}}
+{{-       end -}}
+{{-     else if and (or (eq $k "serviceAnnotations") (eq $k "readOnlyServiceAnnotations")) (not $cv) -}}
+{{-       $_ := unset $spec $k -}}
+{{-     else if and (eq $k "readOnlyServiceType") (eq (toString $cv) "ClusterIP") -}}
+{{-       $_ := unset $spec $k -}}
+{{-     else -}}
+{{-       $_ := set $spec $k (deepCopy $cv) -}}
+{{-     end -}}
+{{-   end -}}
+{{- end -}}
+{{- if or (eq $mode "base") (not $patchAtRestore) -}}
+{{-   $_ := include "tpg.deepMerge" (dict "dst" $spec "src" (include "tpg.kindPatch" (dict "root" $root "key" "Postgres" "groups" (list "patches")) | fromYaml)) -}}
+{{- end -}}
+{{- toYaml $spec -}}
 {{- end -}}

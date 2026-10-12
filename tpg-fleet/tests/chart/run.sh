@@ -376,106 +376,236 @@ render 'clusters:
 [[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Info && "$(pg '.spec.sharedMemorySize')" == 1Gi && "$(retention)" == 9 ]] \
   && ok "22: postgres overlay and patch documents merge per object: the patch wins where both set a field, the overlay's other fields stay" \
   || bad "postgres overlay then patch" "$OUT"
-# Round 23 (tpg-restore): the restore-patch is read last, after the overlay and the patch. It is the spec file the
-# instance was restored with: one kind: Postgres document in restore-patch/, recorded as restorePatch {current, previous}
-cat > "$CHART/restore-patch/i1-restore-aaaaa.yaml" <<'YAML'
+# Round 23 (tpg-restore, second revision of phase 6b): a restored instance (instance.restored true) renders its Postgres from
+# the restore-patch (restore-patch/<file>.yaml, one kind: Postgres document: the spec file or the live snapshot), recorded as
+# restorePatch {current, previous, mode, postgresPatch}. mode base (default): the restore-patch is the base, nothing of the chart
+# defaults or the entry is filled in except the fleet's backupLocation and imagePullSecret; the entry's fleet-equivalent fields that
+# differ from it, then the current Postgres patch file, are applied over it. mode over (in-place restore with a spec file): the
+# normal render with the restore-patch over it.
+RPA="$CHART/restore-patch/i1-restore-aaaaa.yaml"
+cat > "$RPA" <<'YAML'
 apiVersion: sql.tanzu.vmware.com/v1
 kind: Postgres
 spec:
-  logLevel: Warning
+  postgresVersion:
+    name: postgres-17.6
   storageSize: 100Gi
+  logLevel: Warning
   resources:
     data:
-      requests: {memory: 6Gi}
+      requests:
+        memory: 6Gi
 YAML
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  logLevel: Error\n  storageSize: 70Gi\n' > "$CHART/restore-patch/i1-restore-bbbbb.yaml"
-render 'instance: {storageSize: 50Gi}
-clusters:
-  c1:
-    instances:
-      i1:
-        overlays: {postgres: {current: overlays/pgov-ccccc.yaml}}
-        patches: {postgres: {current: patches/pgpt-ddddd.yaml}}
-        restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}'
-[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec.sharedMemorySize')" == 1Gi && "$(pg '.spec.resources.data.requests.memory')" == 6Gi ]] \
-  && ok "23: the restore-patch is applied last: it wins over the entry's values (storageSize), the overlay and the patch (logLevel); the overlay's other fields stay" \
-  || bad "restore-patch last" "$OUT"
-[[ "$(pg '.spec.resources.data.limits.memory')" == 4Gi ]] \
-  && ok "23: a map in the restore-patch merges key by key (resources.data.requests.memory set, the chart's limits stay)" || bad "restore-patch map merge" "$OUT"
-render 'instance: {storageSize: 50Gi}
-clusters:
-  c1:
-    instances:
-      i1:
-        restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml, previous: {path: restore-patch/i1-restore-bbbbb.yaml, commit: abc}}'
+# rr RP_FILE MODE ENTRY_INSTANCE_FLOW [ENTRY_EXTRA_LINE...]: a restored entry of clusters/fleet.yaml (value file), rendered
+RPX=""   # more fields of restorePatch, ", previous: {...}, postgresPatch: ..."
+rr() {
+  local rp="$1" mode="$2" ins="$3"; shift 3
+  { printf 'clusters:\n  c1:\n    instances:\n      i1:\n        instance: {restored: true%s}\n        restorePatch: {current: restore-patch/%s, mode: %s%s}\n' "${ins:+, $ins}" "$rp" "$mode" "$RPX"
+    local l; for l in "$@"; do printf '        %s\n' "$l"; done; } > "$TMP/rr.yaml"
+  render "$(cat "$TMP/rr.yaml")"
+}
+spec_keys() { pg '.spec | keys | join(",")'; }
+BASE_INS='postgresVersion: postgres-17.6, storageSize: 100Gi, resources: {data: {requests: {memory: 6Gi}}}, highAvailability: {enabled: false, readReplicas: 0}'
+rr i1-restore-aaaaa.yaml base "$BASE_INS"
+[[ "$RC" -eq 0 && "$(spec_keys)" == "backupLocation,imagePullSecret,logLevel,postgresVersion,resources,storageSize" ]] \
+  && ok "23 restored (base): the Postgres spec is the restore-patch's fields plus backupLocation and imagePullSecret; nothing else (no chart default, no entry value filled in)" \
+  || bad "restored base keys" "$(spec_keys) $OUT"
+[[ "$(pg '.spec.backupLocation.name')" == i1-backup-location && "$(pg '.spec.imagePullSecret.name')" == regsecret \
+   && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.postgresVersion.name')" == postgres-17.6 ]] \
+  && ok "23 restored (base): the fleet-managed backupLocation (<instance>-backup-location) and imagePullSecret (regsecret) are rendered, the restore-patch's values are the values" \
+  || bad "restored base values" "$(pg '.spec')"
+[[ "$(pg '.spec.resources.data | has("limits")')" == false && "$(pg '.spec | has("walStorageSize")')" == false && "$(pg '.spec | has("storageClassName")')" == false \
+   && "$(pg '.spec | has("highAvailability")')" == false && "$(pg '.spec | has("serviceType")')" == false && "$(pg '.spec | has("persistentVolumeClaimPolicy")')" == false ]] \
+  && ok "23 restored (base): omitted fields stay unset (no limits, walStorageSize, storageClassName, highAvailability, serviceType, persistentVolumeClaimPolicy of the chart defaults)" \
+  || bad "restored base omitted" "$(pg '.spec')"
+[[ "$(pg '.metadata.name')" == i1 && "$(pg '.metadata.annotations["argocd.argoproj.io/sync-options"]')" == "Prune=false,Delete=false" ]] \
+  && ok "23 restored (base): the metadata (name, Argo CD annotations) is the chart's" || bad "restored base metadata" "$(pg '.metadata')"
+[[ "$(yq 'select(.kind == "PostgresBackupLocation") | .metadata.name' <<<"$OUT")" == i1-backup-location ]] \
+  && ok "23 restored (base): the other objects of the instance (the backup location) render as before" || bad "restored base location" "$OUT"
+# an entry whose fleet-equivalent fields equal the restore-patch's changes nothing (HA {false,0} is a single node: no block)
+rr i1-restore-aaaaa.yaml base "$BASE_INS, exposure: clusterIP, readOnlyExposure: clusterIP"
+[[ "$RC" -eq 0 && "$(spec_keys)" == "backupLocation,imagePullSecret,logLevel,postgresVersion,resources,storageSize" ]] \
+  && ok "23 later changes: entry fields equal to the restore-patch's (a single node highAvailability false/0 against none, exposure clusterIP against no serviceType) are a no-op" \
+  || bad "later no-op" "$(spec_keys) $OUT"
+# an entry field that differs, or that the restore-patch lacks, overrides it
+rr i1-restore-aaaaa.yaml base "postgresVersion: postgres-17.8, storageSize: 200Gi, resources: {data: {requests: {memory: 8Gi}}}, walStorageSize: 30Gi, storageClassName: premium-fast"
+[[ "$RC" -eq 0 && "$(pg '.spec.storageSize')" == 200Gi && "$(pg '.spec.postgresVersion.name')" == postgres-17.8 && "$(pg '.spec.resources.data.requests.memory')" == 8Gi \
+   && "$(pg '.spec.walStorageSize')" == 30Gi && "$(pg '.spec.storageClassName')" == premium-fast && "$(pg '.spec.logLevel')" == Warning ]] \
+  && ok "23 later changes: an entry value that differs (storageSize, postgresVersion, resources) or that the restore-patch lacks (walStorageSize, storageClassName) overrides; the restore-patch's other fields stay" \
+  || bad "later override" "$(pg '.spec')"
+[[ "$(pg '.spec.resources.data | has("limits")')" == false && "$(pg '.spec.resources.data.requests | keys | join(",")')" == memory ]] \
+  && ok "23 later changes: a differing resources block replaces the restore-patch's block (no limits of the chart default, no mix)" || bad "later resources" "$(pg '.spec.resources')"
+# highAvailability: the scale workflow's entry fields
+rr i1-restore-aaaaa.yaml base "highAvailability: {enabled: true, readReplicas: 3}"
+[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.enabled')" == true && "$(pg '.spec.highAvailability.readReplicas')" == 3 ]] \
+  && ok "23 later changes: tpg-scale-instance writing highAvailability {true, 3} to an entry whose restore-patch is a single node renders HA with 3 read replicas" || bad "ha scale up" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  highAvailability:\n    enabled: true\n    readReplicas: 2\n' > "$CHART/restore-patch/i1-restore-ccccc.yaml"
+rr i1-restore-ccccc.yaml base "postgresVersion: postgres-17.6, highAvailability: {enabled: true, readReplicas: 2}"
+[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.readReplicas')" == 2 ]] \
+  && ok "23 later changes: the same HA values as the restore-patch's change nothing" || bad "ha equal" "$(pg '.spec')"
+rr i1-restore-ccccc.yaml base "postgresVersion: postgres-17.6, highAvailability: {enabled: true, readReplicas: 3}"
+[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.readReplicas')" == 3 && "$(pg '.spec.highAvailability.enabled')" == true ]] \
+  && ok "23 later changes: scaling an HA restored instance to 3 overrides the restore-patch's 2" || bad "ha 3" "$(pg '.spec')"
+rr i1-restore-ccccc.yaml base "postgresVersion: postgres-17.6, highAvailability: {enabled: false, readReplicas: 0}"
+[[ "$RC" -eq 0 && "$(pg '.spec | has("highAvailability")')" == false ]] \
+  && ok "23 later changes: scaling to a single node (false/0) over an HA restore-patch leaves no highAvailability block (no HA special case needed)" || bad "ha single" "$(pg '.spec')"
+rr i1-restore-aaaaa.yaml base "highAvailability: {enabled: true, readReplicas: 0}"
+[[ "$RC" -ne 0 ]] && grep -q "instance.highAvailability.enabled is true with readReplicas 0" <<<"$OUT" \
+  && ok "23 later changes: an entry HA that is no valid combination fails the render when it is applied" || bad "ha invalid" "$OUT"
+# the exposure
+rr i1-restore-aaaaa.yaml base "exposure: internalLoadBalancer, serviceAnnotations: {a/b: c}"
+[[ "$RC" -eq 0 && "$(pg '.spec.serviceType')" == LoadBalancer && "$(pg '.spec.serviceAnnotations["service.beta.kubernetes.io/azure-load-balancer-internal"]')" == "true" \
+   && "$(pg '.spec.serviceAnnotations["a/b"]')" == c ]] \
+  && ok "23 later changes: an exposure the restore-patch does not have renders serviceType and the annotations" || bad "exposure" "$(pg '.spec')"
+# the same exposure as the restore-patch's: no-op, and the stored annotations are kept verbatim
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  serviceType: LoadBalancer\n  serviceAnnotations:\n    service.beta.kubernetes.io/azure-load-balancer-internal: "true"\n    service.beta.kubernetes.io/azure-allowed-ip-ranges: 10.0.0.0/8\n' > "$CHART/restore-patch/i1-restore-ddddd.yaml"
+rr i1-restore-ddddd.yaml base 'postgresVersion: postgres-17.6, exposure: internalLoadBalancer, serviceAnnotations: {service.beta.kubernetes.io/azure-allowed-ip-ranges: 10.0.0.0/8}'
+[[ "$RC" -eq 0 && "$(pg '.spec.serviceAnnotations | keys | length')" == 2 && "$(pg '.spec.serviceAnnotations["service.beta.kubernetes.io/azure-allowed-ip-ranges"]')" == 10.0.0.0/8 ]] \
+  && ok "23 later changes: the seeded exposure (exposure + the annotations of the restore-patch verbatim) renders what the restore-patch holds" || bad "exposure seeded" "$(pg '.spec')"
+rm -f "$CHART/restore-patch/i1-restore-ccccc.yaml" "$CHART/restore-patch/i1-restore-ddddd.yaml"
+# the Postgres patch file (tpg-patch) is applied after the restore-patch and the entry's later changes
+cat > "$CHART/patches/pgpt-ddddd.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  logLevel: Info
+  storageSize: 300Gi
+YAML
+rr i1-restore-aaaaa.yaml base "$BASE_INS, storageSize: 200Gi" "patches: {postgres: {current: patches/pgpt-ddddd.yaml}}"
+[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Info && "$(pg '.spec.storageSize')" == 300Gi && "$(pg '.spec.postgresVersion.name')" == postgres-17.6 ]] \
+  && ok "23 tpg-patch: the current Postgres patch file is applied after the restore-patch and the entry's later changes (it wins over both)" || bad "patch last" "$(pg '.spec')"
+# creation overlays and the instance values patch do not reach the restored Postgres
+cat > "$CHART/overlays/pgov-ccccc.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  sharedMemorySize: 1Gi
+  logLevel: Debug
+YAML
+printf 'instance:\n  storageSize: 400Gi\nbackup:\n  fullRetention: 9\n' > "$CHART/patches/vpt-eeeee.yaml"
+rr i1-restore-aaaaa.yaml base "$BASE_INS" "overlays: {postgres: {current: overlays/pgov-ccccc.yaml}}" "patches: {postgresValues: {current: patches/vpt-eeeee.yaml}}"
+[[ "$RC" -eq 0 && "$(pg '.spec | has("sharedMemorySize")')" == false && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi \
+   && "$(yq 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number' <<<"$OUT")" == 9 ]] \
+  && ok "23 restored (base): the Postgres overlay of the creation and the instance keys of a values patch do not reach the Postgres; the values patch still renders the other objects (backup retention 9)" \
+  || bad "overlay not applied" "$(pg '.spec') $OUT"
+rm -f "$CHART/patches/pgpt-ddddd.yaml" "$CHART/patches/vpt-eeeee.yaml"
+# re-restore: only restorePatch.current; mode, a restored entry without a current file, a current file without the flag
+RPX=", previous: {path: restore-patch/i1-restore-bbbbb.yaml, commit: abc}"
+rr i1-restore-aaaaa.yaml base "$BASE_INS"
+RPX=""
 [[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi ]] \
-  && ok "23: only restorePatch.current is applied, not previous" || bad "restore-patch previous" "$OUT"
+  && ok "23 re-restore: only restorePatch.current is applied, not previous" || bad "previous" "$(pg '.spec')"
+render 'clusters:
+  c1:
+    instances:
+      i1:
+        instance: {restored: true, storageSize: 50Gi}
+        restorePatch: {previous: {path: restore-patch/i1-restore-bbbbb.yaml, commit: abc}}'
+[[ "$RC" -ne 0 ]] && grep -q "instance.restored is true for i1 but restorePatch.current is empty" <<<"$OUT" \
+  && ok "23 a restored entry without a current restore-patch fails the render (nothing to render it from)" || bad "restored without current" "$OUT"
 render 'instance: {storageSize: 50Gi}
 clusters:
   c1:
     instances:
       i1:
-        restorePatch: {previous: {path: restore-patch/i1-restore-bbbbb.yaml, commit: abc}}'
+        restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}'
 [[ "$RC" -eq 0 && "$(pg '.spec.storageSize')" == 50Gi && "$(pg '.spec | has("logLevel")')" == false ]] \
-  && ok "23: a retired restore-patch (previous only, as tpg-patch leaves it) is not applied: the entry's values render" || bad "restore-patch retired" "$OUT"
-render 'restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}'
-[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Warning ]] \
-  && ok "23: without clusters/fleet.yaml (a render by hand) .Values.restorePatch is used" || bad "restore-patch inline" "$OUT"
+  && ok "23 a restore-patch of an entry that is not instance.restored is not applied" || bad "not restored" "$OUT"
+rr i1-restore-aaaaa.yaml sideways "$BASE_INS"
+[[ "$RC" -ne 0 ]] && grep -q "restorePatch.mode of i1 must be base or over" <<<"$OUT" \
+  && ok "23 restorePatch.mode other than base or over fails the render" || bad "mode" "$OUT"
 render 'clusters:
   c1:
     instances:
       i1:
-        restorePatch: {current: restore-patch/missing-zzzzz.yaml}'
-[[ "$RC" -ne 0 ]] && grep -q "restore-patch file restore-patch/missing-zzzzz.yaml not found in the chart" <<<"$OUT" \
-  && ok "23: a restore-patch file that is not in the chart fails the render" || bad "restore-patch missing" "$OUT"
-render 'clusters:
-  c1:
-    instances:
-      i1:
+        instance: {restored: true}
         restorePatch: [restore-patch/i1-restore-aaaaa.yaml]'
 [[ "$RC" -ne 0 ]] && grep -q "restorePatch of i1 must be {current" <<<"$OUT" \
-  && ok "23: a restorePatch that is not {current, previous} fails the render" || bad "restore-patch shape" "$OUT"
+  && ok "23 a restorePatch that is not {current, previous, mode} fails the render" || bad "restore-patch shape" "$OUT"
+rr missing-zzzzz.yaml base "$BASE_INS"
+[[ "$RC" -ne 0 ]] && grep -q "restore-patch file restore-patch/missing-zzzzz.yaml not found in the chart" <<<"$OUT" \
+  && ok "23 a restore-patch file that is not in the chart fails the render" || bad "restore-patch missing" "$OUT"
 printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: x}\n' > "$CHART/restore-patch/i1-restore-eeeee.yaml"
+rr i1-restore-eeeee.yaml base "$BASE_INS"
+[[ "$RC" -ne 0 ]] && grep -q 'restore-patch file restore-patch/i1-restore-eeeee.yaml: kind "ConfigMap" is not a kind the tpg-instance chart renders' <<<"$OUT" \
+  && ok "23 a restore-patch document of another kind fails the render" || bad "restore-patch kind" "$OUT"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: PostgresBackupLocation\nspec: {}\n' > "$CHART/restore-patch/i1-restore-eeeee.yaml"
+rr i1-restore-eeeee.yaml base "$BASE_INS"
+[[ "$RC" -ne 0 ]] && grep -q 'restore-patch file restore-patch/i1-restore-eeeee.yaml: kind "PostgresBackupLocation" is not Postgres' <<<"$OUT" \
+  && ok "23 a restore-patch holds the Postgres document only" || bad "restore-patch not postgres" "$OUT"
+rm -f "$CHART/restore-patch/i1-restore-eeeee.yaml"
+# a render by hand (no clusters/fleet.yaml): .Values.instance.restored and .Values.restorePatch are used; there is no entry to compare
+render 'instance: {restored: true, storageSize: 55Gi}
+restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}'
+[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec | has("walStorageSize")')" == false ]] \
+  && ok "23 without clusters/fleet.yaml (a render by hand) .Values.instance.restored and .Values.restorePatch are used and the restore-patch renders alone (no entry to compare)" || bad "restore-patch inline" "$OUT"
+
+# mode over: an in-place restore with a spec file: the normal render (entry, overlay, the patch that was current at the restore),
+# the restore-patch over it, the entry's later changes, then a patch file newer than the restore
+cat > "$CHART/overlays/pgov-ccccc.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  sharedMemorySize: 1Gi
+YAML
+cat > "$CHART/patches/pgpt-ddddd.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  logLevel: Info
+  storageClassName: premium-fast
+YAML
+cat > "$CHART/patches/pgpt-fffff.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  logLevel: Debug
+  walStorageSize: 40Gi
+YAML
+RPX=", postgresPatch: patches/pgpt-ddddd.yaml"
+rr i1-restore-aaaaa.yaml over 'postgresVersion: postgres-17.6, storageSize: 100Gi, resources: {data: {requests: {memory: 6Gi}}}' \
+  "overlays: {postgres: {current: overlays/pgov-ccccc.yaml}}" "patches: {postgres: {current: patches/pgpt-ddddd.yaml}}"
+[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec.resources.data.requests.memory')" == 6Gi \
+   && "$(pg '.spec.sharedMemorySize')" == 1Gi && "$(pg '.spec.storageClassName')" == premium-fast && "$(pg '.spec.walStorageSize')" == 10Gi \
+   && "$(pg '.spec.persistentVolumeClaimPolicy')" == retain && "$(pg '.spec.resources.data.requests.cpu')" == 1 ]] \
+  && ok "23 restored (over): the normal render (overlay, the patch of the time of the restore, chart defaults) with the restore-patch over it: its fields win, the rest of the render stays" \
+  || bad "over render" "$(pg '.spec')"
+rr i1-restore-aaaaa.yaml over 'postgresVersion: postgres-17.6, storageSize: 100Gi' \
+  "overlays: {postgres: {current: overlays/pgov-ccccc.yaml}}" "patches: {postgres: {current: patches/pgpt-fffff.yaml}}"
+[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Debug && "$(pg '.spec.walStorageSize')" == 40Gi && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec | has("storageClassName")')" == true ]] \
+  && ok "23 restored (over): a patch file set after the restore (tpg-patch) is applied after the restore-patch and wins over it" || bad "over later patch" "$(pg '.spec')"
+[[ "$(pg '.spec.storageClassName')" == tpg-data-retain ]] \
+  && ok "23 restored (over): the patch file that was current at the restore is no longer applied once tpg-patch replaced it (storageClassName back to the entry's)" || bad "over old patch" "$(pg '.spec')"
+RPX=""
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageSize: 100Gi\n  highAvailability:\n    enabled: true\n    readReplicas: 1\n' > "$CHART/restore-patch/i1-restore-ccccc.yaml"
+rr i1-restore-ccccc.yaml over 'storageSize: 150Gi, highAvailability: {enabled: true, readReplicas: 3}'
+[[ "$RC" -eq 0 && "$(pg '.spec.storageSize')" == 150Gi && "$(pg '.spec.highAvailability.readReplicas')" == 3 ]] \
+  && ok "23 restored (over): the entry's later changes (storageSize, scale) that differ from the restore-patch's override it" || bad "over later" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability:\n    enabled: false\n' > "$CHART/restore-patch/i1-restore-ccccc.yaml"
+rr i1-restore-ccccc.yaml over 'highAvailability: {enabled: false, readReplicas: 0}'
+[[ "$RC" -eq 0 && "$(pg '.spec | has("highAvailability")')" == false ]] \
+  && ok "23 restored (over): a restore-patch single node (enabled false) over the render's HA leaves no highAvailability block" || bad "over single node" "$(pg '.spec')"
 render 'clusters:
   c1:
     instances:
       i1:
-        restorePatch: {current: restore-patch/i1-restore-eeeee.yaml}'
-[[ "$RC" -ne 0 ]] && grep -q 'restore-patch file restore-patch/i1-restore-eeeee.yaml: kind "ConfigMap" is not a kind the tpg-instance chart renders' <<<"$OUT" \
-  && ok "23: a restore-patch document of another kind fails the render" || bad "restore-patch kind" "$OUT"
-rm -f "$CHART/restore-patch/i1-restore-eeeee.yaml"
-# a spec file for a single node (highAvailability.enabled false) over an HA entry: no highAvailability block survives (readReplicas of the entry
-# without enabled is no valid object)
-printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability:\n    enabled: false\n' > "$CHART/restore-patch/i1-restore-fffff.yaml"
-render 'instance: {highAvailability: {enabled: true, readReplicas: 1}}
-clusters:
-  c1:
-    instances:
-      i1:
-        restorePatch: {current: restore-patch/i1-restore-fffff.yaml}'
-[[ "$RC" -eq 0 && "$(pg '.spec | has("highAvailability")')" == false ]] \
-  && ok "23: a restore-patch with highAvailability.enabled false over an HA entry renders a single node (no highAvailability block, no leftover readReplicas)" || bad "restore-patch single node" "$(pg '.spec')"
-printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability:\n    enabled: true\n    readReplicas: 2\n' > "$CHART/restore-patch/i1-restore-fffff.yaml"
-render 'instance: {highAvailability: {enabled: true, readReplicas: 1}}
-clusters:
-  c1:
-    instances:
-      i1:
-        restorePatch: {current: restore-patch/i1-restore-fffff.yaml}'
-[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.readReplicas')" == 2 && "$(pg '.spec.highAvailability.enabled')" == true ]] \
-  && ok "23: a restore-patch with more read replicas wins over the entry's" || bad "restore-patch ha 2" "$(pg '.spec')"
-rm -f "$CHART/restore-patch/i1-restore-fffff.yaml"
+        instance: {restored: true, highAvailability: {enabled: true, readReplicas: 1}}
+        restorePatch: {current: restore-patch/i1-restore-ccccc.yaml, mode: over}'
+[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.enabled')" == true ]] \
+  && ok "23 restored (over): an entry that still says HA against a single-node restore-patch is a later change (the entry wins): seeding writes the restore-patch's values into the entry" || bad "over stale entry" "$(pg '.spec')"
+rm -f "$CHART/restore-patch/i1-restore-ccccc.yaml" "$CHART/overlays/pgov-ccccc.yaml" "$CHART/patches/pgpt-ddddd.yaml" "$CHART/patches/pgpt-fffff.yaml"
 # .helmignore must not hide restore-patch/ (the chart reads it with .Files.Get): it is in the packaged chart
 rm -rf "$TMP/rp"; mkdir -p "$TMP/rp"; cp -r "$CHART" "$TMP/rp/tpg-instance"
 if (cd "$TMP/rp" && helm package tpg-instance -d out >/dev/null 2>&1); then
   PKG="$(tar -tzf "$TMP"/rp/out/*.tgz)"
   grep -q 'tpg-instance/restore-patch/i1-restore-aaaaa.yaml' <<<"$PKG" && grep -q 'tpg-instance/restore-patch/README.md' <<<"$PKG" \
-    && ok "23: .helmignore does not exclude restore-patch/: its files are in the packaged chart" || bad "restore-patch: package" "$PKG"
+    && ok "23 .helmignore does not exclude restore-patch/: its files are in the packaged chart" || bad "restore-patch: package" "$PKG"
   rm -rf "$TMP/rp/x"; mkdir -p "$TMP/rp/x"; tar -xzf "$TMP"/rp/out/*.tgz -C "$TMP/rp/x" 2>/dev/null
-  printf 'cluster: {name: c1}\ninstance: {name: i1, postgresVersion: postgres-17.6}\nbackup: {container: pg-backups-c1}\nrestorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}\n' > "$TMP/rp/v.yaml"
+  printf 'cluster: {name: c1}\ninstance: {name: i1, postgresVersion: postgres-17.6, restored: true}\nbackup: {container: pg-backups-c1}\nrestorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}\n' > "$TMP/rp/v.yaml"
   PKGOUT="$(helm template i1 "$TMP/rp/x/tpg-instance" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" -f "$TMP/rp/v.yaml" --namespace pg-i1 2>&1)" || PKGOUT="FAILED: $PKGOUT"
   [[ "$(yq 'select(.kind == "Postgres") | .spec.logLevel' <<<"$PKGOUT")" == Warning ]] \
-    && ok "23: the packaged chart renders the restore-patch (the file is read from the package)" || bad "restore-patch: packaged render" "$PKGOUT"
+    && ok "23 the packaged chart renders the restore-patch (the file is read from the package)" || bad "restore-patch: packaged render" "$PKGOUT"
 else bad "restore-patch: helm package failed"; fi
 rm -f "$CHART/restore-patch/i1-restore-aaaaa.yaml" "$CHART/restore-patch/i1-restore-bbbbb.yaml"
 # Round 22: backup repository path and the skip-initial-backup annotation
@@ -538,11 +668,16 @@ appset_render '{instance: {postgresVersion: postgres-17.6}}'
   && ok "23: ApplicationSet values without the key (and the chart default false): no skip-initial-backup annotation" || bad "appset annotation absent" "$OUT"
 
 # the ApplicationSet leaves restorePatch out of the inline values (like patches and overlays): the entry of clusters/fleet.yaml,
-# read at the synced commit, decides which restore-patch file applies
-printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  logLevel: Warning\n  storageSize: 100Gi\n' > "$AS/helm_artifacts/instance/tpg-instance/restore-patch/i1-restore-aaaaa.yaml"
-appset_render '{instance: {postgresVersion: postgres-17.6, storageSize: 50Gi}, restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}}'
-[[ "$RC" -eq 0 && "$(yq 'has("restorePatch")' "$AS/values.yaml")" == false && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi ]] \
-  && ok "23: the ApplicationSet values carry no restorePatch; the chart still applies the restore-patch the fleet.yaml entry names" || bad "appset restorePatch" "$(cat "$AS/values.yaml") $OUT"
+# read at the synced commit, decides which restore-patch file applies; instance.restored travels in the inline instance block
+# and is read from the entry first
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  logLevel: Warning\n  storageSize: 100Gi\n' > "$AS/helm_artifacts/instance/tpg-instance/restore-patch/i1-restore-aaaaa.yaml"
+appset_render '{instance: {postgresVersion: postgres-17.6, storageSize: 100Gi, restored: true}, restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml, mode: base}}'
+[[ "$RC" -eq 0 && "$(yq 'has("restorePatch")' "$AS/values.yaml")" == false && "$(yq '.instance.restored' "$AS/values.yaml")" == true \
+   && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec | has("walStorageSize")')" == false ]] \
+  && ok "23: the ApplicationSet values carry no restorePatch; the chart still renders the restored instance from the restore-patch the fleet.yaml entry names (entry fields equal to it, none filled in)" || bad "appset restorePatch" "$(cat "$AS/values.yaml") $OUT"
+appset_render '{instance: {postgresVersion: postgres-17.6, storageSize: 50Gi, restored: true}, restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml, mode: base}}'
+[[ "$RC" -eq 0 && "$(pg '.spec.storageSize')" == 50Gi && "$(pg '.spec.logLevel')" == Warning ]] \
+  && ok "23: …and an entry value that differs from the restore-patch's (a later change) wins through the ApplicationSet values as well" || bad "appset later change" "$OUT"
 rm -f "$AS/helm_artifacts/instance/tpg-instance/restore-patch/i1-restore-aaaaa.yaml"
 
 # ---- Round 23 phase 3: the instance namespace (locked decision 8). The chart renders in the
