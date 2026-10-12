@@ -48,7 +48,8 @@ all always present; a missing text is "", a missing flag false):
   sameNamespace          same cluster and namespace on both sides
   source                 {cluster, namespace, instance, backupName}   backupName: sourceBackupName
   target                 {cluster, namespace, instance, specFile, confirm, skipMinorVersionCheck,
-                          postRestoreBackup}   specFile: targetInstanceSpecFilePath as given ("" none)
+                          postRestoreBackup}   specFile: targetInstanceSpecFilePath as given ("" none);
+                          confirm: only for an in-place pair (refused on any other), "" without it
   pitr                   {enabled, type, timestamp, target, bestEffort, backupLocation, stanza,
                           backupLabel}   backupLocation, stanza, backupLabel: pitrConfig.sourceBackupConfig
                           srcBackupLocationName, srcStanzaName, srcBackupLabel (never derived here)
@@ -736,7 +737,14 @@ def restore_pair_errors(i, pair, keys, registered, confirm_required):
                     errors.append(f"{tw}.pitrConfig.timestamp: not allowed with pitrConfig.type: {typ} (use pitrConfig.target)")
 
     conf = tv.get("confirm", "")
-    if conf and conf != ti:
+    if conf and not in_place:
+        # confirm guards the overwrite of an instance's own data; a restore into another instance never overwrites one
+        # (a target that exists is refused at plan time, TARGET_EXISTS), so there is nothing to confirm
+        errors.append(f"{tw}.confirm: not allowed: confirm is only for an in-place restore (source and target are the same "
+                      f"cluster, namespace and instance); this restore creates {ti} as a new instance, so there is nothing to "
+                      f"confirm: remove confirm (a target that already exists is refused at plan time, TARGET_EXISTS: restore in place "
+                      f"or choose a new instance name)")
+    elif conf and conf != ti:
         errors.append(f"{tw}.confirm: '{conf}' must repeat the target instance name {ti}")
     elif in_place and not conf and confirm_required:
         errors.append(f"{tw}.confirm is required: the restore is in place (source and target are the same instance) and "

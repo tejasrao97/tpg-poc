@@ -395,7 +395,7 @@ if jsonschema is not None:
         "a named backup into another namespace": [rp({"sourceBackupName": "b-full"}, {"pitrEnabled": False}, tgt=("c1", "pg-b", "b"), src=("c1", "pg-a", "a"))],
         "a named backup into another cluster": [rp({"sourceBackupName": "b-full"}, {"pitrEnabled": False})],
         "a named backup with pitrEnabled absent (the default is false)": [rp({"sourceBackupName": "b-full"}, {})],
-        "a named backup with pitrEnabled absent and other keys": [rp({"sourceBackupName": "b-full"}, {"confirm": "b", "postRestoreBackup": True})],
+        "a named backup with pitrEnabled absent and other keys": [rp({"sourceBackupName": "b-full"}, {"skipMinorVersionCheck": True, "postRestoreBackup": True})],
         "in place": [rp(None, with_(LATEST, confirm="a"), src=("c1", "pg-a", "a"), tgt=("c1", "pg-a", "a"))],
         "a spec file for an in-place restore": [rp(None, with_(LATEST, confirm="a", targetInstanceSpecFilePath=["./a.yaml"]), src=("c1", "pg-a", "a"), tgt=("c1", "pg-a", "a"))],
         "a spec file": [rp(None, with_(LATEST, targetInstanceSpecFilePath=["./a.yaml"]))],

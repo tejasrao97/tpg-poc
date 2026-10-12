@@ -423,6 +423,21 @@ rr i1-restore-aaaaa.yaml base "$BASE_INS"
   && ok "23 restored (base): the metadata (name, Argo CD annotations) is the chart's" || bad "restored base metadata" "$(pg '.metadata')"
 [[ "$(yq 'select(.kind == "PostgresBackupLocation") | .metadata.name' <<<"$OUT")" == i1-backup-location ]] \
   && ok "23 restored (base): the other objects of the instance (the backup location) render as before" || bad "restored base location" "$OUT"
+# Round 23, third revision: the restore-patch's own backupLocation / imagePullSecret win; the fleet's (<instance>-backup-location,
+# regsecret) are only filled in where the restore-patch omits them (each one on its own), in both modes
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  storageSize: 100Gi\n  backupLocation:\n    name: shared-location\n  imagePullSecret:\n    name: other-pull\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml base "postgresVersion: postgres-17.6, storageSize: 100Gi"
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == shared-location && "$(pg '.spec.imagePullSecret.name')" == other-pull ]] \
+  && ok "23 restored (base): a restore-patch that sets backupLocation and imagePullSecret keeps them (they win over the fleet's i1-backup-location and regsecret)" \
+  || bad "restored base own references" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  backupLocation:\n    name: shared-location\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml base "postgresVersion: postgres-17.6"
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == shared-location && "$(pg '.spec.imagePullSecret.name')" == regsecret ]] \
+  && ok "23 restored (base): a restore-patch with its own backupLocation only: imagePullSecret is filled in with the fleet's regsecret" || bad "restored base own location" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  imagePullSecret:\n    name: other-pull\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml base "postgresVersion: postgres-17.6"
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == i1-backup-location && "$(pg '.spec.imagePullSecret.name')" == other-pull ]] \
+  && ok "23 restored (base): a restore-patch with its own imagePullSecret only: backupLocation is filled in with the fleet's i1-backup-location" || bad "restored base own secret" "$(pg '.spec')"
 # an entry whose fleet-equivalent fields equal the restore-patch's changes nothing (HA {false,0} is a single node: no block)
 rr i1-restore-aaaaa.yaml base "$BASE_INS, exposure: clusterIP, readOnlyExposure: clusterIP"
 [[ "$RC" -eq 0 && "$(spec_keys)" == "backupLocation,imagePullSecret,logLevel,postgresVersion,resources,storageSize" ]] \
@@ -586,6 +601,14 @@ printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvaila
 rr i1-restore-ccccc.yaml over 'highAvailability: {enabled: false, readReplicas: 0}'
 [[ "$RC" -eq 0 && "$(pg '.spec | has("highAvailability")')" == false ]] \
   && ok "23 restored (over): a restore-patch single node (enabled false) over the render's HA leaves no highAvailability block" || bad "over single node" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageSize: 100Gi\n  backupLocation:\n    name: shared-location\n  imagePullSecret:\n    name: other-pull\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml over 'postgresVersion: postgres-17.6, storageSize: 100Gi'
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == shared-location && "$(pg '.spec.imagePullSecret.name')" == other-pull ]] \
+  && ok "23 restored (over): the restore-patch's own backupLocation and imagePullSecret win over the render's (and over the fleet's references)" || bad "over own references" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageSize: 100Gi\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml over 'postgresVersion: postgres-17.6, storageSize: 100Gi'
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == i1-backup-location && "$(pg '.spec.imagePullSecret.name')" == regsecret ]] \
+  && ok "23 restored (over): a restore-patch without them leaves the fleet's i1-backup-location and regsecret" || bad "over fleet references" "$(pg '.spec')"
 render 'clusters:
   c1:
     instances:
@@ -594,7 +617,7 @@ render 'clusters:
         restorePatch: {current: restore-patch/i1-restore-ccccc.yaml, mode: over}'
 [[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.enabled')" == true ]] \
   && ok "23 restored (over): an entry that still says HA against a single-node restore-patch is a later change (the entry wins): seeding writes the restore-patch's values into the entry" || bad "over stale entry" "$(pg '.spec')"
-rm -f "$CHART/restore-patch/i1-restore-ccccc.yaml" "$CHART/overlays/pgov-ccccc.yaml" "$CHART/patches/pgpt-ddddd.yaml" "$CHART/patches/pgpt-fffff.yaml"
+rm -f "$CHART/restore-patch/i1-restore-lllll.yaml" "$CHART/restore-patch/i1-restore-ccccc.yaml" "$CHART/overlays/pgov-ccccc.yaml" "$CHART/patches/pgpt-ddddd.yaml" "$CHART/patches/pgpt-fffff.yaml"
 # .helmignore must not hide restore-patch/ (the chart reads it with .Files.Get): it is in the packaged chart
 rm -rf "$TMP/rp"; mkdir -p "$TMP/rp"; cp -r "$CHART" "$TMP/rp/tpg-instance"
 if (cd "$TMP/rp" && helm package tpg-instance -d out >/dev/null 2>&1); then

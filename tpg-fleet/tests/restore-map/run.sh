@@ -161,12 +161,12 @@ valid "a target without keys and a sourceBackupName is a named-backup restore (p
 field "pitrEnabled absent: the method is backup" '.method' "backup"
 field "pitrEnabled absent: the backup name" '.source.backupName' "orders-db-full-20260914000000"
 field "pitrEnabled absent: pitr is off" '.pitr.enabled' "false"
-rm_run "$(X "$SRCB" 'confirm: orders-db-dr')"
+rm_run "$(X "$SRCB" 'postRestoreBackup: true')"
 valid "other keys without pitrEnabled keep the default (named backup)"
 field "pitrEnabled absent with other keys: the method is backup" '.method' "backup"
 rm_run "$(X "$SRCB" 'bestEffort: true')"
 invalid "bestEffort without pitrEnabled is refused (named backup by default)" "orders-db-dr.bestEffort: not allowed with pitrEnabled: false (pitrEnabled is absent and defaults to false)"
-rm_run "$(X '' 'confirm: orders-db-dr')"
+rm_run "$(X '' 'postRestoreBackup: true')"
 invalid "an absent pitrEnabled without sourceBackupName is refused" "sourceBackupName is required with pitrEnabled: false (pitrEnabled is absent" "give sourceBackupName, or set pitrEnabled: true with pitrConfig"
 
 echo "== 1. pitrEnabled false: the backup the source names"
@@ -340,9 +340,17 @@ rm_run "$(IP "$SRCB" "$BACKUP"$'\nconfirm: orders-dbx')" --confirm-required
 invalid "a confirm that is not the target instance is refused" "confirm: 'orders-dbx' must repeat the target instance name orders-db"
 rm_run "$(IP "$SRCB" "$BACKUP"$'\nconfirm: orders-dbx')"
 invalid "a wrong confirm is refused in a dry run too" "must repeat the target instance name orders-db"
+# Round 23, third revision: confirm belongs to an in-place restore only; a target that exists and is not the source is TARGET_EXISTS
+rm_run "$(X '' "$LATEST"$'\nconfirm: orders-db-dr')"
+invalid "confirm on a pair that is not in place is refused as meaningless" "targetClusterConfig.aks-tpg-poc-02.pg-orders-dr.orders-db-dr.confirm: not allowed" "only for an in-place restore" "remove confirm"
 rm_run "$(X '' "$LATEST"$'\nconfirm: orders-db-dr')" --confirm-required
-valid "confirm for a target that may exist is accepted (6b decides whether it must)"
-field "confirm" '.target.confirm' "orders-db-dr"
+invalid "…also when the run is a real restore" "orders-db-dr.confirm: not allowed" "only for an in-place restore"
+rm_run "$(X '' "$LATEST"$'\nconfirm: something-else')"
+invalid "a wrong confirm on a pair that is not in place says it is not allowed (not that the name differs)" "confirm: not allowed" "only for an in-place restore"
+rm_run "$(X "$SRCB" "$BACKUP"$'\nconfirm: orders-db-dr' | sed 's/aks-tpg-poc-02/aks-tpg-poc-01/')"
+invalid "confirm on a copy into another namespace of the same cluster is refused" "confirm: not allowed" "only for an in-place restore"
+rm_run "$(X "$SRCB" "$BACKUP"$'\nconfirm: orders-db' | sed 's/aks-tpg-poc-02/aks-tpg-poc-01/; s/pg-orders-dr/pg-orders/; s/orders-db-dr/orders-db-copy/')"
+invalid "confirm on a new instance in the source namespace is refused" "confirm: not allowed" "only for an in-place restore"
 rm_run "$(X '' "$LATEST"$'\nskipMinorVersionCheck: true\npostRestoreBackup: true')"
 valid "skipMinorVersionCheck and postRestoreBackup are accepted"
 field "skipMinorVersionCheck" '.target.skipMinorVersionCheck' "true"
@@ -446,6 +454,10 @@ vp P_CLUSTER_MAP="$(IP "$SRCB" "$BACKUP")" P_DRY_RUN=false
 vinvalid "restore: an in-place pair without confirm is refused when dryRun is false" "orders-db.confirm is required"
 vp P_CLUSTER_MAP="$(IP "$SRCB" "$BACKUP"$'\nconfirm: orders-db')" P_DRY_RUN=false
 vvalid "restore: an in-place pair with confirm is accepted when dryRun is false"
+vp P_CLUSTER_MAP="$(X '' "$LATEST"$'\nconfirm: orders-db-dr')" P_DRY_RUN=false
+vinvalid "restore: confirm on a pair that is not in place is refused at validate (a target that exists is TARGET_EXISTS at plan time)" "orders-db-dr.confirm: not allowed" "only for an in-place restore"
+vp P_CLUSTER_MAP="$(X '' "$LATEST"$'\nconfirm: orders-db-dr')"
+vinvalid "restore: …also while dryRun is true" "orders-db-dr.confirm: not allowed"
 # the in-place guard: clusters.<c>.cluster.allowInPlaceRestore (fleet.yaml override, else the template's false)
 IPC="$(IP "$SRCB" "$BACKUP"$'\nconfirm: orders-db')"
 vp P_CLUSTER_MAP="$IPC"

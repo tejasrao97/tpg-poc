@@ -400,9 +400,9 @@ mode base (R is the spec of the restored Postgres: the spec file of the pair, or
 cluster after the restore), in this order:
   1 R as it is. A field R does not set stays unset: no chart default (storageClassName, walStorageSize,
     resources, highAvailability, persistentVolumeClaimPolicy, ...), no value of the entry is filled in.
-  2 the fleet-managed references, always: backupLocation {name: <instance>-backup-location} and
-    imagePullSecret {name: regsecret} (they replace the ones in R: the instance is backed up through the
-    PostgresBackupLocation this chart renders and pulls with the Secret it renders)
+  2 the fleet-managed references, only where R omits them: backupLocation {name: <instance>-backup-location}
+    and imagePullSecret {name: regsecret} (the PostgresBackupLocation and the Secret this chart renders).
+    When R sets its own backupLocation or imagePullSecret, R's value is the value (each one on its own)
   3 later changes: for every field of tpg.restoredEntrySpec (the entry's instance block, nothing else):
     the field is DIFFERENT when tpg.restoredNorm of the entry's value and of R's value are not equal
     (compared as JSON; a field R lacks differs from any value the entry sets, except the defaults of
@@ -422,8 +422,9 @@ Postgres, overwriting the fields it sets): the normal render (tpg.postgres), the
   2 R merged over it (maps key by key, anything else replaces); a highAvailability block that does not
     say enabled true is removed (a single node has no block, and the render's readReplicas must not
     survive an R that says enabled false)
-  3 the fleet-managed references again, then the later changes as in base 3, but only for the fields R
-    sets (the render already carries the entry's values for the others)
+  3 the later changes as in base 3, but only for the fields R sets (the render already carries the entry's
+    values for the others). The fleet-managed references are those of the render (tpg.postgres) unless R sets
+    its own backupLocation or imagePullSecret, which win
   4 the current postgres patch file when it is not the one of the restore
 Last, tpg.prune (postgres.yaml) leaves out every field that holds its zero default.
 */ -}}
@@ -442,8 +443,11 @@ Last, tpg.prune (postgres.yaml) leaves out every field that holds its zero defau
 {{- end -}}
 {{- $_ := include "tpg.deepMerge" (dict "dst" $spec "src" (deepCopy $rp)) -}}
 {{- if and (eq $mode "over") (hasKey $spec "highAvailability") (kindIs "map" $spec.highAvailability) (ne (toString (dig "enabled" "" $spec.highAvailability)) "true") }}{{ $_ := unset $spec "highAvailability" }}{{ end -}}
-{{- $_ := set $spec "backupLocation" (dict "name" (printf "%s-backup-location" $name)) -}}
-{{- $_ := set $spec "imagePullSecret" (dict "name" "regsecret") -}}
+{{- /* the fleet-managed references fill in only what the restore-patch omits: its own backupLocation / imagePullSecret win (mode over: the render already carries the fleet's, R was merged over it) */ -}}
+{{- if eq $mode "base" -}}
+{{-   if not (dig "backupLocation" "name" "" $spec) }}{{ $_ := set $spec "backupLocation" (dict "name" (printf "%s-backup-location" $name)) }}{{ end -}}
+{{-   if not (dig "imagePullSecret" "name" "" $spec) }}{{ $_ := set $spec "imagePullSecret" (dict "name" "regsecret") }}{{ end -}}
+{{- end -}}
 {{- $ent := include "tpg.restoredEntry" $root | fromYaml -}}
 {{- $ins := dict -}}
 {{- if kindIs "map" $ent.instance }}{{ $ins = $ent.instance }}{{ end -}}
