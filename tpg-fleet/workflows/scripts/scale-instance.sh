@@ -34,6 +34,8 @@
 #   true, the step applies enabled false and readReplicas 0 to the live object
 #   with a server-side apply as field manager tpg-scale and records warning
 #   HA_FIELD_CO_OWNED naming the managers (D72).
+# A restored instance (tpg-restore, instance.restored): the entry fields written here differ from its restore-patch, so the chart renders
+# them over it (templates/_helpers.tpl tpg.restoredPostgres); the restore-patch itself is never touched.
 # P_DRY_RUN=true records the plan per instance and changes nothing.
 MODE="$1"; WF="$2"
 # shellcheck source=workflows/scripts/lib.sh

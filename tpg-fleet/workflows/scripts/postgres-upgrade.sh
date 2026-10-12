@@ -10,6 +10,8 @@
 # and a Succeeded backup from the last 26 hours (P_PRE_BACKUP=true takes one first).
 # After the upgrade, clusters.<cluster>.instances.<instance>.instance.postgresVersion is
 # written to clusters/fleet.yaml (PUSH_MODE direct | pr) and the Application is synced.
+# A restored instance (tpg-restore, instance.restored): the version written here differs from its restore-patch's, so the chart renders it
+# over the restore-patch (templates/_helpers.tpl tpg.restoredPostgres); the restore-patch itself is never touched.
 # P_DRY_RUN=true records the plan per instance and changes nothing.
 # Records result.<cluster>.<instance>. Exits 1 if any instance FAILED.
 WF="$1"; C="$2"; SELECTED="$4"; TIMEOUT="$5"

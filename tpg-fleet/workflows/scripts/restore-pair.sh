@@ -338,7 +338,7 @@ TGT_EXISTS=false; TGT_PG=""
 
 # The spec file (targetInstanceSpecFilePath) is the source of truth for the restored Postgres: its spec is rendered as it is as
 # spec.targetInstance.spec of the PostgresRestore (no merge over a chart render) and stored in the fleet repository as a restore-patch
-# that the chart applies last. Allowed for a new target and for an in-place restore.
+# that the chart renders the restored instance from (the render of a restored instance, tpg.restoredPostgres). Allowed for a new target and for an in-place restore.
 SPEC_JSON=""   # the spec of the spec file (compact JSON)
 load_spec() {  # load_spec: SPEC_JSON from the file; the pair fails with the reason when it cannot be used
   local sf="$WORK/spec-file.yaml" out
