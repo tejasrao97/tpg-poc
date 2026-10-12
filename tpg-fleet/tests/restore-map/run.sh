@@ -111,6 +111,16 @@ rm_run $'- sourceClusterConfig:\n    aks-tpg-poc-01:\n      pg-a:\n        a: {}
 invalid "two source instances are refused" "clusterMap[0].sourceClusterConfig.aks-tpg-poc-01.pg-a: exactly one instance is expected, found 2 (a, b)"
 rm_run $'- sourceClusterConfig:\n    aks-tpg-poc-01:\n      pg-a:\n        a: {}\n  targetClusterConfig:\n    aks-tpg-poc-02:\n      pg-c:\n        c1: {pitrEnabled: true, pitrConfig: {type: latest}}\n        c2: {pitrEnabled: true, pitrConfig: {type: latest}}'
 invalid "two target instances are refused" "clusterMap[0].targetClusterConfig.aks-tpg-poc-02.pg-c: exactly one instance is expected, found 2 (c1, c2)"
+rm_run '[{"sourceClusterConfig": {"aks-tpg-poc-01": {}}, "targetClusterConfig": {"aks-tpg-poc-02": {"pg-c": {"c": {"pitrEnabled": true, "pitrConfig": {"type": "latest"}}}}}}]'
+invalid "a cluster without a namespace is refused" "clusterMap[0].sourceClusterConfig.aks-tpg-poc-01: names no namespace"
+rm_run '[{"sourceClusterConfig": {"aks-tpg-poc-01": {"pg-a": {}}}, "targetClusterConfig": {"aks-tpg-poc-02": {"pg-c": {"c": {"pitrEnabled": true, "pitrConfig": {"type": "latest"}}}}}}]'
+invalid "a namespace without an instance is refused" "clusterMap[0].sourceClusterConfig.aks-tpg-poc-01.pg-a: names no instance"
+rm_run '[{"sourceClusterConfig": "x", "targetClusterConfig": {"aks-tpg-poc-02": {"pg-c": {"c": {"pitrEnabled": true, "pitrConfig": {"type": "latest"}}}}}}]'
+invalid "a side that is not a mapping is refused with the shape" "clusterMap[0].sourceClusterConfig: must be a mapping <cluster>: <namespace>: <instance>: {...} (exactly one cluster, namespace and instance)"
+rm_run '[{"sourceClusterConfig": {"aks-tpg-poc-01": "x"}, "targetClusterConfig": {"aks-tpg-poc-02": {"pg-c": {"c": {"pitrEnabled": true, "pitrConfig": {"type": "latest"}}}}}}]'
+invalid "a cluster whose namespaces are no mapping is refused at that level" "clusterMap[0].sourceClusterConfig.aks-tpg-poc-01: must be a mapping"
+rm_run '[{"sourceClusterConfig": {"aks-tpg-poc-01": {"pg-a": {"a": "text"}}}, "targetClusterConfig": {"aks-tpg-poc-02": {"pg-c": {"c": {"pitrEnabled": true, "pitrConfig": {"type": "latest"}}}}}}]'
+invalid "an instance whose keys are no mapping is refused" "clusterMap[0].sourceClusterConfig.aks-tpg-poc-01.pg-a.a: must be a mapping of keys (or empty)"
 rm_run $'- sourceClusterConfig: {}\n  targetClusterConfig:\n    aks-tpg-poc-02:\n      pg-c:\n        c: {pitrEnabled: true, pitrConfig: {type: latest}}'
 invalid "an empty source side is refused" "clusterMap[0].sourceClusterConfig: names no cluster"
 rm_run $'- sourceClusterConfig:\n    aks-tpg-poc-01:\n      orders-db:\n        sourceBackupName: x\n  targetClusterConfig:\n    aks-tpg-poc-02:\n      pg-c:\n        c: {pitrEnabled: true, pitrConfig: {type: latest}}'
@@ -428,6 +438,8 @@ MAP="$(X '' "$LATEST")"
 vp P_CLUSTER_MAP="$MAP"
 vvalid "restore: a clusterMap of one pair is accepted with the defaults (dryRun true, rolloutMode all)"
 jq -e 'length == 1 and .[0].method == "latest"' /tmp/pairs.json >/dev/null && ok "restore: the normalized pairs are written to /tmp/pairs.json" || bad "pairs.json" "$(cat /tmp/pairs.json 2>&1)"
+vp P_CLUSTER_MAP='[{sourceClusterConfig: {a: [}'
+vinvalid "restore: a clusterMap that is not YAML or JSON is refused" "clusterMap is not valid YAML or JSON"
 vp P_CLUSTER_MAP=""
 vinvalid "restore: clusterMap is mandatory" "clusterMap is mandatory" "sourceClusterConfig"
 vp P_CLUSTER_MAP='aks-tpg-poc-01: {instances: {orders-db: {}}}'
@@ -448,6 +460,8 @@ vp P_CLUSTER_MAP="$MAP" P_KEEP_SOURCE_LOCATION=sometimes
 vinvalid "restore: keepSourceLocation is true or false" "keepSourceLocation must be true or false"
 vp P_CLUSTER_MAP="$MAP" P_TIMEOUT=0
 vinvalid "restore: restoreTimeoutSeconds is a positive integer" "restoreTimeoutSeconds must be a positive integer"
+vp P_CLUSTER_MAP="$MAP" P_PR_TIMEOUT=0
+vinvalid "restore: prTimeoutSeconds is a positive integer" "prTimeoutSeconds must be a positive integer"
 vp P_CLUSTER_MAP="$(IP "$SRCB" "$BACKUP")"
 vvalid "restore: an in-place pair without confirm is accepted while dryRun is true (the default)"
 vp P_CLUSTER_MAP="$(IP "$SRCB" "$BACKUP")" P_DRY_RUN=false

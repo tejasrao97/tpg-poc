@@ -384,7 +384,12 @@ sl_map_validate() {  # sl_map_validate JSON -> 0 when clustermap.py accepts it f
   sl_flags_json > "$SL_TMP/flags.json"
   local reg=(); [[ -s "$SL_TMP/registered" ]] && reg=(--registered "$SL_TMP/registered")
   if [[ "$WF_TEMPLATE" == tpg-restore ]]; then   # a list of pairs (Round 23): clustermap.py restore
-    if out="$(python3 "${SL_ROOT}/workflows/scripts/clustermap.py" restore --map "$SL_TMP/map.json" --keys "$SL_TMP/keys.json" ${reg[@]+"${reg[@]}"})"; then
+    # the normalized pairs stay in $SL_TMP/pairs.json (the plan of each pair is printed from them); an in-place pair needs its
+    # confirm when the run is a real restore (dryRun false), as the validate step of the workflow checks
+    local opt=(); [[ "$(sl_val dryRun)" != false ]] || opt=(--confirm-required)
+    rm -f "$SL_TMP/pairs.json"
+    if out="$(python3 "${SL_ROOT}/workflows/scripts/clustermap.py" restore --map "$SL_TMP/map.json" --keys "$SL_TMP/keys.json" \
+        ${reg[@]+"${reg[@]}"} --out "$SL_TMP/pairs.json" ${opt[@]+"${opt[@]}"})"; then
       return 0
     fi
     sl_err "clusterMap is not valid for ${WF_TEMPLATE}:"

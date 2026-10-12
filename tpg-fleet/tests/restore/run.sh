@@ -18,6 +18,12 @@
 #   6 the location copy (create, reuse, SOURCE_LOCATION_CONFLICT) and its Secret (Vault, copied; never in a file, log or record)
 #   7 real runs: order of the steps, fleet entry, adoption, waits, timeouts, failures, postRestoreBackup, keepSourceLocation
 #   8 crashes (UNEXPECTED_ERROR) and the independence of pairs
+#   0 (first) the pair shapes: new cluster, same cluster another namespace, a new instance in the source namespace and in place, each with a named
+#     backup and every PITR type, with and without a spec file, as a dry run (read-only: no create, apply, patch or delete), with the
+#     rendered PostgresRestore and location copy checked; 7e the same shapes (three methods) in real runs; 7f the reasons no other case reaches;
+#     7g canary: a failed canary pair exits non-zero and stops the run
+#   RESTORE_RENDER_DIR=<dir>: only section 0 runs and the rendered PostgresRestore and PostgresBackupLocation of every shape are left in <dir>
+#     (<shape>-<recovery>-<spec>.restore.yaml and .location.yaml); tests/crd-reference checks them against the CRD schemas
 # Requires: bash 4, python3, jq, yq (mikefarah), helm; skipped without them.
 # shellcheck disable=SC2015,SC2016,SC2030,SC2031
 set -euo pipefail
@@ -97,6 +103,8 @@ printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVe
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  pgConfig:\n    dbname: orders\n' > "$RSD/orders-extra.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  backupLocation:\n    name: shared-location\n' > "$RSD/orders-loc.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n' > "$RSD/legacy.yaml"
+# a spec file that names the copy of the source backup location by its fixed name (restore-src-<cluster>-<namespace>-<instance>)
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  backupLocation:\n    name: restore-src-c1-pg-orders-orders-db\n' > "$RSD/orders-copyloc.yaml"
 
 # seed CLUSTER KIND NAMESPACE NAME JSON: an object of the fake cluster base state ("_" for cluster-scoped kinds)
 mkdir -p "$TMP/cl.base"
@@ -131,6 +139,8 @@ seed c1 postgresbackup pg-legacy legacy-full-1 '{"kind":"PostgresBackup","metada
 # a source whose instance is gone but whose backup and location are still there
 seed c1 postgresbackup pg-gone gone-full-1 '{"kind":"PostgresBackup","metadata":{"name":"gone-full-1","namespace":"pg-gone"},"spec":{"sourceInstance":{"name":"gone-db"},"type":"full"},"status":{"phase":"Succeeded","restoreLabel":"20200101-000000F","timeStarted":"2020-01-01T00:00:00Z","backupLocation":"gone-loc","stanzaName":"gone-stanza"}}'
 seed c1 postgresbackuplocation pg-gone gone-loc '{"kind":"PostgresBackupLocation","metadata":{"name":"gone-loc","namespace":"pg-gone"},"spec":{"storage":{"azure":{"container":"gone-container","repoPath":"/gone","secret":{"name":"backup-storage"}}}}}'
+# …and one that reports no backup location at all (nothing to copy for another namespace or cluster)
+seed c1 postgresbackup pg-gone gone-noloc '{"kind":"PostgresBackup","metadata":{"name":"gone-noloc","namespace":"pg-gone"},"spec":{"sourceInstance":{"name":"gone-db"},"type":"full"},"status":{"phase":"Succeeded","restoreLabel":"20200101-000000F","timeStarted":"2020-01-01T00:00:00Z"}}'
 # c2: an existing target in a fleet namespace
 seed c2 postgres pg-dr-existing dr-db '{"kind":"Postgres","metadata":{"name":"dr-db","namespace":"pg-dr-existing"},"spec":{"postgresVersion":{"name":"postgres-17.6"}},"status":{"currentState":"Running","stanzaName":"pg-dr-existing-dr-db-0000"}}'
 for s in regsecret backup-storage; do
@@ -194,6 +204,7 @@ app_sync_wait() {
     ns="${n#*:*:}"; ns="${ns%%/*}"
     case "$n" in
       *VaultStaticSecret:*/regsecret|*VaultStaticSecret:*/backup-storage)
+        flag sync.nosecret && continue
         local s="${n##*/}" a="${app}"
         mkdir -p "$CLD/$CLUSTER/secret/$ns"
         jq -cn --arg n "$s" --arg ns "$ns" --arg a "$a" '{kind: "Secret", metadata: {name: $n, namespace: $ns, annotations: {"argocd.argoproj.io/tracking-id": ($a + ":x")}}, data: {accountKey: ("@VAULT_KEY@" | @base64)}}' > "$CLD/$CLUSTER/secret/$ns/$s.json" ;;
@@ -220,6 +231,8 @@ tk() {
   done
   local verb="${pos[0]:-}" kind="${pos[1]:-}" name="${pos[2]:-}"
   [[ ! -e "$FLAGS/tkfail.${CLUSTER}.${kind}" ]] || { echo "Error from server (Forbidden): ${kind} is forbidden: User cannot list" >&2; return 1; }
+  # a list of one namespace (no name, no -A) that fails, while the reads by name and the cluster-wide lists work
+  [[ "$verb" != get || -n "$name" || "$all" == true || ! -e "$FLAGS/tkfail.nslist.${CLUSTER}.${kind}" ]] || { echo "Error from server (Forbidden): ${kind} is forbidden: User cannot list in ${ns}" >&2; return 1; }
   case "$verb" in
     get)
       d="$CLD/$CLUSTER/$kind/${ns:-_}"
@@ -274,9 +287,14 @@ tk() {
           fi ;;
       esac ;;
     create)
+      ev "create ${CLUSTER} ${kind} ${name}"
       [[ "$kind" == namespace ]] && printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n' "$name" ;;
+    patch) ev "patch ${CLUSTER} ${kind} ${ns}/${name}" ;;
     label) ev "label ${CLUSTER} ${kind} ${name}" ;;
-    delete) ev "delete ${CLUSTER} ${kind} ${ns}/${name}"; rm -f "$CLD/$CLUSTER/$kind/${ns:-_}/$name.json" ;;
+    delete)
+      ev "delete ${CLUSTER} ${kind} ${ns}/${name}"
+      [[ ! -e "$FLAGS/delete.fail.${kind}" ]] || { echo "Error from server (Forbidden): ${kind} ${name} cannot be deleted" >&2; return 1; }
+      rm -f "$CLD/$CLUSTER/$kind/${ns:-_}/$name.json" ;;
     *) return 0 ;;
   esac
 }
@@ -340,7 +358,7 @@ restore_yaml() { plan_block 'PostgresRestore .* on '; }
 snapshot() { (cd "$TMP/cl" && find . -type f | sort | xargs cat | sha256sum | cut -c1-16; sha256sum < "$TMP/fleet.repo/clusters/fleet.yaml" | cut -c1-16) | paste -sd' ' -; }
 nothing_changed() {  # nothing_changed LABEL SNAPSHOT_BEFORE: the clusters, the fleet repository and the Argo CD calls are as they were
   local after; after="$(snapshot)"
-  if [[ "$after" == "$2" ]] && ! grep -qE '^(apply|push|sync|adopt|delete|label|lock)' "$TMP/events"; then ok "$1: read-only (no object changed, nothing pushed, no Argo CD call)"
+  if [[ "$after" == "$2" ]] && ! grep -qE '^(apply|push|sync|adopt|delete|label|lock|create|patch)' "$TMP/events"; then ok "$1: read-only (no object created, applied, patched or deleted, nothing pushed, no Argo CD call)"
   else bad "$1: read-only" "before $2 after $after
 $(cat "$TMP/events")"; fi
 }
@@ -359,6 +377,75 @@ ORDERS_BACKUP='sourceBackupName: orders-full-1'
 BACKUP_T='pitrEnabled: false'
 LATEST=$'pitrEnabled: true\npitrConfig:\n  type: latest'
 SPECF='targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/legacy.yaml]'
+
+echo "== 0. the pair shapes: where it restores x the recovery point x spec file (dry run, read-only), rendered objects checked"
+SHAPES="${RESTORE_RENDER_DIR:-$TMP/shapes}"; mkdir -p "$SHAPES"
+COPYN=restore-src-c1-pg-orders-orders-db      # the copy of the source backup location (fixed name) in another namespace or cluster
+declare -A SH_TGT=([newcluster]=c2/pg-dr/orders-dr [othernamespace]=c1/pg-orders-dr/orders-dr [samenamespace]=c1/pg-orders/orders-copy [inplace]=c1/pg-orders/orders-db)
+declare -A REC_TGT=([backup]="$BACKUP_T" [latest]="$LATEST"
+  [time]=$'pitrEnabled: true\nbestEffort: true\npitrConfig:\n  type: time\n  timestamp: 2024-06-01T00:00:00Z'
+  [lsn]=$'pitrEnabled: true\nbestEffort: false\npitrConfig:\n  type: lsn\n  target: 0/3000060'
+  [transaction]=$'pitrEnabled: true\nbestEffort: true\npitrConfig:\n  type: transaction\n  target: "987654"')
+SPEC_ORDERS='targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-dr.yaml]'
+shape_pair() {  # shape_pair SHAPE RECOVERY SPEC(spec|nospec): PJ, T (cluster, namespace, instance of the target), RK, RKP
+  local tkeys="${REC_TGT[$2]}" skeys=""
+  [[ "$2" != backup ]] || skeys="$ORDERS_BACKUP"
+  [[ "$1" != inplace ]] || tkeys+=$'\nconfirm: orders-db'
+  [[ "$3" != spec ]] || tkeys+=$'\n'"$SPEC_ORDERS"
+  mk c1/pg-orders/orders-db "$skeys" "${SH_TGT[$1]}" "$tkeys"
+  IFS=/ read -ra T <<<"${SH_TGT[$1]}"; RK="${T[0]}.${T[2]}"; RKP="$RK"
+}
+shape_check() {  # shape_check TAG SHAPE RECOVERY SPEC Y C: the rendered PostgresRestore (Y) and location copy (C) say what the shape and the recovery point say
+  local tag="$1" shape="$2" kind="$3" spec="$4" y="$5" c="$6" why="" want_loc="$COPYN" p
+  case "$shape" in samenamespace|inplace) want_loc=orders-db-backup-location ;; esac
+  [[ "$(yq '.kind' <<<"$y")" == PostgresRestore && "$(yq '.spec.targetInstance.name' <<<"$y")" == "${T[2]}" ]] || why+=" kind or targetInstance.name;"
+  [[ "$(yq '.spec.targetInstance | has("spec")' <<<"$y")" == "$([[ "$spec" == spec ]] && echo true || echo false)" ]] || why+=" targetInstance.spec only with a spec file;"
+  if [[ "$spec" == spec ]]; then [[ "$(yq '.spec.targetInstance.spec.storageSize' <<<"$y")" == 50Gi ]] || why+=" the spec file's storageSize;"; fi
+  if [[ "$kind" == backup ]]; then
+    [[ "$(yq '.spec.sourceBackup.name' <<<"$y")" == orders-full-1 && "$(yq '.spec | has("pitr")' <<<"$y")" == false ]] || why+=" spec.sourceBackup.name without pitr;"
+  else
+    p='.spec.pitr'
+    [[ "$(yq "$p.type" <<<"$y")" == "$kind" && "$(yq '.spec | has("sourceBackup")' <<<"$y")" == false \
+       && "$(yq "$p.sourceBackupLocation.stanzaName" <<<"$y")" == pg-orders-orders-db-0000 && "$(yq "$p.sourceBackupLocation.name" <<<"$y")" == "$want_loc" ]] \
+      || why+=" spec.pitr type, repository ($want_loc) or stanza, or a sourceBackup next to it;"
+    case "$kind" in
+      latest) [[ "$(yq "$p | has(\"bestEffort\") or has(\"timestamp\") or has(\"target\")" <<<"$y")" == false ]] || why+=" latest carries bestEffort, timestamp or target;" ;;
+      time) [[ "$(yq "$p.timestamp" <<<"$y")" == 2024-06-01T00:00:00Z && "$(yq "$p.bestEffort" <<<"$y")" == true ]] || why+=" time: timestamp, bestEffort;" ;;
+      lsn) [[ "$(yq "$p.target" <<<"$y")" == 0/3000060 && "$(yq "$p | has(\"bestEffort\")" <<<"$y")" == false ]] || why+=" lsn: target (bestEffort false is a zero default);" ;;
+      transaction) [[ "$(yq "$p.target" <<<"$y")" == 987654 && "$(yq "$p.bestEffort" <<<"$y")" == true ]] || why+=" transaction: target, bestEffort;" ;;
+    esac
+  fi
+  case "$shape" in
+    newcluster|othernamespace) [[ "$(yq '.kind' <<<"$c")" == PostgresBackupLocation && "$(yq '.metadata.name' <<<"$c")" == "$COPYN" && "$(yq '.spec.backupSync.enabled' <<<"$c")" == true ]] \
+        || why+=" the location copy ($COPYN, backupSync on);" ;;
+    *) [[ -z "$c" ]] || why+=" a location copy although the namespace is the source's;" ;;
+  esac
+  [[ -z "$why" ]] && ok "$tag: the PostgresRestore says $( [[ "$kind" == backup ]] && echo "sourceBackup" || echo "pitr $kind" ), targetInstance ${T[2]}$( [[ "$spec" == spec ]] && echo " with the spec file's spec" ), $( [[ -n "$c" ]] && echo "the location copy is rendered" || echo "no location copy" )" \
+    || bad "$tag:$why" "$y
+$c"
+}
+for shape in newcluster othernamespace samenamespace inplace; do
+  reset
+  for kind in backup latest time lsn transaction; do
+    for spec in nospec spec; do
+      tag="$shape $kind $spec"
+      shape_pair "$shape" "$kind" "$spec"
+      snap="$(snapshot)"; run "$PJ"
+      if [[ "$(st)" == SUCCEEDED && "$(reason)" == DRY_RUN ]]; then
+        Y="$(restore_yaml)"; C="$(plan_block 'PostgresBackupLocation .* on ')"
+        printf '%s\n' "$Y" > "$SHAPES/${shape}-${kind}-${spec}.restore.yaml"
+        [[ -z "$C" ]] || printf '%s\n' "$C" > "$SHAPES/${shape}-${kind}-${spec}.location.yaml"
+        shape_check "$tag" "$shape" "$kind" "$spec" "$Y" "$C"
+      else bad "$tag: dry run (got $(st)/$(reason), want SUCCEEDED/DRY_RUN)" "$(detail)
+$(tail -8 <<<"$OUT")"; fi
+      nothing_changed "$tag" "$snap"
+    done
+  done
+done
+if [[ -n "${RESTORE_RENDER_DIR:-}" ]]; then
+  echo; echo "tests/restore (render only): ${PASS} passed, ${FAIL} failed; the rendered objects are in ${RESTORE_RENDER_DIR}"
+  [[ "$FAIL" -eq 0 ]]; exit
+fi
 
 echo "== 1. plans: dryRun records the plan and changes nothing"
 reset
@@ -757,6 +844,65 @@ run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
 expect "a reused location with keepSourceLocation=false: SUCCEEDED" SUCCEEDED ""
 [[ -f "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json" ]] && ! ev_has '^delete' && ! ev_has 'apply c2 postgresbackuplocation' && ok "…the reused location is neither created nor deleted" || bad "reused location touched" "$(cat "$TMP/events")"
 jq -e --arg n earlier-copy '.spec | tostring | contains("earlier-copy")' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json >/dev/null 2>&1 && ok "…and the PostgresRestore does not depend on a new copy (named backup: spec.sourceBackup.name)" || ok "…the named backup restore uses spec.sourceBackup.name"
+
+echo "-- keepSourceLocation=false keeps a copy that an instance of the namespace uses (SOURCE_LOCATION_IN_USE)"
+COPYN=restore-src-c1-pg-orders-orders-db
+COPYF="$TMP/cl/c2/postgresbackuplocation/pg-dr/$COPYN.json"
+RK=c2.orders-dr
+reset
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"
+set_flag sync.names "orders-full-1"
+# live snapshot: the operator gave the restored Postgres the copy as its backupLocation
+run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false SNAP_EXTRA='{"backupLocation":{"name":"'"$COPYN"'"}}'
+expect "a restored Postgres (live snapshot) that uses the copy: SUCCEEDED, the copy is kept" SUCCEEDED "" "SOURCE_LOCATION_IN_USE" "orders-dr"
+[[ -f "$COPYF" ]] && ! ev_has '^delete' && ok "…the copy is not deleted" || bad "copy deleted while the restored instance uses it" "$(cat "$TMP/events")"
+[[ "$(cat "$TMP/rec/warning.c2.orders-dr.SOURCE_LOCATION_IN_USE.status" 2>/dev/null)" == WARNING ]] \
+  && grep -qF "$COPYN" "$TMP/rec/warning.c2.orders-dr.SOURCE_LOCATION_IN_USE.detail" && grep -qF "orders-dr" "$TMP/rec/warning.c2.orders-dr.SOURCE_LOCATION_IN_USE.detail" \
+  && ok "…SOURCE_LOCATION_IN_USE is a warning of the report that names the copy and the instance" || bad "in-use warning" "$(cat "$TMP/records")"
+# a spec file that names the copy: planned (the copy is created by this run before the instance needs it), kept after the restore
+reset
+RK=c2.orders-dr; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"$'\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-copyloc.yaml]'
+run "$PJ"
+expect "a spec file that names the copy this run creates: the dry run plans it (not BACKUP_LOCATION_MISSING)" SUCCEEDED DRY_RUN
+set_flag sync.names "orders-full-1"
+run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
+expect "…a real run with keepSourceLocation=false: SUCCEEDED, the copy is kept" SUCCEEDED "" "SOURCE_LOCATION_IN_USE" "orders-dr"
+[[ -f "$COPYF" ]] && ! ev_has '^delete' && ok "…the copy named by the spec file is not deleted" || bad "copy deleted while the spec file names it" "$(cat "$TMP/events")"
+# the spec file names the fixed copy name, but this run reuses another location for the same repository: that name does not exist
+reset
+mkdir -p "$TMP/cl/c2/postgresbackuplocation/pg-dr"
+printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"earlier-copy","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"pg-backups-c1","repoPath":"/pg-orders"}},"backupSync":{"enabled":true}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json"
+run "$PJ"
+expect "a spec file that names the copy's fixed name while another location is reused: BACKUP_LOCATION_MISSING" FAILED BACKUP_LOCATION_MISSING "$COPYN" "earlier-copy"
+# another instance of the target namespace uses the copy: kept, named
+reset
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"
+set_flag sync.names "orders-full-1"
+seed_pg() { mkdir -p "$TMP/cl/c2/postgres/pg-dr"; jq -cn --arg n "$1" --arg l "$2" '{kind: "Postgres", metadata: {name: $n, namespace: "pg-dr"}, spec: {postgresVersion: {name: "postgres-17.6"}, backupLocation: {name: $l}}}' > "$TMP/cl/c2/postgres/pg-dr/$1.json"; }
+seed_pg neighbour-db "$COPYN"
+run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
+expect "another Postgres of the namespace uses the copy: SUCCEEDED, kept, the warning names that instance" SUCCEEDED "" "SOURCE_LOCATION_IN_USE" "neighbour-db"
+[[ -f "$COPYF" ]] && ! ev_has '^delete' && ok "…the copy is not deleted" || bad "copy deleted while a neighbour uses it" "$(cat "$TMP/events")"
+# every Postgres of the namespace is read: instances that use other locations do not keep it
+reset
+set_flag sync.names "orders-full-1"
+seed_pg neighbour-db some-other-location
+run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
+expect "no Postgres of the namespace uses the copy (a neighbour uses another location): SUCCEEDED, removed" SUCCEEDED "" "removed (keepSourceLocation=false)"
+[[ ! -f "$COPYF" ]] && ev_has '^delete c2 postgresbackuplocation pg-dr/restore-src' && [[ ! -e "$TMP/rec/warning.c2.orders-dr.SOURCE_LOCATION_IN_USE.status" ]] \
+  && ok "…the copy is deleted and there is no SOURCE_LOCATION_IN_USE warning" || bad "copy not removed although unused" "$(cat "$TMP/events")"
+# the Postgres list of the namespace cannot be read: the copy is kept (fail closed) with the warning SOURCE_LOCATION_NOT_REMOVED
+reset
+set_flag sync.names "orders-full-1"; set_flag tkfail.nslist.c2.postgres
+run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
+expect "the Postgres list of the namespace cannot be read: SUCCEEDED, the copy is kept (SOURCE_LOCATION_NOT_REMOVED)" SUCCEEDED "" "SOURCE_LOCATION_NOT_REMOVED" "Forbidden"
+[[ -f "$COPYF" ]] && ! ev_has '^delete' && ok "…nothing is deleted when no instance can be ruled out" || bad "copy deleted without checking" "$(cat "$TMP/events")"
+# the delete itself fails: the pair stays SUCCEEDED with the warning SOURCE_LOCATION_NOT_REMOVED
+reset
+set_flag sync.names "orders-full-1"; set_flag delete.fail.postgresbackuplocation
+run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
+expect "the copy cannot be deleted: SUCCEEDED with the warning SOURCE_LOCATION_NOT_REMOVED" SUCCEEDED "" "SOURCE_LOCATION_NOT_REMOVED" "delete it by hand"
+[[ "$(cat "$TMP/rec/warning.c2.orders-dr.SOURCE_LOCATION_NOT_REMOVED.status" 2>/dev/null)" == WARNING ]] && ok "…recorded as a warning of the report" || bad "not-removed warning" "$(cat "$TMP/records")"
 
 echo "-- the wait for the synced backup"
 reset
@@ -1285,6 +1431,119 @@ RC=0; OUT="$(cd "$UP" && env P_PRE_BACKUP=false P_PUSH_MODE=direct P_SPEC_WAIT_S
 UPR="$(source "$UP/prelude.sh"; instance_render "$UP/repo" c1 up-db | yq -o=json -I=0 'select(.kind == "Postgres") | .spec')"
 [[ "$(jq -r '.postgresVersion.name' <<<"$UPR")" == postgres-17.8 && "$(jq -r '.storageSize' <<<"$UPR")" == 50Gi && "$(jq -r '.logLevel' <<<"$UPR")" == Debug && "$(jq 'has("walStorageSize")' <<<"$UPR")" == false ]] \
   && ok "…and the chart renders the new version over the restore-patch's 17.6, everything else of the restore-patch as it is" || bad "restored upgrade render" "$UPR"
+
+echo "== 7e. real runs: the three methods (a new instance on another cluster, in another namespace of the cluster, in place) x a named backup and each PITR type"
+real_check() {  # real_check SHAPE RECOVERY: a real run without a spec file (the spec of the restored Postgres is read from the cluster)
+  local shape="$1" kind="$2" tag="real $1 $2" r why="" n_restore adopt_ev
+  reset; set_flag sync.names "orders-full-1"
+  rm -f "$TMP/cl/c1/postgresbackup/pg-orders/orders-running.json"   # a backup that is still running holds an in-place target (OPERATION_IN_PROGRESS)
+  shape_pair "$shape" "$kind" nospec
+  run "$PJ" P_DRY_RUN=false
+  if [[ "$(st)" != SUCCEEDED ]]; then bad "$tag: got $(st)/$(reason), want SUCCEEDED" "$(detail)
+$(tail -8 <<<"$OUT")"; return; fi
+  n_restore="$(find "$TMP/cl/${T[0]}/postgresrestore/${T[1]}" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+  [[ "$n_restore" == 1 ]] || { bad "$tag: ${n_restore} PostgresRestore objects were applied, want 1" "$(cat "$TMP/events")"; return; }
+  r="$(cat "$TMP/cl/${T[0]}/postgresrestore/${T[1]}/"*.json)"
+  if [[ "$kind" == backup ]]; then
+    [[ "$(jq -r '.spec.sourceBackup.name' <<<"$r")" == orders-full-1 && "$(jq '.spec | has("pitr")' <<<"$r")" == false ]] || why+=" spec.sourceBackup;"
+  else
+    [[ "$(jq -r '.spec.pitr.type' <<<"$r")" == "$kind" && "$(jq '.spec | has("sourceBackup")' <<<"$r")" == false ]] || why+=" spec.pitr.type ${kind};"
+  fi
+  [[ "$(jq -r '.spec.targetInstance.name' <<<"$r")" == "${T[2]}" ]] || why+=" targetInstance.name;"
+  # the copy of the source location: another namespace or cluster only
+  if [[ "$shape" == inplace || "$shape" == samenamespace ]]; then
+    [[ ! -f "$TMP/cl/${T[0]}/postgresbackuplocation/${T[1]}/$COPYN.json" ]] || why+=" a location copy in the source namespace;"
+  else
+    [[ -f "$TMP/cl/${T[0]}/postgresbackuplocation/${T[1]}/$COPYN.json" ]] || why+=" no location copy;"
+  fi
+  # a named backup into another namespace or cluster waits for the synced backup; nothing else does
+  if [[ "$kind" == backup && "$shape" != inplace && "$shape" != samenamespace ]]; then
+    grep -q "PostgresBackup ${T[1]}/orders-full-1 synced and Succeeded" <<<"$(detail)" || why+=" no wait for the synced backup;"
+  else
+    ! grep -q "synced and Succeeded" <<<"$(detail)" || why+=" a wait for a synced backup;"
+  fi
+  # a new instance is adopted by its Application, an instance restored in place already is managed
+  adopt_ev="^adopt ${T[0]} ${T[2]}"
+  if [[ "$shape" == inplace ]]; then ev_has '^adopt' && why+=" an adoption sync of an instance that is managed already;"
+  else ev_has "$adopt_ev" || why+=" no adoption sync;"; fi
+  ev_has 'APPLIED-SHARED' && why+=" a shared object was applied by the workflow;"
+  [[ -z "$why" ]] && ok "$tag: SUCCEEDED; the applied PostgresRestore says $( [[ "$kind" == backup ]] && echo sourceBackup || echo "pitr $kind" ), the copy, the wait and the adoption are as the shape says" \
+    || bad "$tag:$why" "$(detail)
+$(cat "$TMP/events")"
+}
+for shape in newcluster othernamespace inplace; do
+  for kind in backup latest time lsn transaction; do real_check "$shape" "$kind"; done
+done
+
+echo "== 7f. reasons no other case reaches"
+# FLEET_EDIT_FAILED: the entry of the new instance (with the restore-patch of its spec file) cannot be written to the clone of clusters/fleet.yaml
+# (the helper that stores the restore-patch fails, as a full disk or a broken yq would make it)
+reset
+cat > "$TMP/editfail.sh" <<'OV'
+restore_patch_store() { echo "no space left on device" >&2; return 1; }
+OV
+sed -e "s#source $TMP/prelude.sh#source $TMP/prelude.sh; source $TMP/editfail.sh#" "$TMP/restore-pair.sh" > "$TMP/restore-pair-editfail.sh"
+RK=c2.orders-dr; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"$'\n'"$SPECF"
+snap="$(snapshot)"
+RC=0; OUT="$(cd "$TMP" && env P_DRY_RUN=true P_PAIR="$PJ" bash "$TMP/restore-pair-editfail.sh" tpg-restore-x 2>&1)" || RC=$?
+expect "the entry of the new instance cannot be written: FLEET_EDIT_FAILED" FAILED FLEET_EDIT_FAILED "clusters/fleet.yaml"
+[[ "$RC" -ne 0 ]] && ok "FLEET_EDIT_FAILED exits non-zero" || bad "FLEET_EDIT_FAILED rc"
+nothing_changed "FLEET_EDIT_FAILED" "$snap"
+# SECRET_NOT_SYNCED: the owner's Application synced the VaultStaticSecrets but the Secrets never appear
+reset
+set_flag sync.names "orders-full-1"; set_flag sync.nosecret
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
+expect "the Secrets of the shared objects never appear in the namespace: SECRET_NOT_SYNCED" FAILED SECRET_NOT_SYNCED "pg-dr/regsecret"
+! ev_has '^apply c2 postgresrestore' && ok "…no PostgresRestore is created without the Secrets" || bad "restore created without secrets" "$(cat "$TMP/events")"
+# SOURCE_LOCATION_UNKNOWN: a named backup of an instance that is gone reports no backup location, and the copy needs one
+reset
+RK=c2.orders-dr; mk c1/pg-gone/gone-db 'sourceBackupName: gone-noloc' c2/pg-dr/orders-dr "$BACKUP_T"$'\n'"$SPECF"; run "$PJ"
+expect "a source backup without a backup location and no live source: SOURCE_LOCATION_UNKNOWN" FAILED SOURCE_LOCATION_UNKNOWN "gone-noloc" "backup location to copy into pg-dr is unknown"
+mk c1/pg-gone/gone-db 'sourceBackupName: gone-full-1' c2/pg-dr/orders-dr "$BACKUP_T"$'\n'"$SPECF"; run "$PJ"
+expect "…a backup that reports its location (gone-full-1) plans" SUCCEEDED DRY_RUN
+
+echo "== 7g. canary: a failed canary pair exits non-zero and stops the run"
+# the batching (plan-batches.sh, with the stub lib of tests/rollout) of two real normalized pairs
+cat > "$TMP/pb-lib.sh" <<'LIB'
+log() { printf '%s\n' "$*" >&2; }
+LIB
+sed "s#source /scripts/lib.sh#source $TMP/pb-lib.sh#" "$ROOT/workflows/scripts/plan-batches.sh" > "$TMP/plan-batches.sh"
+reset
+mk c1/pg-orders/orders-db 'sourceBackupName: orders-nope' c2/pg-dr/orders-dr "$BACKUP_T"; P0="$PJ"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr2/orders-dr2 "$BACKUP_T"; P1="$PJ"
+PAIRS="$(jq -cs 'to_entries | map(.value.index = .key | .value)' <<<"$P0"$'\n'"$P1")"
+(cd "$TMP" && P_PAIRS="$PAIRS" bash "$TMP/plan-batches.sh" tpg-restore-x false 2 canary >/dev/null 2>&1)
+[[ "$(jq -c 'map(map(.index))' /tmp/batches.json)" == '[[0],[1]]' ]] && ok "rolloutMode canary: the first pair is a batch of its own, the second pair comes after it" || bad "canary batches" "$(cat /tmp/batches.json)"
+# the canary pair fails (a missing source backup), is blocked (matrix) or runs out of time: the step exits non-zero, which fails the canary step
+canary_stops() {  # canary_stops LABEL WANT_STATUS WANT_REASON [VAR=VALUE...]: the first pair ends so, the exit code is non-zero, and the run does not go on to the second pair
+  local label="$1" ws="$2" wr="$3"; shift 3
+  rm -rf "$TMP/rec"; mkdir -p "$TMP/rec"; : > "$TMP/events"
+  RK=c2.orders-dr; run "$P0" "$@"
+  local rc0="$RC" started=no
+  # what the template does: the canary step is the first batch; a non-zero exit fails it and the later batches never start
+  if [[ "$rc0" -eq 0 ]]; then started=yes; RK=c2.orders-dr2; run "$P1" "$@"; fi
+  RK=c2.orders-dr
+  if [[ "$(st)" == "$ws" && "$(reason)" == "$wr" && "$rc0" -ne 0 && "$started" == no && ! -e "$TMP/rec/result.c2.orders-dr2.status" ]] && ! ev_has 'dr2'; then
+    ok "$label: the canary pair ends $ws/$wr with a non-zero exit, so the canary step fails and the second pair never starts"
+  else bad "$label: got $(st)/$(reason) rc=${rc0}, second pair started: ${started}" "$(detail)"; fi
+}
+canary_stops "a canary whose source backup is missing" FAILED SOURCE_BACKUP_UNVERIFIED
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"$'\n'"$(printf 'targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-lite.yaml]')"; P0="$PJ"
+canary_stops "a canary the matrix blocks (standard backup into a lite instance)" BLOCKED RESTORE_FLAVOUR_UNSUPPORTED
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; P0="$PJ"
+set_flag sync.mode never; set_flag sync.names "orders-full-1"
+canary_stops "a canary that runs out of time (the backup never syncs)" FAILED BACKUPS_NOT_SYNCED P_DRY_RUN=false P_TIMEOUT=60
+rm -f "$TMP/flags/sync.mode"
+# a good canary lets the run go on
+RK=c2.orders-dr; reset; set_flag sync.names "orders-full-1"; run "$P0"
+[[ "$RC" -eq 0 && "$(st)" == SUCCEEDED ]] && ok "a canary pair that succeeds exits zero, so the run goes on to the next batch" || bad "good canary rc" "$(detail)"
+# the template: only the canary step lacks continueOn, and the rest runs in a later step group
+TPLR="$ROOT/workflows/templates/tpg-restore.yaml"
+[[ "$(yq '[.spec.templates[] | select(.name == "main") | .steps[][] | select(.name == "canary") | has("continueOn")][0]' "$TPLR")" == false \
+   && "$(yq '[.spec.templates[] | select(.name == "restore-batch") | .steps[][] | has("continueOn")][0]' "$TPLR")" == false \
+   && "$(yq '[.spec.templates[] | select(.name == "main") | .steps[][] | select(.name == "first") | .continueOn.failed][0]' "$TPLR")" == true \
+   && "$(yq '[.spec.templates[] | select(.name == "main") | .steps | to_entries | .[] | select(.value[].name == "canary") | .key][0] < [.spec.templates[] | select(.name == "main") | .steps | to_entries | .[] | select(.value[].name == "rest") | .key][0]' "$TPLR")" == true ]] \
+  && ok "template: the canary step and the pair step inside it have no continueOn (a failed pair fails the canary), and rest runs in a later step group" || bad "canary in the template"
 
 echo "== 8. crashes and unknown clusters"
 reset

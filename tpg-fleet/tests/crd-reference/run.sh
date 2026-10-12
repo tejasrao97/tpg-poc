@@ -17,6 +17,11 @@
 #                (checked below; tests/restore checks the rendered objects)
 #   schemas      every reference render and inline object passes kubeconform
 #                -strict against the live CRD schemas (when kubeconform is installed)
+#   restore      the PostgresRestore and the location copy that restore-pair.sh renders for every pair
+#                shape (a new instance on another cluster, in another namespace of the cluster, in the
+#                source namespace, in place) x a named backup and each PITR type x with and without a
+#                spec file pass kubeconform -strict, the embedded targetInstance.spec included. The
+#                objects are captured from tests/restore (RESTORE_RENDER_DIR, section 0), not rendered again here
 # Requires: helm, yq (mikefarah), python3 with PyYAML; skipped without them.
 # shellcheck disable=SC2015,SC2016
 set -euo pipefail
@@ -125,6 +130,43 @@ if command -v kubeconform >/dev/null; then
   printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: PostgresBackup\nmetadata: {name: x}\nspec: {sourceInstance: {name: i}, typo: full}\n' > "$TMP/typo.yaml"
   kubeconform -strict -schema-location "$SCHEMAS" "$TMP/typo.yaml" >/dev/null 2>&1 && bad "a misspelled field must fail the schema" \
     || ok "a misspelled spec field fails kubeconform -strict (the schemas are closed)"
+fi
+
+# ---- the objects restore-pair.sh renders for every pair shape: captured from tests/restore (its dry-run matrix), checked against the CRD schemas
+if command -v kubeconform >/dev/null; then
+  if [[ ! -f "$ROOT/tests/restore/run.sh" ]]; then bad "restore render: tests/restore/run.sh is missing"
+  else
+    RD="$TMP/restore-shapes"; mkdir -p "$RD"
+    RC=0; RLOG="$(RESTORE_RENDER_DIR="$RD" bash "$ROOT/tests/restore/run.sh" 2>&1)" || RC=$?
+    nr="$(find "$RD" -name '*.restore.yaml' | wc -l | tr -d ' ')"; nl="$(find "$RD" -name '*.location.yaml' | wc -l | tr -d ' ')"
+    if [[ "$RC" -ne 0 ]]; then bad "restore render: tests/restore in render-only mode failed" "$RLOG"
+    elif [[ "$nr" -eq 0 ]] && grep -q '^SKIP' <<<"$RLOG"; then echo "SKIP the restore shapes: $(grep '^SKIP' <<<"$RLOG" | head -1)"
+    elif [[ "$nr" != 40 || "$nl" != 20 ]]; then bad "restore render: expected 40 PostgresRestore and 20 location copies (4 shapes x 5 recovery points x 2 spec files; 2 shapes copy the location), got ${nr} and ${nl}" "$(ls "$RD")"
+    else
+      kc_group() {  # kc_group LABEL GLOB...: the captured objects matching the globs all pass kubeconform -strict
+        local label="$1" files=() g f n
+        shift
+        for g in "$@"; do for f in "$RD"/$g; do [[ -f "$f" ]] && files+=("$f"); done; done
+        n="${#files[@]}"
+        [[ "$n" -gt 0 ]] || { bad "restore render ${label}: no object matches"; return; }
+        kubeconform -strict -summary -schema-location "$SCHEMAS" "${files[@]}" >"$TMP/kc" 2>&1 && grep -q "Valid: ${n}, Invalid: 0, Errors: 0" "$TMP/kc" \
+          && ok "restore render, ${label}: ${n} objects pass kubeconform -strict against the CRD schemas" || bad "restore render ${label}" "$(cat "$TMP/kc")"
+      }
+      kc_group "a new instance on another cluster" 'newcluster-*'
+      kc_group "a new instance in another namespace of the cluster" 'othernamespace-*'
+      kc_group "a new instance in the source namespace" 'samenamespace-*'
+      kc_group "in place" 'inplace-*'
+      kc_group "a named backup" '*-backup-*'
+      for k in latest time lsn transaction; do kc_group "pitr ${k}" "*-${k}-*"; done
+      kc_group "without a spec file" '*-nospec.*'
+      kc_group "with a spec file (the embedded targetInstance.spec)" '*-spec.*'
+      # the embedded Postgres spec is checked as well: a misspelled field in it fails
+      yq '.spec.targetInstance.spec.noSuchField = 1' "$RD/newcluster-latest-spec.restore.yaml" > "$TMP/typo-restore.yaml"
+      kubeconform -strict -schema-location "$SCHEMAS" "$TMP/typo-restore.yaml" >/dev/null 2>&1 \
+        && bad "an unknown field in the embedded targetInstance.spec must fail the schema" \
+        || ok "an unknown field in the embedded targetInstance.spec fails kubeconform -strict (the schema reaches into it)"
+    fi
+  fi
 fi
 
 # ---- parity: the objects the workflow scripts write inline (D69, hand-applied skip rule)

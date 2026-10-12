@@ -30,6 +30,7 @@ for t in bash sh env python3 jq yq sed tr cut sort grep cat cp mktemp rm dirname
 done
 cat > "$TMP/bin/kubectl" <<STUB
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/kubectl.log"
 case "\$*" in
   *"get secret -l tpg.fleet/cluster"*) printf 'aks-tpg-poc-01\naks-tpg-poc-02\n' ;;
   *"create -f"*) a="\$*"; f="\${a##*-f }"; f="\${f%% *}"; cp "\$f" "$TMP/created.json"; echo "workflow.argoproj.io/tpg-create-instance-abc12" ;;
@@ -46,7 +47,7 @@ sub() {  # sub SCRIPT WITH_ARGO(yes|no) INPUT_LINES -> OUT (stderr and stdout), 
   rm -f "$TMP/argo-args" "$TMP/created.json"
   local path="$TMP/bin"; [[ "$2" == yes ]] && path="$TMP/bin-argo:$TMP/bin"
   RC=0
-  OUT="$(printf '%s\n' "$3" | env -i PATH="$path" HOME="$TMP" TMPDIR="$TMP" TPG_NO_WATCH=1 \
+  OUT="$(printf '%s\n' "$3" | env -i PATH="$path" HOME="$TMP" TMPDIR="$TMP" TPG_NO_WATCH=1 ${SUB_FLEET:+TPG_FLEET_DIR="$SUB_FLEET"} \
     bash "$ROOT/scripts/submit/$1.sh" 2>&1)" || RC=$?
 }
 argo_has() { grep -qxF -- "$1" "$TMP/argo-args" 2>/dev/null; }
@@ -390,6 +391,299 @@ yq -i '.clusterMap |= sub("~/p/vals.yaml"; "pg-as-values.yaml")' "$W/run/overlay
 RC=0; OUT="$(cd "$W/run" && env -i PATH="$TMP/bin" HOME="$TMP/home" TMPDIR="$TMP" bash "$PK" -o overlay-map.yaml 2>&1)" || RC=$?
 [[ "$RC" -ne 0 ]] && grep -q "postgresValuesOverlayFilePath: pg-as-values.yaml" <<<"$OUT" && grep -q "pass it as postgresOverlayFilePath" <<<"$OUT" \
   && ok "22: a manifest passed as an overlay values file is refused with the overlay input names" || bad "pack overlay wrong kind" "$OUT"
+
+# ---- tpg-restore (Round 23, phase 6c): a guided pair-by-pair builder, load-file and paste, the plan of each pair printed
+# before the submit. A tpg-fleet clone of its own: the registered clusters come from the hub (stub kubectl), the declared
+# instances from its clusters/fleet.yaml, the spec files from its restore-specs folder.
+CLONE="$TMP/clone"
+mkdir -p "$CLONE/clusters" "$CLONE/helm_artifacts/instance/tpg-instance/restore-specs"
+for d in scripts workflows; do ln -s "$ROOT/$d" "$CLONE/$d"; done
+cat > "$CLONE/clusters/fleet.yaml" <<'YAML'
+clusters:
+  aks-tpg-poc-01:
+    operator: {version: v4.5.0}
+    cluster: {allowInPlaceRestore: true}
+    instances:
+      orders-db: {instance: {namespace: pg-orders, postgresVersion: postgres-17.6}}
+      reports-db: {instance: {postgresVersion: postgres-17.6}}
+  aks-tpg-poc-02:
+    operator: {version: v4.5.0}
+    instances: {}
+YAML
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  storageSize: 50Gi\n' \
+  > "$CLONE/helm_artifacts/instance/tpg-instance/restore-specs/orders-dr.yaml"
+printf '# restore specs\n' > "$CLONE/helm_artifacts/instance/tpg-instance/restore-specs/README.md"
+RSPEC=helm_artifacts/instance/tpg-instance/restore-specs
+SUB_FLEET="$CLONE"
+rmap() { grep '^clusterMap=' "$TMP/argo-args" | sed 's/^clusterMap=//'; }   # the submitted clusterMap (JSON)
+
+# two pairs, built step by step: an in place restore of a named backup (a wrong confirm is asked again), and point-in-time recovery
+# to a time onto a new instance on another cluster, with a spec file of the restore-specs folder and a post-restore backup
+: > "$TMP/kubectl.log"
+sub tpg-restore yes "1
+1
+1
+1
+orders-db-full-20260914000000
+1
+
+orders-db
+x
+orders-db
+n
+n
+n
+1
+1
+2
+2
+2
+2026-09-15T08:30:00Z
+1
+n
+
+2
+pg-orders-dr
+orders-db-dr
+y
+1
+n
+y
+2
+1
+1"
+argo_has "workflowtemplate/tpg-restore" && grep -q '^clusterMap=' "$TMP/argo-args" && ! grep -qE '^(dryRun|confirm|sourceCluster|instance|mode)=' "$TMP/argo-args" \
+  && ok "restore: argo submit with clusterMap only (dryRun keeps its default true, none of the removed flat inputs)" || bad "restore argo args" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
+jq -e 'length == 2
+  and .[0] == {sourceClusterConfig: {"aks-tpg-poc-01": {"pg-orders": {"orders-db": {sourceBackupName: "orders-db-full-20260914000000"}}}},
+               targetClusterConfig: {"aks-tpg-poc-01": {"pg-orders": {"orders-db": {pitrEnabled: false, confirm: "orders-db"}}}}}
+  and .[1] == {sourceClusterConfig: {"aks-tpg-poc-01": {"pg-reports-db": {"reports-db": {}}}},
+               targetClusterConfig: {"aks-tpg-poc-02": {"pg-orders-dr": {"orders-db-dr": {pitrEnabled: true, bestEffort: true,
+                 pitrConfig: {type: "time", timestamp: "2026-09-15T08:30:00Z"},
+                 targetInstanceSpecFilePath: ["repo:'"$RSPEC"'/orders-dr.yaml"], postRestoreBackup: true}}}}}' <<<"$(rmap)" >/dev/null 2>&1 \
+  && ok "restore builder: the pairs use the real keys (sourceBackupName; pitrEnabled, pitrConfig.type/timestamp, bestEffort, confirm, targetInstanceSpecFilePath as a one-element list, postRestoreBackup)" \
+  || bad "restore builder pairs" "$(rmap) $OUT"
+grep -q "orders-db (namespace pg-orders, declared in clusters/fleet.yaml)" <<<"$OUT" && grep -q "reports-db (namespace pg-reports-db, declared in clusters/fleet.yaml)" <<<"$OUT" \
+  && ok "restore builder: the source instances come from the clone's clusters/fleet.yaml with their namespaces (default pg-<instance>)" || bad "restore builder instances" "$OUT"
+grep -q "aks-tpg-poc-02" <<<"$OUT" && grep -q "IN PLACE: its data is overwritten" <<<"$OUT" && grep -q "'x' is not orders-db" <<<"$OUT" \
+  && ok "restore builder: an in-place pair is announced and its confirm must repeat the instance name (a wrong one is asked again)" || bad "restore builder in place" "$OUT"
+grep -q "It needs clusters.aks-tpg-poc-01.cluster.allowInPlaceRestore: true in clusters/fleet.yaml" <<<"$OUT" && ! grep -q "does not set it for aks-tpg-poc-01" <<<"$OUT" \
+  && ok "restore builder: the in-place note names allowInPlaceRestore, with no warning when the clone's fleet.yaml sets it" || bad "restore builder allowInPlaceRestore note" "$OUT"
+grep -q "pair 1 added; its plan:" <<<"$OUT" && grep -q "pair 2 added; its plan:" <<<"$OUT" \
+  && grep -qF "[0] aks-tpg-poc-01/pg-orders/orders-db -> aks-tpg-poc-01/pg-orders/orders-db" <<<"$OUT" \
+  && grep -qF "[1] aks-tpg-poc-01/pg-reports-db/reports-db -> aks-tpg-poc-02/pg-orders-dr/orders-db-dr" <<<"$OUT" \
+  && ok "restore builder: every pair is validated as it is added and its plan printed (index, source -> target)" || bad "restore builder plan" "$OUT"
+grep -qF "method:    backup  (named backup orders-db-full-20260914000000)" <<<"$OUT" && grep -qF "in place:  yes  (IN PLACE (the data of the source instance is overwritten))" <<<"$OUT" \
+  && grep -qF "method:    time  (point-in-time recovery to 2026-09-15T08:30:00Z, bestEffort true)" <<<"$OUT" \
+  && grep -qF "in place:  no  (a new instance on another cluster (the source backup location is copied there))" <<<"$OUT" \
+  && grep -qF "backup repository: location derived, stanza derived" <<<"$OUT" \
+  && grep -qF "spec file: repo:$RSPEC/orders-dr.yaml" <<<"$OUT" && grep -qF "spec file: none (the PostgresRestore sends only the instance name; the instance keeps its spec)" <<<"$OUT" \
+  && grep -qF "postRestoreBackup: true" <<<"$OUT" && grep -qF "confirm:   orders-db" <<<"$OUT" \
+  && ok "restore builder: the plan shows method, in place or not, the PITR summary and repository, the spec file and the flags" || bad "restore builder plan lines" "$OUT"
+grep -qF "The pairs, as the workflow will read them:" <<<"$OUT" && grep -qF "Each pair, as the workflow will plan it (dryRun true, the default):" <<<"$OUT" \
+  && ok "restore builder: the whole list is checked and its plan printed again before the submit menu" || bad "restore builder final plan" "$OUT"
+awk '!/get secret -l tpg.fleet\/cluster/ {bad=1} END {exit bad}' "$TMP/kubectl.log" && [[ -s "$TMP/kubectl.log" ]] \
+  && ok "restore builder: kubectl is only used for the hub's registered clusters (nothing is read from a member cluster)" || bad "restore builder kubectl" "$(cat "$TMP/kubectl.log")"
+
+# an in-place pair on a cluster whose clone entry lacks allowInPlaceRestore is warned about (the validate step refuses the run)
+sub tpg-restore yes "1
+2
+1
+ns-a
+inst-a
+1
+backup-a
+2
+
+inst-a
+inst-a
+n
+n
+n
+2
+1
+1"
+grep -q "Your clone's clusters/fleet.yaml does not set it for aks-tpg-poc-02" <<<"$OUT" \
+  && ok "restore builder: an in-place pair on a cluster without allowInPlaceRestore in the clone is warned about" || bad "restore builder allowInPlaceRestore warning" "$OUT"
+
+# a pair clustermap.py refuses is shown with the reasons and asked again (a time without the time of day)
+sub tpg-restore yes "1
+1
+1
+2
+2
+2026-09-15
+1
+n
+
+1
+pg-orders
+orders-copy
+n
+n
+n
+y
+1
+1
+2
+2
+2026-09-15T08:30:00Z
+1
+n
+
+1
+pg-orders
+orders-copy
+n
+n
+n
+2
+1
+1"
+grep -q "clusterMap is not valid for tpg-restore" <<<"$OUT" && grep -q "pitrConfig.timestamp: '2026-09-15' must be a UTC time" <<<"$OUT" && grep -q "That pair is not valid" <<<"$OUT" \
+  && ok "restore builder: an invalid pair is explained (clustermap.py restore) and entered again" || bad "restore builder invalid pair" "$OUT"
+jq -e 'length == 1 and .[0].targetClusterConfig["aks-tpg-poc-01"]["pg-orders"]["orders-copy"].pitrConfig.timestamp == "2026-09-15T08:30:00Z"' <<<"$(rmap)" >/dev/null 2>&1 \
+  && ok "restore builder: only the corrected pair is in the list" || bad "restore builder corrected" "$(rmap) $OUT"
+
+# the source is not declared in clusters/fleet.yaml: a new instance needs a spec file, and one of this machine is sent with the run
+mkdir -p "$TMP/specs"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n' > "$TMP/specs/legacy-dr.yaml"
+sub tpg-restore yes "1
+1
+3
+legacy-ns
+legacy-db
+2
+1
+n
+
+2
+pg-dr
+legacy-dr
+2
+$TMP/specs/legacy-dr.yaml
+n
+n
+2
+1
+1"
+grep -q "aks-tpg-poc-01/legacy-db is not declared in clusters/fleet.yaml, so there is no entry to copy for the new instance: a spec file is mandatory" <<<"$OUT" \
+  && grep -q "files read from this machine: $TMP/specs/legacy-dr.yaml" <<<"$OUT" \
+  && jq -e '.[0].sourceClusterConfig["aks-tpg-poc-01"]["legacy-ns"]["legacy-db"] == {}
+    and .[0].targetClusterConfig["aks-tpg-poc-02"]["pg-dr"]["legacy-dr"].targetInstanceSpecFilePath == ["'"$TMP"'/specs/legacy-dr.yaml"]
+    and .[0].targetClusterConfig["aks-tpg-poc-02"]["pg-dr"]["legacy-dr"].pitrConfig == {type: "latest"}
+    and (.[0].targetClusterConfig["aks-tpg-poc-02"]["pg-dr"]["legacy-dr"] | has("bestEffort") | not)' <<<"$(rmap)" >/dev/null 2>&1 \
+  && ok "restore builder: a typed source that is not declared makes the spec file mandatory; a local file is packed into patchFiles; latest takes no bestEffort" || bad "restore builder undeclared source" "$(rmap) $OUT"
+
+# the repository named by hand (location, stanza, backup set), an lsn, and a source backup that derives them when the source instance is gone
+sub tpg-restore yes "1
+1
+2
+2
+3
+0/3000060
+2
+y
+orders-backups
+pg-orders-orders-db-0000
+20260915-020000F
+orders-db-full-20260914000000
+1
+
+orders-lsn
+n
+n
+n
+2
+1
+1"
+jq -e '(.[0].sourceClusterConfig["aks-tpg-poc-01"]["pg-reports-db"]["reports-db"] == {sourceBackupName: "orders-db-full-20260914000000"})
+  and (.[0].targetClusterConfig["aks-tpg-poc-01"]["pg-reports-db"]["orders-lsn"] | .bestEffort == false
+       and .pitrConfig == {type: "lsn", target: "0/3000060", sourceBackupConfig: {srcBackupLocationName: "orders-backups", srcStanzaName: "pg-orders-orders-db-0000", srcBackupLabel: "20260915-020000F"}})' <<<"$(rmap)" >/dev/null 2>&1 \
+  && ok "restore builder: lsn target, bestEffort false, srcBackupLocationName/srcStanzaName/srcBackupLabel and a source backup name for PITR" || bad "restore builder repository keys" "$(rmap) $OUT"
+grep -qF "backup repository: location orders-backups, stanza pg-orders-orders-db-0000, backup set 20260915-020000F" <<<"$OUT" \
+  && grep -qF "spec file: none (a new instance copies the source entry of clusters/fleet.yaml; the operator fills in its spec)" <<<"$OUT" \
+  && ok "restore builder: the plan names the repository that was given, and that a new instance without a spec file copies the source entry" || bad "restore builder repository plan" "$OUT"
+
+# the other ways in: a file with a list of pairs, pasted lines, and a clusterMap of the wrong shape
+cat > "$TMP/pairs.yaml" <<'YAML'
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        orders-db: {sourceBackupName: orders-db-full-20260914000000}
+  targetClusterConfig:
+    aks-tpg-poc-02:
+      pg-orders-dr:
+        orders-db-dr: {pitrEnabled: false}
+YAML
+sub tpg-restore yes "2
+$TMP/pairs.yaml
+1
+1"
+jq -e 'length == 1 and .[0].targetClusterConfig["aks-tpg-poc-02"]["pg-orders-dr"]["orders-db-dr"].pitrEnabled == false' <<<"$(rmap)" >/dev/null 2>&1 \
+  && grep -qF "[0] aks-tpg-poc-01/pg-orders/orders-db -> aks-tpg-poc-02/pg-orders-dr/orders-db-dr" <<<"$OUT" \
+  && ok "restore: a YAML file with a list of pairs is loaded, checked and its plan printed" || bad "restore load file" "$(rmap) $OUT"
+sub tpg-restore yes "3
+2
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        orders-db: {}
+  targetClusterConfig:
+    aks-tpg-poc-02:
+      pg-orders-dr:
+        orders-db-dr: {pitrEnabled: true, pitrConfig: {type: latest}}
+END
+1
+1"
+jq -e 'length == 1 and .[0].targetClusterConfig["aks-tpg-poc-02"]["pg-orders-dr"]["orders-db-dr"].pitrConfig.type == "latest"' <<<"$(rmap)" >/dev/null 2>&1 \
+  && ok "restore: several pasted lines of YAML (a list) are accepted" || bad "restore paste" "$(rmap) $OUT"
+sub tpg-restore yes "3
+1
+{aks-tpg-poc-01: {instances: {orders-db: {}}}}
+3
+1
+[{sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {}}}}, targetClusterConfig: {aks-tpg-poc-02: {pg-orders-dr: {orders-db-dr: {pitrEnabled: true, pitrConfig: {type: latest}}}}}}]
+1
+1"
+grep -q "not a YAML or JSON list of pairs" <<<"$OUT" && jq -e 'length == 1' <<<"$(rmap)" >/dev/null 2>&1 \
+  && ok "restore: a map of clusters (the clusterMap of the other workflows) is refused and asked again; a one-line list is accepted" || bad "restore paste wrong shape" "$(rmap) $OUT"
+sub tpg-restore yes "2
+$TMP/nope.yaml
+3
+1
+[{sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {}}}}, targetClusterConfig: {aks-tpg-poc-09: {pg-x: {x-db: {pitrEnabled: true, pitrConfig: {type: latest}}}}}}]
+n
+3
+1
+[{sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {}}}}, targetClusterConfig: {aks-tpg-poc-02: {pg-x: {x-db: {pitrEnabled: true, pitrConfig: {type: latest}}}}}}]
+1
+1"
+grep -q "not a file" <<<"$OUT" && grep -q "cluster 'aks-tpg-poc-09' is not registered" <<<"$OUT" && jq -e 'length == 1' <<<"$(rmap)" >/dev/null 2>&1 \
+  && ok "restore: a file that does not exist and an unregistered cluster are explained (the pair is not kept) and asked again" || bad "restore errors" "$(rmap) $OUT"
+
+# dryRun=false: an in-place pair without confirm is shown as refused before the submit (as the validate step does)
+cat > "$TMP/inplace.yaml" <<'YAML'
+- sourceClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        orders-db: {sourceBackupName: orders-db-full-20260914000000}
+  targetClusterConfig:
+    aks-tpg-poc-01:
+      pg-orders:
+        orders-db: {pitrEnabled: false}
+YAML
+n_dry="$(optnum tpg-restore dryRun clusterMap)"
+sub tpg-restore yes "2
+$TMP/inplace.yaml
+${n_dry}
+2
+n
+1
+1"
+argo_has "dryRun=false" && grep -q "orders-db.confirm is required" <<<"$OUT" && grep -q "the workflow's validate step will refuse this map" <<<"$OUT" \
+  && ok "restore: with dryRun=false an in-place pair without confirm is reported as refused (clustermap.py restore --confirm-required)" || bad "restore dryRun false confirm" "$(cat "$TMP/argo-args" 2>/dev/null) $OUT"
+SUB_FLEET=""
 
 echo
 echo "submit: ${PASS} passed, ${FAIL} failed"

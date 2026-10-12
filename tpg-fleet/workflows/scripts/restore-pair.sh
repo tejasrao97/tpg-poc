@@ -75,7 +75,9 @@
 #    and a new target is adopted by its Application (sync_instance_app).
 #  9 postRestoreBackup: a full backup of the target as tpg-backup takes it (a failure is the warning POST_RESTORE_BACKUP_FAILED, the pair
 #    stays SUCCEEDED). keepSourceLocation=false removes the
-#    copy this run created (never a reused one). While the copy exists repo_shared (tpg-delete-instance,
+#    copy this run created (never a reused one) unless a Postgres of the target namespace names it as its spec.backupLocation (the restored
+#    instance, from the spec file or as the operator made it, or any other): then it is kept and the warning SOURCE_LOCATION_IN_USE names the
+#    instance(s); when the instances cannot be listed it is kept with SOURCE_LOCATION_NOT_REMOVED. While the copy exists repo_shared (tpg-delete-instance,
 #    tpg-delete-apps purgeBackups) treats the source repository as shared, which is intended.
 # 10 Success is the PostgresRestore Succeeded and the target Running.
 #
@@ -94,7 +96,7 @@
 #   RECOVERY_WINDOW_UNVERIFIED BACKUP_LABEL_UNVERIFIED MATRIX_UNVERIFIED OPERATION_IN_PROGRESS ADOPTION_NOT_SYNCED
 #   POST_RESTORE_BACKUP_FAILED (the restore succeeded and the instance runs: the pair stays SUCCEEDED) RESTORE_PATCH_NOT_RECORDED
 #   (names the fields of the live spec that fail the Postgres schema check)
-#   SOURCE_LOCATION_NOT_REMOVED
+#   SOURCE_LOCATION_NOT_REMOVED SOURCE_LOCATION_IN_USE (the pair stays SUCCEEDED; names the instance(s) that use the copy)
 WF="$1"
 # shellcheck source=workflows/scripts/lib.sh
 source /scripts/lib.sh
@@ -166,6 +168,11 @@ pv_version() {  # pv_version NAME: PV_VER = major.minor of the PostgresVersion N
   fi
   [[ -n "$v" ]] || v="$(ver_of "$1")"
   PV_VER="$v"
+}
+copy_want() {  # the fixed name of the copy of the source backup location in the target namespace
+  local want="restore-src-${SC}-${SNS}-${SI}"
+  [[ "${#want}" -le 253 ]] || want="restore-src-$(printf '%s-%s-%s' "$SC" "$SNS" "$SI" | cksum | cut -d' ' -f1)"
+  printf '%s' "$want"
 }
 patch_schemas_path() {
   if [[ -f "$TPG_LIB_DIR/patch-schemas.json" ]]; then printf '%s' "$TPG_LIB_DIR/patch-schemas.json"
@@ -555,16 +562,20 @@ if [[ "$ENTRY_NEW" == true && "$T_OWNER" == true ]]; then
   done
 fi
 if [[ -n "$SPEC_JSON" && -n "${T_BLN:-}" && "$T_BLN" != "${TI}-backup-location" ]]; then
-  # a backupLocation the spec file names wins over the fleet's (tpg.restoredPostgres): it must exist for the restored instance to use it
-  get_obj "$TNS" postgresbackuplocation "$T_BLN" || true
-  [[ -n "$OBJ" ]] || fail BACKUP_LOCATION_MISSING "the spec file names backupLocation ${T_BLN}, which does not exist in ${TNS} on ${TC}: create it there, or leave backupLocation out of the spec file (the fleet then renders ${TI}-backup-location for the instance)"
+  # a backupLocation the spec file names wins over the fleet's (tpg.restoredPostgres): it must exist for the restored instance to use it.
+  # The fixed name of the copy of the source backup location is the exception: this run makes the copy before the restore (step 6 checks
+  # below that the copy is the location in use, not another one that was reused)
+  if [[ "$SAME_NS" == true || "$T_BLN" != "$(copy_want)" ]]; then
+    get_obj "$TNS" postgresbackuplocation "$T_BLN" || true
+    [[ -n "$OBJ" ]] || fail BACKUP_LOCATION_MISSING "the spec file names backupLocation ${T_BLN}, which does not exist in ${TNS} on ${TC}: create it there, or leave backupLocation out of the spec file (the fleet then renders ${TI}-backup-location for the instance)"
+  fi
 fi
 
 # ---- 6. another namespace or cluster: the copy of the source backup location (reused when one exists)
 COPY_NAME=""; COPY_CREATE=false; COPY_SPEC=""
 find_copy() {  # find_copy: COPY_NAME and COPY_CREATE for the target namespace (a location for the same container and repoPath is reused)
-  local want="restore-src-${SC}-${SNS}-${SI}" rows name cont path ep sync
-  [[ "${#want}" -le 253 ]] || want="restore-src-$(printf '%s-%s-%s' "$SC" "$SNS" "$SI" | cksum | cut -d' ' -f1)"
+  local want rows name cont path ep sync
+  want="$(copy_want)"
   COPY_NAME="$want"; COPY_CREATE=true
   to_tgt
   rows="$(tk -n "$TNS" get postgresbackuplocation -o json 2>/dev/null | jq -r '.items[]? | select(.spec.storage.azure.container != null)
@@ -582,6 +593,9 @@ find_copy() {  # find_copy: COPY_NAME and COPY_CREATE for the target namespace (
 }
 if [[ "$SAME_NS" != true ]]; then
   find_copy
+  if [[ -n "$SPEC_JSON" && "${T_BLN:-}" == "$(copy_want)" && "$COPY_NAME" != "$T_BLN" ]]; then
+    fail BACKUP_LOCATION_MISSING "the spec file names backupLocation ${T_BLN}, the copy of the source backup location, but ${TNS} on ${TC} already has ${COPY_NAME} for that repository, which this run reuses instead of creating ${T_BLN}: name ${COPY_NAME} in the spec file, or leave backupLocation out of it"
+  fi
   src_label="${SC}.${SI}"; [[ "${#src_label}" -le 63 ]] || src_label="$(printf '%s' "$src_label" | cksum | cut -d' ' -f1)"
   COPY_SPEC="$(jq -c '{
       retentionPolicy: {fullRetention: {type: "count", number: 9999999}, diffRetention: {number: 9999999}},
@@ -917,9 +931,22 @@ fi
 if [[ "$SAME_NS" != true ]]; then
   if [[ "$KEEP" == false && "$COPY_MADE" == true ]]; then
     to_tgt
+    # an instance of the namespace that names the copy as its spec.backupLocation (the restored one, as the operator or the spec file
+    # made it, or any other) keeps it: the copy is its backup location now. If the instances cannot be listed none can be ruled out.
+    in_use=""; in_use_err=""
+    if pgj="$(tk -n "$TNS" get postgres -o json 2>"$WORK/inuse.err")"; then
+      in_use="$(jq -r --arg l "$COPY_NAME" '[.items[]? | select(.spec.backupLocation.name == $l) | .metadata.name] | join(",")' <<<"$pgj" 2>/dev/null)" \
+        || in_use_err="the answer was not JSON"
+    else
+      in_use_err="$(tr '\n' ' ' <"$WORK/inuse.err" | cut -c1-300)"
+    fi
     # another pair of this run (or anyone) may still restore from the same copy: it is removed only when no restore is unfinished here
     unfinished="$(tk -n "$TNS" get postgresrestore -o json 2>/dev/null | jq -r "[.items[]? | ${OP_ACTIVE_JQ} | .metadata.name] | join(\",\")" 2>/dev/null || true)"
-    if [[ -n "$unfinished" ]]; then
+    if [[ -n "$in_use_err" ]]; then
+      warn SOURCE_LOCATION_NOT_REMOVED "PostgresBackupLocation ${TNS}/${COPY_NAME} on ${TC} was kept: the Postgres instances of ${TNS} could not be read to check that none uses it (${in_use_err}); delete it by hand when none does"
+    elif [[ -n "$in_use" ]]; then
+      warn SOURCE_LOCATION_IN_USE "PostgresBackupLocation ${TNS}/${COPY_NAME} on ${TC} was kept although keepSourceLocation=false: spec.backupLocation of ${in_use} names it; the instance(s) use it as their backup location, so removing it would break them"
+    elif [[ -n "$unfinished" ]]; then
       note "source backup location ${TNS}/${COPY_NAME} kept although keepSourceLocation=false: the restore(s) ${unfinished} in ${TNS} are not finished and may still use it; delete it by hand afterwards"
     elif tk -n "$TNS" delete postgresbackuplocation "$COPY_NAME" --ignore-not-found >/dev/null 2>&1; then
       note "source backup location ${TNS}/${COPY_NAME} removed (keepSourceLocation=false)"
