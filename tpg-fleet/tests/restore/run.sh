@@ -434,16 +434,43 @@ mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "
 Y="$(RKP=c2.orders-dr restore_yaml)"
 [[ "$(yq '.metadata | has("annotations")' <<<"$Y")" == false && "$(yq '.metadata.labels["tpg.fleet/workflow"]' <<<"$Y")" == tpg-restore-x ]] && ok "without the flag no annotation; the workflow label is there" || bad "no annotation" "$Y"
 reset
+# a live Postgres of the target name that is not the source and not in place: TARGET_EXISTS at plan time, also in a dry run
 RK=c2.dr-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr-existing/dr-db "$BACKUP_T"; snap="$(snapshot)"; run "$PJ"
-expect "an existing target without confirm: the dry run goes on with a warning" SUCCEEDED DRY_RUN
-[[ "$(cat "$TMP/rec/warning.c2.dr-db.CONFIRMATION_MISSING.status" 2>/dev/null)" == WARNING ]] && ok "CONFIRMATION_MISSING is a warning in a dry run (a real run is refused)" || bad "confirmation warning" "$(cat "$TMP/records")"
-Y="$(RKP=c2.dr-db restore_yaml)"
-[[ "$(yq '.spec.targetInstance | has("spec")' <<<"$Y")" == false && "$(yq '.spec.targetInstance.name' <<<"$Y")" == dr-db ]] && ok "an existing target: targetInstance.name only, no spec" || bad "existing target spec" "$Y"
-nothing_changed "existing target" "$snap"
+expect "a live Postgres with the target name on the target cluster (dry run): FAILED TARGET_EXISTS" FAILED TARGET_EXISTS "c2/pg-dr-existing/dr-db" "restore in place or choose a new instance name"
+[[ "$RC" -ne 0 ]] && ok "TARGET_EXISTS exits non-zero (the pair failed; the run fails at the end)" || bad "TARGET_EXISTS rc"
+nothing_changed "TARGET_EXISTS (dry run)" "$snap"
+[[ ! -e "$TMP/rec/plan.restore.c2.dr-db.status" ]] && ok "…no plan is recorded for a refused pair" || bad "plan recorded"
+run "$PJ" P_DRY_RUN=false
+expect "…the same in a real run, before anything happened" FAILED TARGET_EXISTS "restore in place or choose a new instance name"
+nothing_changed "TARGET_EXISTS (real run)" "$snap"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr-existing/dr-db $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-dr.yaml]'; run "$PJ"
+expect "…with a spec file the reason is TARGET_EXISTS as well (no TARGET_SPEC_FILE_REFUSED any more)" FAILED TARGET_EXISTS
+mk c1/pg-orders/orders-db '' c2/pg-dr-existing/dr-db "$LATEST"; run "$PJ"
+expect "…also for a point-in-time recovery" FAILED TARGET_EXISTS
+# an existing instance in the source namespace of the same cluster (a copy next to the source): the same
+cp "$TMP/cl/c1/postgres/pg-orders/orders-db.json" "$TMP/cl/c1/postgres/pg-orders/orders-live.json"
+jq '.metadata.name = "orders-live"' "$TMP/cl/c1/postgres/pg-orders/orders-live.json" > "$TMP/x" && mv "$TMP/x" "$TMP/cl/c1/postgres/pg-orders/orders-live.json"
+RK=c1.orders-live; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-live "$BACKUP_T"; run "$PJ"
+expect "a live Postgres in the source namespace that is not the source: TARGET_EXISTS" FAILED TARGET_EXISTS "c1/pg-orders/orders-live"
+# the next pair of the run is unaffected, the failed one is reported
+RK=c1.orders-copy; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-copy "$BACKUP_T"; run "$PJ"
+expect "the next pair (a new instance) is not affected by the refused one" SUCCEEDED DRY_RUN
+# a fleet entry that is declared but not deployed is a new target, not an existing one
+yq -i '.clusters.c1.instances.orders-declared.instance = {"namespace": "pg-orders", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
+RK=c1.orders-declared; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-declared "$BACKUP_T"; run "$PJ"
+expect "an entry declared in clusters/fleet.yaml but not deployed is a new target: planned" SUCCEEDED DRY_RUN
 reset
-RK=c1.orders-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db'; run "$PJ"
-expect "in place with confirm: SUCCEEDED/DRY_RUN" SUCCEEDED DRY_RUN
+RK=c1.orders-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db'; snap="$(snapshot)"; run "$PJ"
+expect "in place with confirm: SUCCEEDED/DRY_RUN (the live source is the target: not TARGET_EXISTS)" SUCCEEDED DRY_RUN
 [[ ! -e "$TMP/rec/warning.c1.orders-db.CONFIRMATION_MISSING.status" ]] && ok "confirm given: no CONFIRMATION_MISSING warning" || bad "unexpected warning"
+Y="$(RKP=c1.orders-db restore_yaml)"
+[[ "$(yq '.spec.targetInstance | has("spec")' <<<"$Y")" == false && "$(yq '.spec.targetInstance.name' <<<"$Y")" == orders-db ]] && ok "in place without a spec file: targetInstance.name only, no spec" || bad "in place spec" "$Y"
+nothing_changed "in place" "$snap"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db "$BACKUP_T"; run "$PJ"
+expect "in place without confirm: the dry run goes on" SUCCEEDED DRY_RUN
+[[ "$(cat "$TMP/rec/warning.c1.orders-db.CONFIRMATION_MISSING.status" 2>/dev/null)" == WARNING ]] && ok "CONFIRMATION_MISSING is a warning in a dry run of an in-place pair (validate refuses a real run)" || bad "confirmation warning" "$(cat "$TMP/records")"
+run "$PJ" P_DRY_RUN=false
+expect "in place without confirm in a real run: CONFIRMATION_MISMATCH (defence in depth: validate refuses it first)" FAILED CONFIRMATION_MISMATCH "set confirm: orders-db"
 
 echo "== 2. the named backup checks"
 reset
@@ -582,12 +609,6 @@ expect "a source whose version is unknown: the matrix is not checked (warning MA
 echo "== 5. the target"
 reset
 RK=c2.dr-db
-mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr-existing/dr-db "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
-expect "an existing target without confirm: CONFIRMATION_MISMATCH in a real run" FAILED CONFIRMATION_MISMATCH "set confirm: dr-db"
-mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr-existing/dr-db $'pitrEnabled: false\nconfirm: dr-db\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-dr.yaml]'; run "$PJ" P_DRY_RUN=false
-expect "an existing target that is not the source refuses targetInstanceSpecFilePath" FAILED TARGET_SPEC_FILE_REFUSED "is for a new target or for an in-place restore"
-reset
-RK=c2.dr-db
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-other/dr-db "$BACKUP_T"; run "$PJ"
 expect "a target declared in another namespace: NAMESPACE_IMMUTABLE" FAILED NAMESPACE_IMMUTABLE "declared in namespace pg-dr-existing"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/dr-db "$BACKUP_T"; run "$PJ"
@@ -631,7 +652,14 @@ Y="$(RKP=c2.orders-dr restore_yaml)"
 [[ ! -e "$TMP/rec/warning.c2.orders-dr.SPEC_FILE_NOT_IN_ENTRY.status" && "$(yq '.spec.targetInstance.spec.pgConfig.dbname' <<<"$Y")" == orders ]] \
   && ok "…the field is in spec.targetInstance.spec as the file has it" || bad "extra field" "$Y"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-loc.yaml]'; run "$PJ"
-expect "a spec file backupLocation that does not exist: BACKUP_LOCATION_MISSING" FAILED BACKUP_LOCATION_MISSING "shared-location"
+expect "a spec file backupLocation that does not exist in the target namespace: BACKUP_LOCATION_MISSING" FAILED BACKUP_LOCATION_MISSING "shared-location" "pg-dr on c2" "leave backupLocation out"
+mkdir -p "$TMP/cl/c2/postgresbackuplocation/pg-dr"
+printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"shared-location","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"pg-backups","repoPath":"/pg-dr/shared"}}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/shared-location.json"
+run "$PJ"
+expect "…the location exists in the target namespace: the pair plans" SUCCEEDED DRY_RUN
+[[ ! -e "$TMP/rec/warning.c2.orders-dr.SPEC_LOCATION_REPLACED.status" ]] && ! grep -q 'SPEC_LOCATION_REPLACED\|first sync of its Application points' "$TMP/records" \
+  && ok "the restore-patch names its own location: no replacement warning (it wins over the fleet's orders-dr-backup-location)" || bad "location warning" "$(cat "$TMP/records")"
+grep -q 'its own backupLocation and imagePullSecret win and the fleet.s fill in' "$TMP/rec/plan.restore.c2.orders-dr.detail" && ok "the plan tells the render: the restore-patch's backupLocation and imagePullSecret win, the fleet's fill in where it omits them" || bad "plan references" "$(cat "$TMP/rec/plan.restore.c2.orders-dr.detail")"
 reset
 mk c1/pg-orders-wrong/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; RK=c2.orders-dr; run "$PJ"
 expect "a source namespace that is not the entry's: SOURCE_NAMESPACE_MISMATCH" FAILED SOURCE_NAMESPACE_MISMATCH "declares orders-db on c1 in namespace pg-orders"
@@ -823,26 +851,27 @@ expect "an instance declared in clusters/fleet.yaml but not deployed: restored i
   && [[ "$(yq '.clusters.c2.instances.declared-db.instance.namespace' "$TMP/fleet.repo/clusters/fleet.yaml")" == pg-declared ]] \
   && ok "…its entry is kept (the only push records the restore-patch read from the cluster); its Application provides the shared objects and adopts the restored instance" || bad "declared target" "$(cat "$TMP/events")"
 
-echo "-- confirm, in-progress and busy targets"
+echo "-- an in-place target: confirm, in-progress and busy (any other existing target is TARGET_EXISTS)"
 reset
-RK=c2.dr-db; set_flag sync.names "orders-full-1"
-mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr-existing/dr-db $'pitrEnabled: false\nconfirm: dr-db'; run "$PJ" P_DRY_RUN=false
-expect "an existing target with confirm: SUCCEEDED" SUCCEEDED "" "restored c1/pg-orders/orders-db into c2/pg-dr-existing/dr-db"
-! ev_has '^push' && ! ev_has '^adopt' && ok "an existing target: no fleet entry is written, no adoption sync" || bad "existing target touched fleet" "$(cat "$TMP/events")"
-Y="$(jq -c '.spec' "$TMP/cl/c2/postgresrestore/pg-dr-existing/"*.json)"
-[[ "$(jq 'has("targetInstance") and (.targetInstance | has("spec") | not)' <<<"$Y")" == true ]] && ok "…and its PostgresRestore carries no instance spec" || bad "existing target restore spec" "$Y"
-compgen -G "$TMP/cl/c2/secret/pg-dr-existing/*" >/dev/null && ok "…the copy's Secret backup-storage is the namespace's own (Vault Secrets Operator): nothing created" || bad "secret"
+RK=c1.orders-db; set_flag sync.names "orders-full-1"
+rm -f "$TMP/cl/c1/postgresbackup/pg-orders/orders-running.json"   # a running backup of the instance blocks a real in-place restore
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db'; run "$PJ" P_DRY_RUN=false
+expect "an in-place restore with confirm: SUCCEEDED" SUCCEEDED "" "restored c1/pg-orders/orders-db into c1/pg-orders/orders-db"
+! ev_has '^adopt' && ok "in place: no adoption sync (the instance is managed already)" || bad "in place adopted" "$(cat "$TMP/events")"
+Y="$(jq -c '.spec' "$TMP/cl/c1/postgresrestore/pg-orders/"*.json)"
+[[ "$(jq 'has("targetInstance") and (.targetInstance | has("spec") | not)' <<<"$Y")" == true ]] && ok "…and its PostgresRestore carries no instance spec" || bad "in place restore spec" "$Y"
+! ev_has 'apply c1 postgresbackuplocation' && ! ev_has 'APPLIED-SHARED' && ok "…no location copy and no shared object (same namespace)" || bad "in place copy" "$(cat "$TMP/events")"
 reset
 set_flag sync.names "orders-full-1"
-mkdir -p "$TMP/cl/c2/postgresbackup/pg-dr-existing"
-printf '%s' '{"kind":"PostgresBackup","metadata":{"name":"nightly","namespace":"pg-dr-existing"},"spec":{"sourceInstance":{"name":"dr-db"}},"status":{"phase":"Running"}}' > "$TMP/cl/c2/postgresbackup/pg-dr-existing/nightly.json"
+mkdir -p "$TMP/cl/c1/postgresbackup/pg-orders"
 run "$PJ" P_DRY_RUN=false
-expect "a backup is running on the existing target: OPERATION_IN_PROGRESS" FAILED OPERATION_IN_PROGRESS "postgresbackup"
+expect "a backup is running on the in-place target: OPERATION_IN_PROGRESS" FAILED OPERATION_IN_PROGRESS "postgresbackup"
 reset
-mkdir -p "$TMP/cl/c2/postgresrestore/pg-dr-existing"
-printf '%s' '{"kind":"PostgresRestore","metadata":{"name":"dr-db-restore-old","namespace":"pg-dr-existing","creationTimestamp":"2026-10-01T00:00:00Z"},"spec":{"targetInstance":{"name":"dr-db"}},"status":{"phase":"Running"}}' > "$TMP/cl/c2/postgresrestore/pg-dr-existing/dr-db-restore-old.json"
+rm -f "$TMP/cl/c1/postgresbackup/pg-orders/orders-running.json"
+mkdir -p "$TMP/cl/c1/postgresrestore/pg-orders"
+printf '%s' '{"kind":"PostgresRestore","metadata":{"name":"orders-db-restore-old","namespace":"pg-orders","creationTimestamp":"2026-10-01T00:00:00Z"},"spec":{"targetInstance":{"name":"orders-db"}},"status":{"phase":"Running"}}' > "$TMP/cl/c1/postgresrestore/pg-orders/orders-db-restore-old.json"
 run "$PJ" P_DRY_RUN=false
-expect "a restore of the target is still running: SKIPPED_IN_PROGRESS after the wait" SKIPPED_IN_PROGRESS "" "dr-db-restore-old phase Running"
+expect "a restore of the target is still running: SKIPPED_IN_PROGRESS after the wait" SKIPPED_IN_PROGRESS "" "orders-db-restore-old phase Running"
 
 echo "-- the Secret of the copied location"
 reset
@@ -867,26 +896,24 @@ run "$PJ" P_DRY_RUN=false
 expect "an earlier restore copy of the Secret is updated" SUCCEEDED ""
 [[ "$(jq -r '.data.accountKey | @base64d' "$TMP/cl/c2/secret/pg-dr/src-creds.json")" == "$COPIED" ]] && ok "…to the source's current contents" || bad "secret not updated"
 reset
-# an existing target in a namespace that has no Secret backup-storage (the fleet does not manage it): created from Vault, in memory
+# a new target that joins a namespace whose shared Secrets are not the fleet's own (it does not own them: sharedSecretsOwner false):
+# the Secret backup-storage the copied location reads is checked against the fleet's key (Vault), never written
 set_flag sync.names "orders-full-1"
-mkdir -p "$TMP/cl/c2/postgres/pg-bare"
-printf '%s' '{"kind":"Postgres","metadata":{"name":"bare-db","namespace":"pg-bare"},"spec":{"postgresVersion":{"name":"postgres-17.6"}},"status":{"currentState":"Running"}}' > "$TMP/cl/c2/postgres/pg-bare/bare-db.json"
-yq -i '.clusters.c2.instances.bare-db.instance = {"namespace": "pg-bare", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
-RK=c2.bare-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-bare/bare-db $'pitrEnabled: false\nconfirm: bare-db'; run "$PJ" P_DRY_RUN=false
-expect "no backup-storage in the target namespace: created from Vault (in memory)" SUCCEEDED "" "Secret pg-bare/backup-storage was created from Vault"
-[[ "$(jq -r '.data.accountKey | @base64d' "$TMP/cl/c2/secret/pg-bare/backup-storage.json")" == "$VAULT_KEY" ]] && ok "…with the fleet's account and key" || bad "vault secret content"
-no_secret_leak "backup-storage created from Vault" "$VAULT_KEY"
+bare_ns() {  # bare_ns KEY: the namespace pg-bare has an owner entry and Secrets regsecret and backup-storage the fleet does not manage; backup-storage holds KEY
+  yq -i '.clusters.c2.instances.bare-owner.instance = {"namespace": "pg-bare", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
+  mkdir -p "$TMP/cl/c2/secret/pg-bare"
+  jq -cn '{kind: "Secret", metadata: {name: "regsecret", namespace: "pg-bare"}, data: {x: ("eA==")}}' > "$TMP/cl/c2/secret/pg-bare/regsecret.json"
+  jq -cn --arg k "$1" '{kind: "Secret", metadata: {name: "backup-storage", namespace: "pg-bare"}, data: {accountKey: ($k | @base64)}}' > "$TMP/cl/c2/secret/pg-bare/backup-storage.json"
+}
+bare_ns "SOMEBODY-ELSES-KEY"
+RK=c2.bare-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-bare/bare-db "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
+expect "a foreign backup-storage that does not hold the fleet's key: NAMESPACE_SECRET_CONFLICT" FAILED NAMESPACE_SECRET_CONFLICT "does not hold the fleet's storage key"
 reset
 set_flag sync.names "orders-full-1"
-mkdir -p "$TMP/cl/c2/postgres/pg-bare" "$TMP/cl/c2/secret/pg-bare"
-printf '%s' '{"kind":"Postgres","metadata":{"name":"bare-db","namespace":"pg-bare"},"spec":{"postgresVersion":{"name":"postgres-17.6"}},"status":{"currentState":"Running"}}' > "$TMP/cl/c2/postgres/pg-bare/bare-db.json"
-yq -i '.clusters.c2.instances.bare-db.instance = {"namespace": "pg-bare", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
-jq -cn '{kind: "Secret", metadata: {name: "backup-storage", namespace: "pg-bare"}, data: {accountKey: ("SOMEBODY-ELSES-KEY" | @base64)}}' > "$TMP/cl/c2/secret/pg-bare/backup-storage.json"
-run "$PJ" P_DRY_RUN=false
-expect "a foreign backup-storage that does not hold the fleet's key: NAMESPACE_SECRET_CONFLICT" FAILED NAMESPACE_SECRET_CONFLICT "does not hold the fleet's storage key"
-jq -cn --arg k "$VAULT_KEY" '{kind: "Secret", metadata: {name: "backup-storage", namespace: "pg-bare"}, data: {accountKey: ($k | @base64)}}' > "$TMP/cl/c2/secret/pg-bare/backup-storage.json"
+bare_ns "$VAULT_KEY"
 run "$PJ" P_DRY_RUN=false
 expect "a foreign backup-storage that holds the fleet's key is used as it is" SUCCEEDED ""
+[[ "$(jq -r '.data.accountKey | @base64d' "$TMP/cl/c2/secret/pg-bare/backup-storage.json")" == "$VAULT_KEY" ]] && ! ev_has 'apply c2 secret pg-bare/backup-storage' && ok "…nothing is written to it" || bad "foreign secret written" "$(cat "$TMP/events")"
 no_secret_leak "foreign backup-storage" "$VAULT_KEY" "SOMEBODY-ELSES-KEY"
 
 echo "-- postRestoreBackup"
@@ -930,18 +957,15 @@ reset
 set_flag sync.names "orders-full-1"; set_flag apply.fail.postgresbackuplocation; run "$PJ" P_DRY_RUN=false
 expect "the location copy cannot be created: SOURCE_LOCATION_FAILED" FAILED SOURCE_LOCATION_FAILED "restore-src-c1-pg-orders-orders-db"
 reset
-RK=c2.bare-db; set_flag sync.names "orders-full-1"; set_flag vault.fail
-mkdir -p "$TMP/cl/c2/postgres/pg-bare"
-printf '%s' '{"kind":"Postgres","metadata":{"name":"bare-db","namespace":"pg-bare"},"spec":{"postgresVersion":{"name":"postgres-17.6"}},"status":{"currentState":"Running"}}' > "$TMP/cl/c2/postgres/pg-bare/bare-db.json"
-mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-bare/bare-db $'pitrEnabled: false\nconfirm: bare-db'; run "$PJ" P_DRY_RUN=false
-expect "Vault has no backup-storage when the target namespace needs it: NO_VAULT_SECRET" FAILED NO_VAULT_SECRET "tpg/shared/backup-storage"
+set_flag sync.names "orders-full-1"; set_flag vault.fail
+bare_ns "SOMEBODY-ELSES-KEY"
+RK=c2.bare-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-bare/bare-db "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
+expect "Vault has no backup-storage to compare a foreign Secret with: NO_VAULT_SECRET" FAILED NO_VAULT_SECRET "tpg/shared/backup-storage"
 reset
-RK=c2.dr-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr-existing/dr-db "$BACKUP_T"
-mkdir -p "$TMP/cl/c2/postgresbackup/pg-dr-existing"
-printf '%s' '{"kind":"PostgresBackup","metadata":{"name":"nightly","namespace":"pg-dr-existing"},"spec":{"sourceInstance":{"name":"dr-db"}},"status":{"phase":"Running"}}' > "$TMP/cl/c2/postgresbackup/pg-dr-existing/nightly.json"
+RK=c1.orders-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db'
 run "$PJ"
-expect "a backup running on the existing target is a warning in a dry run" SUCCEEDED DRY_RUN
-[[ -e "$TMP/rec/warning.c2.dr-db.OPERATION_IN_PROGRESS.status" ]] && ok "OPERATION_IN_PROGRESS warning" || bad "busy warning"
+expect "a backup running on the in-place target is a warning in a dry run" SUCCEEDED DRY_RUN
+[[ -e "$TMP/rec/warning.c1.orders-db.OPERATION_IN_PROGRESS.status" ]] && ok "OPERATION_IN_PROGRESS warning" || bad "busy warning"
 if command -v kubeconform >/dev/null; then
   reset; RK=c2.orders-dr; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ"
   RKP=c2.orders-dr
@@ -990,6 +1014,20 @@ PR="$(jq -c '.spec.targetInstance.spec' "$TMP/cl/c2/postgresrestore/pg-dr/"*.jso
 jq -e --argjson r "$RS" '. as $s | $s | to_entries | all(.[]; $r[.key] == .value)' <<<"$PR" >/dev/null \
   && ok "…every field of the spec.targetInstance.spec the PostgresRestore got is in the render, with the same value" || bad "render vs restore spec" "$PR
 $RS"
+
+echo "-- a spec file with its own backupLocation: it wins over the fleet's location in the render (third revision)"
+reset
+RK=c2.orders-dr; set_flag sync.names "orders-full-1"
+mkdir -p "$TMP/cl/c2/postgresbackuplocation/pg-dr"
+printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"shared-location","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"pg-backups","repoPath":"/pg-dr/shared"}}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/shared-location.json"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-loc.yaml]'; run "$PJ" P_DRY_RUN=false
+expect "a spec file that names an existing backupLocation: SUCCEEDED, no warning" SUCCEEDED ""
+! grep -q 'SPEC_LOCATION_REPLACED' "$TMP/records" && ok "…no SPEC_LOCATION_REPLACED warning" || bad "location warning" "$(cat "$TMP/records")"
+RS="$(rendered_spec c2 orders-dr)"
+[[ "$(jq -r '.backupLocation.name' <<<"$RS")" == shared-location && "$(jq -r '.imagePullSecret.name' <<<"$RS")" == regsecret ]] \
+  && [[ "$(jq -r '.spec.targetInstance.spec.backupLocation.name' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json)" == shared-location ]] \
+  && ok "…the chart renders the spec file's backupLocation (as the restored Postgres has it), the fleet's regsecret fills in imagePullSecret" || bad "own location render" "$RS"
+! ev_has 'resources=sql.tanzu.vmware.com:PostgresBackupLocation:pg-dr/orders-dr-backup-location' && ok "…the fleet's orders-dr-backup-location is not synced before the restore (the instance does not use it)" || bad "fleet location synced" "$(cat "$TMP/events")"
 
 echo "-- a new target with a spec file, the source not in fleet.yaml: the entry is built from the file"
 reset
@@ -1049,8 +1087,14 @@ expect "the restored Postgres is not there to read: SUCCEEDED with the warning R
 reset
 RK=c2.orders-dr; set_flag sync.names "orders-full-1"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ" P_DRY_RUN=false SNAP_EXTRA='{"noSuchField": 1}'
-expect "a live spec the Postgres schema does not know: SUCCEEDED with the warning RESTORE_PATCH_NOT_RECORDED naming the field" SUCCEEDED "" "warnings: RESTORE_PATCH_NOT_RECORDED" "noSuchField"
+expect "a live spec the Postgres schema does not know: SUCCEEDED with the warning RESTORE_PATCH_NOT_RECORDED naming the field" SUCCEEDED "" "warnings: RESTORE_PATCH_NOT_RECORDED" "spec.noSuchField is not a field of the Postgres resource"
 ! ev_has '^adopt' && [[ -z "$(rp_files)" ]] && ok "…and nothing is stored or adopted" || bad "snapshot invalid" "$(cat "$TMP/events")"
+reset
+RK=c2.orders-dr; set_flag sync.names "orders-full-1"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ" P_DRY_RUN=false SNAP_EXTRA='{"noSuchField": 1, "pgConfig": {"bogusKey": "x"}, "monitoring": {"typo": true}}'
+expect "several unknown fields: the warning names every one patchcheck.py reports, with its path" SUCCEEDED "" "warnings: RESTORE_PATCH_NOT_RECORDED" "spec.noSuchField is not a field of the Postgres resource" "spec.pgConfig.bogusKey is not a field of the Postgres resource" "spec.monitoring is not a field of the Postgres resource"
+W="$(cat "$TMP/rec/warning.c2.orders-dr.RESTORE_PATCH_NOT_RECORDED.detail" 2>/dev/null)"
+grep -q 'spec.noSuchField' <<<"$W" && grep -q 'spec.pgConfig.bogusKey' <<<"$W" && grep -q 'spec.monitoring' <<<"$W" && ok "…and the warning record of the report carries them too (not only the result line)" || bad "warning record" "$W"
 reset
 RK=c2.orders-dr; set_flag sync.names "orders-full-1"; set_flag push.failfrom 2
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ" P_DRY_RUN=false

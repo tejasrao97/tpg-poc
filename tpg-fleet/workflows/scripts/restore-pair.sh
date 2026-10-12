@@ -30,9 +30,12 @@
 #    backup's status.fullPostgresVersion, else the live source's, else its PostgresVersion) is BLOCKED (RESTORE_VERSION_LOWER), a lower
 #    major version included. skipMinorVersionCheck only sets the operator's annotation and relaxes none of this; another (higher)
 #    major version is the operator's to refuse. Only this pair.
-#  5 Target: the spec file (targetInstanceSpecFilePath) is the source of truth for the restored Postgres: its spec is
-#    spec.targetInstance.spec as it is, no merge over a chart render. Allowed for a new target and for an in-place restore; any
-#    other existing target refuses it (TARGET_SPEC_FILE_REFUSED). An existing target needs confirm = its name (CONFIRMATION_MISMATCH).
+#  5 Target: a live Postgres of the target name in the target namespace on the target cluster is only restored into when it is the
+#    source itself (in place); any other is refused for this pair at plan time, also in a dry run (TARGET_EXISTS: restore in place or
+#    choose a new instance name). A fleet entry that is declared but not deployed is a new target. An in-place pair needs confirm =
+#    its name for a real run (validate-params.sh enforces it; CONFIRMATION_MISMATCH here is the second line of defence); confirm on
+#    any other pair is refused at validate. The spec file (targetInstanceSpecFilePath) is the source of truth for the restored Postgres:
+#    its spec is spec.targetInstance.spec as it is, no merge over a chart render; allowed for a new target and for an in-place restore.
 #    A new target writes its entry to clusters/fleet.yaml (git_commit_push: pushMode): a copy of the source's entry
 #    (disableInitialBackup, backup.repoPath, FerretDB, restorePatch, instance.restored and the Postgres patch and overlay files of
 #    the source dropped, instance.namespace set), or a skeleton (namespace, the spec file's version) when the source is not there;
@@ -41,7 +44,9 @@
 #    restore-patch/<instance>-restore-<uid>.yaml (one kind: Postgres document, apiVersion, kind and spec) and recorded in the entry as
 #    restorePatch.current (the former current becomes previous and is no longer applied) with restorePatch.mode, together with
 #    instance.restored: true and the fleet-equivalent fields of the spec written into instance: (lib.sh restore_patch_record), so Argo CD
-#    renders the Postgres the restore made (templates/_helpers.tpl tpg.restoredPostgres):
+#    renders the Postgres the restore made (templates/_helpers.tpl tpg.restoredPostgres; the restore-patch's own backupLocation and
+#    imagePullSecret win, the fleet's <instance>-backup-location and regsecret fill in only where it omits them; a backupLocation it
+#    names must exist in the target namespace now, BACKUP_LOCATION_MISSING):
 #      with a spec file   the spec file's spec. A new target (or an instance declared in fleet.yaml but not deployed): mode base; for a
 #                         new entry in the same commit as the entry, for a declared one in a commit of its own after the restore
 #                         succeeded. In place: mode over (the operator merged the file into the existing Postgres), in a commit of its
@@ -77,18 +82,18 @@
 # Reason codes: INVALID_PAIR NOT_REGISTERED FLEET_UNREADABLE SOURCE_NAMESPACE_MISMATCH SOURCE_UNREADABLE
 #   BACKUP_NOT_FOUND BACKUP_NOT_SUCCEEDED BACKUP_OF_OTHER_INSTANCE SOURCE_BACKUP_UNVERIFIED PITR_SOURCE_UNKNOWN
 #   BACKUP_LOCATION_NOT_INITIALIZED SOURCE_LOCATION_UNKNOWN SOURCE_LOCATION_UNREADABLE NO_FULL_BACKUP INVALID_TIMESTAMP
-#   OUTSIDE_RECOVERY_WINDOW TARGET_UNREADABLE NAMESPACE_IMMUTABLE INSTANCE_NAME_IN_USE TARGET_SPEC_FILE_REFUSED
-#   CONFIRMATION_MISMATCH OPERATION_IN_PROGRESS UNKNOWN_TARGET_CLUSTER SPEC_FILE_REQUIRED SPEC_FILE_NOT_FOUND
+#   OUTSIDE_RECOVERY_WINDOW TARGET_UNREADABLE NAMESPACE_IMMUTABLE INSTANCE_NAME_IN_USE TARGET_EXISTS
+#   CONFIRMATION_MISMATCH (in place only) OPERATION_IN_PROGRESS UNKNOWN_TARGET_CLUSTER SPEC_FILE_REQUIRED SPEC_FILE_NOT_FOUND
 #   SPEC_FILE_NOT_RECEIVED SPEC_FILE_INVALID FLEET_EDIT_FAILED CHART_RENDER_FAILED VERSION_NOT_AVAILABLE
 #   NAMESPACE_SECRET_CONFLICT BACKUP_LOCATION_MISSING SOURCE_LOCATION_CONFLICT SOURCE_SECRET_CONFLICT
 #   SOURCE_SECRET_UNREADABLE NO_VAULT_SECRET GIT_PUSH_FAILED NAMESPACE_OWNER_CONFLICT APP_NOT_GENERATED
 #   SHARED_SECRETS_MISSING SECRET_NOT_SYNCED TARGET_PREPARE_FAILED SOURCE_LOCATION_FAILED BACKUPS_NOT_SYNCED
 #   CREATE_FAILED RESTORE_FAILED TARGET_<reason> UNEXPECTED_ERROR
 #   BLOCKED: RESTORE_FLAVOUR_UNSUPPORTED RESTORE_VERSION_LOWER; TIMEOUT; SKIPPED_IN_PROGRESS
-#   warnings (report section Warnings): SRC_LOCATION_DIFFERS SRC_STANZA_DIFFERS CONFIRMATION_MISSING
+#   warnings (report section Warnings): SRC_LOCATION_DIFFERS SRC_STANZA_DIFFERS CONFIRMATION_MISSING (in place, dry run)
 #   RECOVERY_WINDOW_UNVERIFIED BACKUP_LABEL_UNVERIFIED MATRIX_UNVERIFIED OPERATION_IN_PROGRESS ADOPTION_NOT_SYNCED
 #   POST_RESTORE_BACKUP_FAILED (the restore succeeded and the instance runs: the pair stays SUCCEEDED) RESTORE_PATCH_NOT_RECORDED
-#   SPEC_LOCATION_REPLACED
+#   (names the fields of the live spec that fail the Postgres schema check)
 #   SOURCE_LOCATION_NOT_REMOVED
 WF="$1"
 # shellcheck source=workflows/scripts/lib.sh
@@ -339,6 +344,7 @@ TGT_EXISTS=false; TGT_PG=""
 # The spec file (targetInstanceSpecFilePath) is the source of truth for the restored Postgres: its spec is rendered as it is as
 # spec.targetInstance.spec of the PostgresRestore (no merge over a chart render) and stored in the fleet repository as a restore-patch
 # that the chart renders the restored instance from (the render of a restored instance, tpg.restoredPostgres). Allowed for a new target and for an in-place restore.
+# A live Postgres of the target name that is not the source (not in place) is refused first: TARGET_EXISTS.
 SPEC_JSON=""   # the spec of the spec file (compact JSON)
 load_spec() {  # load_spec: SPEC_JSON from the file; the pair fails with the reason when it cannot be used
   local sf="$WORK/spec-file.yaml" out
@@ -356,18 +362,21 @@ load_spec() {  # load_spec: SPEC_JSON from the file; the pair fails with the rea
   SPEC_JSON="$(jq -c '[.[] | select(. != null and . != {})][0].spec // {}' "$WORK/spec-file.json")"
   [[ "$SPEC_JSON" != '{}' ]] || fail SPEC_FILE_INVALID "${SPEC}: spec is empty: the spec file is the spec of the restored instance"
 }
-if [[ -n "$SPEC" && "$TGT_EXISTS" == true && "$IN_PLACE" != true ]]; then
-  fail TARGET_SPEC_FILE_REFUSED "${TNS}/${TI} exists on ${TC} and is not the source instance: targetInstanceSpecFilePath (${SPEC}) is for a new target or for an in-place restore; remove the key (the restore overwrites the data of the existing instance, its spec stays)"
+if [[ "$TGT_EXISTS" == true && "$IN_PLACE" != true ]]; then
+  # a restore overwrites the data of the instance it restores into: only the source itself may be that (in place); anything else that
+  # runs under the target name is somebody's instance
+  fail TARGET_EXISTS "a Postgres named ${TI} already runs in namespace ${TNS} on ${TC} and is not the source instance of this pair: restore in place (the source and the target are the same instance), or choose a new instance name for the target; a restore never overwrites another instance"
 fi
 
 ENTRY_NEW=false; T_OWNER=""; BUSY=""; T_PGV=""; T_BLN=""; RP_NOTE=""
 if [[ "$TGT_EXISTS" == true ]]; then
+  # an in-place restore (TARGET_EXISTS above refused every other existing target)
   [[ -z "$SPEC" ]] || load_spec
   if [[ "$CONFIRM" != "$TI" ]]; then
     if [[ "$DRY" == false ]]; then
-      fail CONFIRMATION_MISMATCH "restoring into the existing instance ${TC}/${TNS}/${TI} overwrites its data: set confirm: ${TI} in the target of the pair"
+      fail CONFIRMATION_MISMATCH "restoring ${TC}/${TNS}/${TI} in place overwrites its data: set confirm: ${TI} in the target of the pair"
     fi
-    warn CONFIRMATION_MISSING "the target ${TC}/${TNS}/${TI} exists: a real run (dryRun=false) is refused unless the pair sets confirm: ${TI}"
+    warn CONFIRMATION_MISSING "the restore of ${TC}/${TNS}/${TI} is in place: a real run (dryRun=false) is refused unless the pair sets confirm: ${TI}"
   fi
   T_PGV="$(jq -r '.postgresVersion.name // ""' <<<"${SPEC_JSON:-null}")"
   [[ -n "$T_PGV" ]] || T_PGV="$(jq -r '.spec.postgresVersion.name // ""' <<<"$TGT_PG")"
@@ -376,7 +385,7 @@ if [[ "$TGT_EXISTS" == true ]]; then
   if [[ -n "$BUSY" && "$DRY" == true ]]; then
     warn OPERATION_IN_PROGRESS "${TC}/${TI} has an unfinished ${BUSY}: a real run is refused until it finished"
   fi
-  plan "target: existing Postgres ${TC}/${TNS}/${TI} (version ${T_PGV:-unknown}); its data is overwritten$( [[ "$IN_PLACE" == true ]] && echo " (in place)" ); spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is (it overrides the existing instance's values)" || echo "none, only the name" )"
+  plan "target: existing Postgres ${TC}/${TNS}/${TI} (version ${T_PGV:-unknown}); its data is overwritten (in place); spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is (it overrides the existing instance's values)" || echo "none, only the name" )"
 else
   # a live Postgres of that name in another namespace of the cluster would clash with the Application tpg-<cluster>-<instance>
   other="$(live_postgres_namespaces "$TI" | grep -vFx -- "$TNS" | paste -sd, - || true)"
