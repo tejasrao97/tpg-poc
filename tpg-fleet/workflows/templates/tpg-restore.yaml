@@ -98,7 +98,7 @@ spec:
       description: "JSON map {\"<path>\": \"<base64 contents>\"} of the local files that targetInstanceSpecFilePath names; scripts/submit/pack-patch-files.sh -o <parameter file> writes it"
       value: ""
     - name: restoreTimeoutSeconds
-      description: "How long to wait for one PostgresRestore, and for the restored instance to run"
+      description: "How long the restore phase of one pair may take: the wait for synced backups (named backup into another namespace or cluster) and for the PostgresRestore to finish. Waiting for the restored instance to run has its own timeout (1800 s)"
       value: "7200"
     - name: prTimeoutSeconds
       value: "3600"

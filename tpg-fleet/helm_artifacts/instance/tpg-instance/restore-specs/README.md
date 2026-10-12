@@ -31,7 +31,8 @@ What goes here, and what does not:
   first render of a new instance use the overlays of tpg-day0 and tpg-create-instance (`../overlays/`).
 - Add files through a reviewed commit, with a name that says what they are for (for example
   `orders-db-dr.yaml`). Only `.yaml` and `.yml` files of this folder are accepted by a run: no `..`, no
-  absolute path, no `//` and no other folder, and this README is not a spec file.
+  absolute path, no `//`, no other folder and no symbolic link (a link, or a path that resolves outside this
+  folder, is refused with `SPEC_FILE_INVALID`), and this README is not a spec file.
 
 ```yaml
 # restore-specs/orders-db-dr.yaml

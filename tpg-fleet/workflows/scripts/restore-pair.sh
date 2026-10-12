@@ -32,7 +32,7 @@
 #    major version is the operator's to refuse. Only this pair.
 #  5 Target: a live Postgres of the target name in the target namespace on the target cluster is only restored into when it is the
 #    source itself (in place); any other is refused for this pair at plan time, also in a dry run (TARGET_EXISTS: restore in place or
-#    choose a new instance name). A fleet entry that is declared but not deployed is a new target. An in-place pair needs confirm =
+#    choose a new instance name). A fleet entry that is declared but not deployed is a new target and its entry is REPLACED (the declared namespace is kept). An in-place pair needs confirm =
 #    its name for a real run (validate-params.sh enforces it; CONFIRMATION_MISMATCH here is the second line of defence); confirm on
 #    any other pair is refused at validate. The spec file (targetInstanceSpecFilePath) is the source of truth for the restored Postgres:
 #    its spec is spec.targetInstance.spec as it is, no merge over a chart render; allowed for a new target and for an in-place restore.
@@ -47,10 +47,9 @@
 #    renders the Postgres the restore made (templates/_helpers.tpl tpg.restoredPostgres; the restore-patch's own backupLocation and
 #    imagePullSecret win, the fleet's <instance>-backup-location and regsecret fill in only where it omits them; a backupLocation it
 #    names must exist in the target namespace now, BACKUP_LOCATION_MISSING):
-#      with a spec file   the spec file's spec. A new target (or an instance declared in fleet.yaml but not deployed): mode base; for a
-#                         new entry in the same commit as the entry, for a declared one in a commit of its own after the restore
-#                         succeeded. In place: mode over (the operator merged the file into the existing Postgres), in a commit of its
-#                         own after the restore succeeded
+#      with a spec file   the spec file's spec. A new target (one declared in fleet.yaml but not deployed included): mode base, in the same
+#                         commit as the entry. In place: mode over (the operator merged the file into the existing Postgres), in a commit
+#                         of its own after the restore succeeded
 #      without one        after the restore succeeded and the instance runs, the spec of the Postgres is read from the cluster
 #                         (the .spec only: status, metadata, managed fields and the like are not part of it; null values are dropped;
 #                         nothing else is stripped, the live spec is the truth) and stored the same way, mode base, in a commit of its own
@@ -64,9 +63,13 @@
 #  6 Another namespace or cluster: the source PostgresBackupLocation is copied into the target namespace
 #    (backupSync on, retention so high that no expiry runs through it, labels tpg.fleet/restore-source); a
 #    location of the target namespace for the same container and repoPath is REUSED when its backupSync is on
-#    (SOURCE_LOCATION_CONFLICT otherwise). Its Secret: backup-storage comes from the namespace (Vault Secrets
-#    Operator) or, when missing, from Vault; any other Secret is copied from the source cluster. Secret values
-#    are held in shell variables and piped to kubectl on stdin: never a file, an argument or a log line. A named
+#    (SOURCE_LOCATION_CONFLICT otherwise; a list of the target namespace's locations that cannot be read is TARGET_UNREADABLE, not
+#    an empty list). Its Secret: backup-storage comes from the namespace (Vault Secrets Operator) or, when missing, from Vault; any other
+#    Secret is copied from the source cluster into a Secret of the copy's OWN name, <copy name>-creds (spec.storage.azure.secret.name of
+#    the copy; labelled tpg.fleet/restore-source), so copies of different sources never share or overwrite one whatever the sources call
+#    theirs. A reused copy keeps using the Secret it has: when its contents differ from the source's it is updated only if its
+#    restore-source label equals this pair's source, otherwise SOURCE_SECRET_CONFLICT (no label: a Secret this workflow did not make).
+#    Secret values are held in shell variables and piped to kubectl on stdin: never a file, an argument or a log line. A named
 #    backup then waits for the PostgresBackup of the same name in the target namespace (BACKUPS_NOT_SYNCED).
 #  7 dryRun: nothing is changed on a cluster, in Git or in Argo CD; the whole plan, the PostgresRestore as YAML
 #    included, is logged and recorded (plan.restore.<cluster>.<instance>).
@@ -75,7 +78,7 @@
 #    and a new target is adopted by its Application (sync_instance_app).
 #  9 postRestoreBackup: a full backup of the target as tpg-backup takes it (a failure is the warning POST_RESTORE_BACKUP_FAILED, the pair
 #    stays SUCCEEDED). keepSourceLocation=false removes the
-#    copy this run created (never a reused one) unless a Postgres of the target namespace names it as its spec.backupLocation (the restored
+#    copy this run created (never a reused one), and with it the copy's own Secret and no other, unless a Postgres of the target namespace names it as its spec.backupLocation (the restored
 #    instance, from the spec file or as the operator made it, or any other): then it is kept and the warning SOURCE_LOCATION_IN_USE names the
 #    instance(s); when the instances cannot be listed it is kept with SOURCE_LOCATION_NOT_REMOVED. While the copy exists repo_shared (tpg-delete-instance,
 #    tpg-delete-apps purgeBackups) treats the source repository as shared, which is intended.
@@ -86,7 +89,7 @@
 #   BACKUP_LOCATION_NOT_INITIALIZED SOURCE_LOCATION_UNKNOWN SOURCE_LOCATION_UNREADABLE NO_FULL_BACKUP INVALID_TIMESTAMP
 #   OUTSIDE_RECOVERY_WINDOW TARGET_UNREADABLE NAMESPACE_IMMUTABLE INSTANCE_NAME_IN_USE TARGET_EXISTS
 #   CONFIRMATION_MISMATCH (in place only) OPERATION_IN_PROGRESS UNKNOWN_TARGET_CLUSTER SPEC_FILE_REQUIRED SPEC_FILE_NOT_FOUND
-#   SPEC_FILE_NOT_RECEIVED SPEC_FILE_INVALID FLEET_EDIT_FAILED CHART_RENDER_FAILED VERSION_NOT_AVAILABLE
+#   SPEC_FILE_NOT_RECEIVED SPEC_FILE_INVALID (a repo: spec file that is a symbolic link or lies behind one, or outside restore-specs/) FLEET_EDIT_FAILED CHART_RENDER_FAILED VERSION_NOT_AVAILABLE
 #   NAMESPACE_SECRET_CONFLICT BACKUP_LOCATION_MISSING SOURCE_LOCATION_CONFLICT SOURCE_SECRET_CONFLICT
 #   SOURCE_SECRET_UNREADABLE NO_VAULT_SECRET GIT_PUSH_FAILED NAMESPACE_OWNER_CONFLICT APP_NOT_GENERATED
 #   SHARED_SECRETS_MISSING SECRET_NOT_SYNCED TARGET_PREPARE_FAILED SOURCE_LOCATION_FAILED BACKUPS_NOT_SYNCED
@@ -164,7 +167,7 @@ pv_version() {  # pv_version NAME: PV_VER = major.minor of the PostgresVersion N
   local j v=""
   PV_FOUND=false
   if j="$(tk get postgresversion "$1" --ignore-not-found -o json 2>/dev/null)" && [[ -n "$j" ]]; then
-    v="$(jq -r '.spec.dbVersion // empty' <<<"$j")"; PV_FOUND=true
+    v="$(ver_of "$(jq -r '.spec.dbVersion // empty' <<<"$j")")"; PV_FOUND=true   # 17.5.9 -> 17.5: the compare is major.minor
   fi
   [[ -n "$v" ]] || v="$(ver_of "$1")"
   PV_VER="$v"
@@ -328,11 +331,6 @@ if [[ "$SAME_NS" != true ]]; then
   LOC_PATH="$(jq -r '.spec.storage.azure.repoPath // "/"' <<<"$LOC_JSON")"
   LOC_EP="$(jq -r '.spec.storage.azure.endpoint // "blob.core.windows.net"' <<<"$LOC_JSON")"
   LOC_SECRET="$(jq -r '.spec.storage.azure.secret.name // "backup-storage"' <<<"$LOC_JSON")"
-  if [[ "$LOC_SECRET" != backup-storage ]]; then
-    # the credentials of the copied location are copied in a real run: they must be there to copy (only the metadata is read here)
-    rc=0; secret_meta "$SNS" secret "$LOC_SECRET" >/dev/null || rc=$?
-    [[ "$rc" -eq 0 ]] || fail SOURCE_SECRET_UNREADABLE "Secret ${SNS}/${LOC_SECRET} on ${SC}, the credentials of the source backup location ${SRC_BL}, cannot be read"
-  fi
 fi
 
 # ---- 5. the target: the source itself (in place) or a new instance; any other live Postgres of that name is TARGET_EXISTS
@@ -356,8 +354,18 @@ SPEC_JSON=""   # the spec of the spec file (compact JSON)
 load_spec() {  # load_spec: SPEC_JSON from the file; the pair fails with the reason when it cannot be used
   local sf="$WORK/spec-file.yaml" out
   if patch_is_repo "$SPEC"; then
-    [[ -f "$REPO/${SPEC#repo:}" ]] || fail SPEC_FILE_NOT_FOUND "${SPEC}: no such file on the fleet branch"
-    cp "$REPO/${SPEC#repo:}" "$sf"
+    [[ -e "$REPO/${SPEC#repo:}" || -L "$REPO/${SPEC#repo:}" ]] || fail SPEC_FILE_NOT_FOUND "${SPEC}: no such file on the fleet branch"
+    # a committed symbolic link is no spec file: it could lead out of restore-specs/ to any file of the clone (the file itself, and every
+    # folder on the way, must lie under restore-specs/ for real)
+    local specdir real
+    specdir="$(realpath -- "$REPO/helm_artifacts/instance/tpg-instance/restore-specs" 2>/dev/null)" || specdir=""
+    real="$(realpath -- "$REPO/${SPEC#repo:}" 2>/dev/null)" || real=""
+    # (the folder itself must be the folder, not a link to another one)
+    if [[ -L "$REPO/${SPEC#repo:}" || -z "$specdir" || "$specdir" != "$(realpath -- "$REPO")/helm_artifacts/instance/tpg-instance/restore-specs" || "$real" != "$specdir"/* ]]; then
+      fail SPEC_FILE_INVALID "${SPEC}: is a symbolic link or lies behind one and does not stay inside helm_artifacts/instance/tpg-instance/restore-specs/: commit the spec file itself there"
+    fi
+    [[ -f "$real" ]] || fail SPEC_FILE_NOT_FOUND "${SPEC}: no such file on the fleet branch"
+    cp "$real" "$sf"
   else
     patch_file_write "$SPEC" "$sf" "$REPO" || fail SPEC_FILE_NOT_RECEIVED "${SPEC}: ${PATCH_FILES_ERROR:-its contents are not in patchFiles}"
   fi
@@ -403,11 +411,10 @@ else
     [[ "$(jq -r '.postgresVersion.name // ""' <<<"$SPEC_JSON")" != "" ]] \
       || fail SPEC_FILE_INVALID "${SPEC}: spec.postgresVersion.name is missing: the version of the new instance is needed for its entry in ${FLEET_REL} and for the restore matrix"
   fi
-  if [[ "$TGT_FLEET" == true ]]; then
-    note "the entry ${TC}/${TI} is already declared in ${FLEET_REL}: it is kept as it is"
-  else
-    ENTRY_NEW=true
-  fi
+  # no live Postgres of that name: a new target, also when ${FLEET_REL} declares the instance already (declared but not deployed): its entry is
+  # replaced by the one the restore writes (a copy of the source's, or the skeleton of the spec file), the declared namespace kept (checked above)
+  ENTRY_NEW=true
+  [[ "$TGT_FLEET" != true ]] || note "the entry ${TC}/${TI} is declared in ${FLEET_REL} but not deployed: it is a new target, its entry is replaced"
 fi
 
 # stage_restore_patch SPEC_JSON MODE: SPEC_JSON (the spec file's spec, or the spec read from the cluster) as a restore-patch in the clone $REPO
@@ -454,8 +461,9 @@ prepare_entry() {
       TC_="$TC" TI_="$TI" V_="$(jq -r '.postgresVersion.name' <<<"$SPEC_JSON")" yq -i '.clusters[strenv(TC_)].instances[strenv(TI_)].instance.postgresVersion = strenv(V_)' "$f" || return 1
     fi
   else
+    # the whole entry is the skeleton (a declared entry of that name is replaced, not merged into)
     TC_="$TC" TI_="$TI" NS_="$TNS" V_="$(jq -r '.postgresVersion.name' <<<"$SPEC_JSON")" yq -i '
-      .clusters[strenv(TC_)].instances[strenv(TI_)].instance = {"namespace": strenv(NS_), "postgresVersion": strenv(V_)}' "$f" || return 1
+      .clusters[strenv(TC_)].instances[strenv(TI_)] = {"instance": {"namespace": strenv(NS_), "postgresVersion": strenv(V_)}}' "$f" || return 1
   fi
   # who renders the ServiceAccount tpg-vso and the VaultStaticSecrets regsecret and backup-storage: exactly one instance per namespace
   others="$(fleet_ns_owners "$REPO" "$TC" "$TNS" | grep -vFx -- "$TI" || true)"
@@ -475,16 +483,15 @@ if [[ "$ENTRY_NEW" == true ]]; then
     fail SPEC_FILE_REQUIRED "${SC}/${SI} is not declared in ${FLEET_REL} (nothing to copy for the new instance ${TC}/${TI}): give targetInstanceSpecFilePath, one kind: Postgres document with at least spec.postgresVersion.name"
   fi
   prepare_entry || fail FLEET_EDIT_FAILED "$FLEET_REL"
-elif [[ "$TGT_FLEET" == true && "$TGT_EXISTS" == false ]]; then
-  T_OWNER="$(_flag_get "$REPO" "$TC" "$TI")"; [[ "$T_OWNER" == false ]] || T_OWNER=true
 fi
-# The restore-patch of an existing entry (in place, or declared in fleet.yaml but not deployed) is recorded in a commit of its own after the
-# restore succeeded: the spec file's spec, or the spec read from the cluster. Mode over for an in-place restore with a spec file (the operator
-# merged the file into the existing Postgres), base otherwise. An instance that has no entry is not managed by Argo CD: nothing is recorded.
+# The restore-patch of an in-place restore is recorded in a commit of its own after the restore succeeded: the spec file's spec, or the spec
+# read from the cluster. Mode over with a spec file (the operator merged the file into the existing Postgres), base otherwise. An instance
+# that has no entry is not managed by Argo CD: nothing is recorded. (A new target, also one whose entry was declared, has its entry and, with a
+# spec file, its restore-patch written by prepare_entry.)
 RP_FORM=base; [[ -z "$SPEC_JSON" || "$TGT_EXISTS" != true ]] || RP_FORM=over
 if [[ "$TGT_EXISTS" == true && "$TGT_FLEET" != true ]]; then
   RP_NOTE="${TC}/${TI} has no entry in ${FLEET_REL}: $( [[ -n "$SPEC_JSON" ]] && echo "the spec file is used for the restore only" || echo "its spec is not read" ), no restore-patch is recorded (Argo CD does not manage this instance)"
-elif [[ "$TGT_FLEET" == true && -n "$SPEC_JSON" ]]; then
+elif [[ "$TGT_EXISTS" == true && -n "$SPEC_JSON" ]]; then
   stage_restore_patch "$SPEC_JSON" "$RP_FORM" || fail FLEET_EDIT_FAILED "$FLEET_REL (restorePatch of ${TI})"
 fi
 
@@ -503,7 +510,7 @@ if [[ "$TGT_EXISTS" == false ]]; then
     T_PGV="$(jq -r '.postgresVersion.name // ""' <<<"$base_spec")"
     T_BLN="$(jq -r '.backupLocation.name // ""' <<<"$base_spec")"
   fi
-  plan "target: new instance ${TC}/${TNS}/${TI}, version ${T_PGV:-unknown}; spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is" || echo "none, only the name: the operator creates the instance and fills in its spec (lab item: how it fills it)" ); ${FLEET_REL}: $( [[ "$ENTRY_NEW" == true ]] && echo "the entry would be added$( [[ "$SRC_FLEET" == true ]] && echo " (a copy of the entry of ${SC}/${SI})" || echo " (from the spec file)" ) (pushMode ${PUSH_MODE})" || echo "the entry already exists" ); shared Secrets of ${TNS}: $( [[ "$T_OWNER" == true ]] && echo "owned by ${TI}" || echo "owned by ${OWNER_NOTE:-another instance}" )"
+  plan "target: new instance ${TC}/${TNS}/${TI}, version ${T_PGV:-unknown}; spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is" || echo "none, only the name: the operator creates the instance and fills in its spec (lab item: how it fills it)" ); ${FLEET_REL}: $( [[ "$ENTRY_NEW" == true ]] && echo "the entry would be $( [[ "$TGT_FLEET" == true ]] && echo "replaced (it is declared but not deployed)" || echo added )$( [[ "$SRC_FLEET" == true ]] && echo " (a copy of the entry of ${SC}/${SI})" || echo " (from the spec file)" ) (pushMode ${PUSH_MODE})" || echo "the entry already exists" ); shared Secrets of ${TNS}: $( [[ "$T_OWNER" == true ]] && echo "owned by ${TI}" || echo "owned by ${OWNER_NOTE:-another instance}" )"
 fi
 RP_WHAT="the spec file"; [[ -n "$SPEC_JSON" ]] || RP_WHAT="the spec of the restored Postgres, read from ${TC} once it runs"
 RP_PLAN="mode ${RP_FORM}, restorePatch.current of ${TC}/${TI}, instance.restored: true and the fleet-equivalent fields of the spec written into the entry; the chart renders the Postgres from it (its fields; its own backupLocation and imagePullSecret win and the fleet's fill in where it omits them (${TI}-backup-location, regsecret); then the later changes of the entry and the tpg-patch patch file)"
@@ -572,41 +579,59 @@ if [[ -n "$SPEC_JSON" && -n "${T_BLN:-}" && "$T_BLN" != "${TI}-backup-location" 
 fi
 
 # ---- 6. another namespace or cluster: the copy of the source backup location (reused when one exists)
-COPY_NAME=""; COPY_CREATE=false; COPY_SPEC=""
-find_copy() {  # find_copy: COPY_NAME and COPY_CREATE for the target namespace (a location for the same container and repoPath is reused)
-  local want rows name cont path ep sync
+COPY_NAME=""; COPY_CREATE=false; COPY_SPEC=""; COPY_SECRET=""
+copy_secret_want() {  # the Secret of a copy this run creates: its own, named after the copy (two copies never share one, whatever the sources call theirs)
+  local want="${COPY_NAME}-creds"
+  [[ "${#want}" -le 253 ]] || want="restore-src-$(printf '%s' "$COPY_NAME" | cksum | cut -d' ' -f1)-creds"
+  printf '%s' "$want"
+}
+find_copy() {  # find_copy: COPY_NAME, COPY_CREATE and COPY_SECRET (the Secret the copy reads) for the target namespace (a location for the same container and repoPath is reused)
+  local want lst rows name cont path ep sync sec
   want="$(copy_want)"
   COPY_NAME="$want"; COPY_CREATE=true
   to_tgt
-  rows="$(tk -n "$TNS" get postgresbackuplocation -o json 2>/dev/null | jq -r '.items[]? | select(.spec.storage.azure.container != null)
+  # a list that cannot be read is not an empty list (a copy could then be created next to one that exists): the pair fails closed
+  lst="$(tk -n "$TNS" get postgresbackuplocation -o json 2>"$WORK/loclist.err")" \
+    || fail TARGET_UNREADABLE "the PostgresBackupLocations of ${TNS} on ${TC} could not be listed: $(tr '\n' ' ' <"$WORK/loclist.err" | cut -c1-300)"
+  rows="$(jq -r '.items[]? | select(.spec.storage.azure.container != null)
     | [.metadata.name, .spec.storage.azure.container, (.spec.storage.azure.repoPath // "/"),
-       (.spec.storage.azure.endpoint // "blob.core.windows.net"), (if .spec.backupSync.enabled == false then "false" else "true" end)] | @tsv' 2>/dev/null || true)"
-  while IFS=$'\t' read -r name cont path ep sync; do
+       (.spec.storage.azure.endpoint // "blob.core.windows.net"), (if .spec.backupSync.enabled == false then "false" else "true" end),
+       (.spec.storage.azure.secret.name // "backup-storage")] | @tsv' <<<"$lst" 2>/dev/null)" \
+    || fail TARGET_UNREADABLE "the PostgresBackupLocations of ${TNS} on ${TC} were listed, but the answer is not JSON: ${lst:0:200}"
+  while IFS=$'\t' read -r name cont path ep sync sec; do
     [[ -n "$name" ]] || continue
     if [[ "$cont" == "$LOC_CONT" && "$ep" == "$LOC_EP" && "$(repo_norm "$path")" == "$(repo_norm "$LOC_PATH")" ]]; then
       [[ "$sync" == true ]] || fail SOURCE_LOCATION_CONFLICT "PostgresBackupLocation ${TNS}/${name} on ${TC} already points at ${LOC_CONT}${LOC_PATH} but has backupSync disabled, so the backups of the source repository do not appear there: enable backupSync on it, or delete it and run again"
-      COPY_NAME="$name"; COPY_CREATE=false
+      COPY_NAME="$name"; COPY_CREATE=false; COPY_SECRET="$sec"   # a reused copy keeps using the Secret it has
       return 0
     fi
     [[ "$name" != "$want" ]] || fail SOURCE_LOCATION_CONFLICT "PostgresBackupLocation ${TNS}/${name} on ${TC} exists for another repository (${cont}${path}), not the source repository ${LOC_CONT}${LOC_PATH}: delete it or choose another target namespace"
   done <<<"$rows"
+  # a new copy: backup-storage stays the namespace's own Secret of the fleet; any other credentials get a Secret of the copy's own
+  if [[ "$LOC_SECRET" == backup-storage ]]; then COPY_SECRET=backup-storage; else COPY_SECRET="$(copy_secret_want)"; fi
 }
 if [[ "$SAME_NS" != true ]]; then
   find_copy
+  if [[ "$COPY_SECRET" != backup-storage ]]; then
+    # the credentials of the copy are copied from the source in a real run: they must be there to copy (only the metadata is read here)
+    to_src
+    rc=0; secret_meta "$SNS" secret "$LOC_SECRET" >/dev/null || rc=$?
+    [[ "$rc" -eq 0 ]] || fail SOURCE_SECRET_UNREADABLE "Secret ${SNS}/${LOC_SECRET} on ${SC}, the credentials of the source backup location ${SRC_BL}, cannot be read"
+  fi
   if [[ -n "$SPEC_JSON" && "${T_BLN:-}" == "$(copy_want)" && "$COPY_NAME" != "$T_BLN" ]]; then
     fail BACKUP_LOCATION_MISSING "the spec file names backupLocation ${T_BLN}, the copy of the source backup location, but ${TNS} on ${TC} already has ${COPY_NAME} for that repository, which this run reuses instead of creating ${T_BLN}: name ${COPY_NAME} in the spec file, or leave backupLocation out of it"
   fi
   src_label="${SC}.${SI}"; [[ "${#src_label}" -le 63 ]] || src_label="$(printf '%s' "$src_label" | cksum | cut -d' ' -f1)"
-  COPY_SPEC="$(jq -c '{
+  COPY_SPEC="$(jq -c --arg sec "$COPY_SECRET" '{
       retentionPolicy: {fullRetention: {type: "count", number: 9999999}, diffRetention: {number: 9999999}},
       storage: {azure: (.spec.storage.azure | {container, repoPath, endpoint, keyType, caBundle, forcePathStyle,
-        enableSSL: (.enableSSL // false), secret: {name: (.secret.name // "backup-storage")}} | with_entries(select(.value != null)))},
+        enableSSL: (.enableSSL // false), secret: {name: $sec}} | with_entries(select(.value != null)))},
       backupSync: {enabled: true}, backupIntegrityValidation: {enabled: true}}
       + (if (.spec.additionalParameters // {}) != {} then {additionalParameters: .spec.additionalParameters} else {} end)' <<<"$LOC_JSON")"
   if [[ "$COPY_CREATE" == true ]]; then
-    plan "source location: ${SNS}/${SRC_BL} on ${SC} (${LOC_CONT}${LOC_PATH}) would be copied as ${TNS}/${COPY_NAME} on ${TC} (backupSync on, retention 9999999, label tpg.fleet/restore-source=${src_label}); Secret ${LOC_SECRET}: $( [[ "$LOC_SECRET" == backup-storage ]] && echo "the backup-storage of ${TNS} (Vault Secrets Operator), else created from Vault" || echo "copied from ${SC}/${SNS} in memory" )"
+    plan "source location: ${SNS}/${SRC_BL} on ${SC} (${LOC_CONT}${LOC_PATH}) would be copied as ${TNS}/${COPY_NAME} on ${TC} (backupSync on, retention 9999999, label tpg.fleet/restore-source=${src_label}); Secret ${COPY_SECRET}$( [[ "$COPY_SECRET" == backup-storage ]] && echo ": the backup-storage of ${TNS} (Vault Secrets Operator), else created from Vault" || echo " (its own, removed with it by keepSourceLocation=false): copied from ${SC}/${SNS}/${LOC_SECRET} in memory" )"
   else
-    plan "source location: ${TNS}/${COPY_NAME} on ${TC} already points at ${LOC_CONT}${LOC_PATH} with backupSync on: reused, not created, never removed by this run"
+    plan "source location: ${TNS}/${COPY_NAME} on ${TC} already points at ${LOC_CONT}${LOC_PATH} with backupSync on: reused, not created, never removed by this run; it reads the Secret ${COPY_SECRET}$( [[ "$COPY_SECRET" == backup-storage ]] && echo " of the namespace" || echo ", which is refreshed from ${SC}/${SNS}/${LOC_SECRET} in memory when its contents differ (only when it is labelled tpg.fleet/restore-source=${src_label}, else SOURCE_SECRET_CONFLICT)" )"
   fi
   [[ "$METHOD" != backup ]] || plan "named backup: after the location exists, wait for PostgresBackup ${TNS}/${SBK} on ${TC} to appear and be Succeeded (counts against restoreTimeoutSeconds ${TIMEOUT}s; Failed stops the pair at once)"
 fi
@@ -706,7 +731,7 @@ if [[ "$ENTRY_NEW" == true ]]; then
     # namespace see each other's entry
     fleet_lock_acquire || true
     git_clone "$REPO" >/dev/null 2>&1 || { fleet_lock_release; fail FLEET_UNREADABLE "the fleet repository could not be cloned again before the push"; }
-    if fleet_has_instance "$REPO" "$TC" "$TI"; then
+    if [[ "$TGT_FLEET" != true ]] && fleet_has_instance "$REPO" "$TC" "$TI"; then
       note "the entry ${TC}/${TI} appeared in ${FLEET_REL} meanwhile: it is kept as it is"
       fleet_lock_release
     else
@@ -726,7 +751,7 @@ if [[ "$ENTRY_NEW" == true ]]; then
     fail NAMESPACE_OWNER_CONFLICT "after the push ${FLEET_REL} names $(fleet_ns_owners "$REPO" "$TC" "$TNS" | paste -sd, -) as owners of the shared Secrets of ${TNS} on ${TC}; set instance.sharedSecretsOwner: false on all but one of them and run again (nothing was synced)"
   fi
 fi
-# a new instance, or one declared in clusters/fleet.yaml but not deployed: its Application provides the shared objects and the backup location
+# a new instance (one declared in clusters/fleet.yaml but not deployed included): its Application provides the shared objects and the backup location
 if [[ "$TGT_EXISTS" == false ]]; then
   to_tgt
   tk create namespace "$TNS" --dry-run=client -o yaml | tk apply -f - >/dev/null || fail TARGET_PREPARE_FAILED "namespace ${TNS} on ${TC}"
@@ -752,8 +777,8 @@ fi
 
 # ---- 6 (real) the copy of the source location with its Secret
 COPY_MADE=false; COPY_SECRET_MADE=false
-secret_in_target() {  # the Secret of the copied location is in the target namespace (values only ever in memory)
-  local sec="$LOC_SECRET" rc=0 sacct skey live_sha want have
+secret_in_target() {  # the Secret of the copied (or reused) location is in the target namespace (values only ever in memory)
+  local sec="$COPY_SECRET" rc=0 sacct skey live_sha want have lab
   to_tgt
   if [[ "$sec" == backup-storage ]]; then
     rc=0; fleet_secret "$TNS" backup-storage || rc=$?
@@ -774,7 +799,7 @@ secret_in_target() {  # the Secret of the copied location is in the target names
       fail NAMESPACE_SECRET_CONFLICT "namespace ${TNS} on ${TC} has a Secret backup-storage that the fleet does not manage and that does not hold the fleet's storage key; the copied location ${COPY_NAME} reads it: rename that Secret or choose another target namespace"
     fi
     # absent (a namespace the fleet does not manage): created from Vault, in memory
-    A="$sacct" K="$skey" jq -n --arg src "${SC}.${SI}" '{apiVersion: "v1", kind: "Secret", type: "Opaque",
+    A="$sacct" K="$skey" jq -n --arg src "$src_label" '{apiVersion: "v1", kind: "Secret", type: "Opaque",
         metadata: {name: "backup-storage", labels: {"tpg.fleet/restore-source": $src, "tpg.fleet/managed": "true"}},
         data: {accountName: (env.A | @base64), accountKey: (env.K | @base64)}}' | tk -n "$TNS" apply -f - >/dev/null \
       || { skey=""; sacct=""; fail TARGET_PREPARE_FAILED "Secret backup-storage in ${TNS} on ${TC}"; }
@@ -782,28 +807,39 @@ secret_in_target() {  # the Secret of the copied location is in the target names
     COPY_SECRET_MADE=true; note "Secret ${TNS}/backup-storage was created from Vault (the namespace has no VaultStaticSecret for it)"
     return 0
   fi
-  # any other Secret: copied from the source cluster in memory
+  # any other Secret: the copy's own, copied from the source cluster in memory. A new copy has a Secret of its own name (<copy>-creds), so no
+  # other copy or Secret of the namespace is touched; a reused copy keeps the Secret it has: it is refreshed when its contents differ, but
+  # only when it was made for this source (tpg.fleet/restore-source), otherwise it is somebody else's or another source's
   to_src
-  local sj
-  sj="$(tk -n "$SNS" get secret "$sec" -o json 2>/dev/null)" || sj=""
-  [[ -n "$sj" ]] || fail SOURCE_SECRET_UNREADABLE "Secret ${SNS}/${sec} on ${SC}, the credentials of the source backup location ${SRC_BL}, could not be read"
+  local sj tj
+  sj="$(tk -n "$SNS" get secret "$LOC_SECRET" -o json 2>/dev/null)" || sj=""
+  [[ -n "$sj" ]] || fail SOURCE_SECRET_UNREADABLE "Secret ${SNS}/${LOC_SECRET} on ${SC}, the credentials of the source backup location ${SRC_BL}, could not be read"
   have="$(printf '%s' "$sj" | jq -S -c '.data // {}' | sha16)"
   to_tgt
   live_sha=""
   if tj="$(tk -n "$TNS" get secret "$sec" -o json 2>/dev/null)" && [[ -n "$tj" ]]; then
     live_sha="$(printf '%s' "$tj" | jq -S -c '.data // {}' | sha16)"
-    if [[ "$live_sha" == "$have" ]]; then sj=""; tj=""; return 0; fi
-    if ! printf '%s' "$tj" | jq -e '.metadata.labels["tpg.fleet/restore-source"] != null' >/dev/null; then
-      sj=""; tj=""
-      fail SOURCE_SECRET_CONFLICT "namespace ${TNS} on ${TC} already has a Secret ${sec} with other contents that this workflow did not create; the copied location ${COPY_NAME} needs the credentials of ${SC}/${SNS}/${sec}: rename that Secret or choose another target namespace"
+    lab="$(printf '%s' "$tj" | jq -r '.metadata.labels["tpg.fleet/restore-source"] // ""')"
+    tj=""
+    if [[ "$live_sha" == "$have" ]]; then
+      # as it should be: nothing to write; one made for this source by an earlier run is this copy's own, removed with it
+      sj=""; [[ "$lab" != "$src_label" ]] || COPY_SECRET_MADE=true
+      return 0
+    fi
+    if [[ -z "$lab" ]]; then
+      sj=""
+      fail SOURCE_SECRET_CONFLICT "namespace ${TNS} on ${TC} already has a Secret ${sec} with other contents that this workflow did not create; the location ${COPY_NAME} reads it and needs the credentials of ${SC}/${SNS}/${LOC_SECRET}: rename that Secret or choose another target namespace"
+    elif [[ "$lab" != "$src_label" ]]; then
+      sj=""
+      fail SOURCE_SECRET_CONFLICT "the Secret ${sec} of namespace ${TNS} on ${TC} has other contents and was made for another restore source (tpg.fleet/restore-source=${lab}, this pair's source is ${src_label}); the location ${COPY_NAME} reads it and needs the credentials of ${SC}/${SNS}/${LOC_SECRET}: it is not overwritten; restore from that source, or delete the Secret and the location ${COPY_NAME} if they are no longer needed"
     fi
   fi
   tj=""
-  printf '%s' "$sj" | S="${SC}.${SI}" jq '{apiVersion: "v1", kind: "Secret", type: (.type // "Opaque"),
-      metadata: {name: .metadata.name, labels: {"tpg.fleet/restore-source": env.S, "tpg.fleet/managed": "true"}}, data: (.data // {})}' \
+  printf '%s' "$sj" | S="$src_label" N="$sec" jq '{apiVersion: "v1", kind: "Secret", type: (.type // "Opaque"),
+      metadata: {name: env.N, labels: {"tpg.fleet/restore-source": env.S, "tpg.fleet/managed": "true"}}, data: (.data // {})}' \
     | tk -n "$TNS" apply -f - >/dev/null || { sj=""; fail TARGET_PREPARE_FAILED "Secret ${sec} in ${TNS} on ${TC}"; }
   sj=""
-  COPY_SECRET_MADE=true; note "Secret ${TNS}/${sec} was copied from ${SC}/${SNS} (contents not logged)"
+  COPY_SECRET_MADE=true; note "Secret ${TNS}/${sec} was copied from ${SC}/${SNS}/${LOC_SECRET} (contents not logged)"
 }
 START="$SECONDS"
 if [[ "$SAME_NS" != true ]]; then
@@ -861,7 +897,7 @@ pg_wait_ready "$TI" "$READY_TIMEOUT" || fail "TARGET_${POD_WATCH_REASON:-NOT_RUN
 
 # ---- 5 (real) the restore-patch: the spec of the restored Postgres as the entry's restorePatch (lib.sh restore_patch_record, templates/_helpers.tpl
 # tpg.restoredPostgres). A new entry with a spec file recorded it in the commit of the entry. Everywhere else it is a commit of its own, now
-# that the restore succeeded and the instance runs (pushMode applies), before the adoption sync of a new or declared instance: the spec file's
+# that the restore succeeded and the instance runs (pushMode applies), before the adoption sync of a new instance: the spec file's
 # spec, or without one the spec read from the cluster
 SNAP_SPEC=""; SNAP_ERR=""
 snapshot_spec() {  # snapshot_spec: SNAP_SPEC = the .spec of the restored Postgres on the target (JSON, nulls dropped), valid as a Postgres spec; 1 with SNAP_ERR
@@ -878,7 +914,7 @@ snapshot_spec() {  # snapshot_spec: SNAP_SPEC = the .spec of the restored Postgr
   fi
   SNAP_ERR=""
 }
-RP_RECORDED=true   # false: the Application of the new or declared instance must not be synced (the chart would render it from the entry)
+RP_RECORDED=true   # false: the Application of the new instance must not be synced (the chart would render it from the entry)
 if [[ "$ENTRY_NEW" == true && -n "$SPEC_JSON" ]]; then
   :   # recorded with the entry
 elif [[ -n "$RP_NOTE" ]]; then
@@ -950,7 +986,8 @@ if [[ "$SAME_NS" != true ]]; then
       note "source backup location ${TNS}/${COPY_NAME} kept although keepSourceLocation=false: the restore(s) ${unfinished} in ${TNS} are not finished and may still use it; delete it by hand afterwards"
     elif tk -n "$TNS" delete postgresbackuplocation "$COPY_NAME" --ignore-not-found >/dev/null 2>&1; then
       note "source backup location ${TNS}/${COPY_NAME} removed (keepSourceLocation=false)"
-      if [[ "$COPY_SECRET_MADE" == true && "$LOC_SECRET" != backup-storage ]]; then tk -n "$TNS" delete secret "$LOC_SECRET" --ignore-not-found >/dev/null 2>&1 || true; fi
+      # the copy's own Secret goes with it (the Secret of a copy this run created, named after the copy; no other Secret is touched)
+      if [[ "$COPY_SECRET_MADE" == true && "$COPY_SECRET" != backup-storage ]]; then tk -n "$TNS" delete secret "$COPY_SECRET" --ignore-not-found >/dev/null 2>&1 || true; fi
     else
       warn SOURCE_LOCATION_NOT_REMOVED "PostgresBackupLocation ${TNS}/${COPY_NAME} on ${TC} could not be removed; delete it by hand"
     fi

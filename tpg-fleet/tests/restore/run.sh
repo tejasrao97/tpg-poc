@@ -13,7 +13,7 @@
 #   1 plans (dryRun): same namespace, another cluster, every PITR type, the annotation, TARGET_EXISTS for a live target that is not the source; read-only
 #   2 the named backup checks (same namespace: BACKUP_NOT_FOUND, BACKUP_NOT_SUCCEEDED; another one: SOURCE_BACKUP_UNVERIFIED)
 #   3 the PITR derivation (live, from the source backup, PITR_SOURCE_UNKNOWN, warnings for a given value that differs)
-#   4 the matrix (RESTORE_FLAVOUR_UNSUPPORTED, RESTORE_VERSION_LOWER, RESTORE_MAJOR_DIFFERS, skipMinorVersionCheck)
+#   4 the matrix (RESTORE_FLAVOUR_UNSUPPORTED, RESTORE_VERSION_LOWER, skipMinorVersionCheck; a higher major version is the operator's to refuse)
 #   5 the target (confirm, spec file, namespace, name in use, unknown cluster, owner rules, Secret conflicts)
 #   6 the location copy (create, reuse, SOURCE_LOCATION_CONFLICT) and its Secret (Vault, copied; never in a file, log or record)
 #   7 real runs: order of the steps, fleet entry, adoption, waits, timeouts, failures, postRestoreBackup, keepSourceLocation
@@ -95,6 +95,7 @@ spec:
 YAML
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-17.4 > "$RSD/orders-old.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-18.1 > "$RSD/orders-18.yaml"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-17.5 > "$RSD/orders-175.yaml"   # its PostgresVersion has the three-part dbVersion 17.5.9
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-17.8 > "$RSD/orders-new.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-16.9 > "$RSD/orders-16.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: %s\n' postgres-19.0 > "$RSD/orders-nover.yaml"
@@ -111,7 +112,7 @@ mkdir -p "$TMP/cl.base"
 seed() { mkdir -p "$TMP/cl.base/$1/$2/$3"; printf '%s' "$5" > "$TMP/cl.base/$1/$2/$3/$4.json"; }
 mkdir -p "$TMP/cl.base/c1" "$TMP/cl.base/c2"
 for c in c1 c2; do
-  for v in 16.9:postgres-16.9 17.4:postgres-17.4 17.6:postgres-17.6 17.6:postgres-17.6-lite 17.8:postgres-17.8 18.1:postgres-18.1; do
+  for v in 16.9:postgres-16.9 17.4:postgres-17.4 17.5.9:postgres-17.5 17.6:postgres-17.6 17.6:postgres-17.6-lite 17.8:postgres-17.8 18.1:postgres-18.1; do
     seed "$c" postgresversion _ "${v#*:}" "$(jq -cn --arg n "${v#*:}" --arg d "${v%%:*}" '{kind: "PostgresVersion", metadata: {name: $n}, spec: {dbVersion: $d}}')"
   done
 done
@@ -136,6 +137,12 @@ seed c1 postgres pg-legacy legacy-db '{"kind":"Postgres","metadata":{"name":"leg
 seed c1 postgresbackuplocation pg-legacy legacy-loc '{"kind":"PostgresBackupLocation","metadata":{"name":"legacy-loc","namespace":"pg-legacy"},"spec":{"storage":{"azure":{"container":"legacy-container","repoPath":"/legacy","secret":{"name":"src-creds"}}}}}'
 seed c1 secret pg-legacy src-creds "$(jq -cn '{kind: "Secret", metadata: {name: "src-creds", namespace: "pg-legacy"}, type: "Opaque", data: {accountName: ("legacyacct" | @base64), accountKey: ("'"$COPIED"'" | @base64)}}')"
 seed c1 postgresbackup pg-legacy legacy-full-1 '{"kind":"PostgresBackup","metadata":{"name":"legacy-full-1","namespace":"pg-legacy"},"spec":{"sourceInstance":{"name":"legacy-db"},"type":"full"},"status":{"phase":"Succeeded","restoreLabel":"20200101-000000F","timeStarted":"2020-01-01T00:00:00Z","backupLocation":"legacy-loc","stanzaName":"legacy-stanza"}}'
+# a second legacy source: another container, but its location uses a Secret of the same name (src-creds) with other contents
+COPIED2='COPIED-SECOND-SOURCE-SECRET-77'
+seed c1 postgres pg-legacy2 legacy2-db '{"kind":"Postgres","metadata":{"name":"legacy2-db","namespace":"pg-legacy2"},"spec":{"postgresVersion":{"name":"postgres-17.6"},"backupLocation":{"name":"legacy2-loc"}},"status":{"currentState":"Running","stanzaName":"legacy2-stanza"}}'
+seed c1 postgresbackuplocation pg-legacy2 legacy2-loc '{"kind":"PostgresBackupLocation","metadata":{"name":"legacy2-loc","namespace":"pg-legacy2"},"spec":{"storage":{"azure":{"container":"legacy2-container","repoPath":"/legacy2","secret":{"name":"src-creds"}}}}}'
+seed c1 secret pg-legacy2 src-creds "$(jq -cn '{kind: "Secret", metadata: {name: "src-creds", namespace: "pg-legacy2"}, type: "Opaque", data: {accountName: ("legacy2acct" | @base64), accountKey: ("'"$COPIED2"'" | @base64)}}')"
+seed c1 postgresbackup pg-legacy2 legacy2-full-1 '{"kind":"PostgresBackup","metadata":{"name":"legacy2-full-1","namespace":"pg-legacy2"},"spec":{"sourceInstance":{"name":"legacy2-db"},"type":"full"},"status":{"phase":"Succeeded","restoreLabel":"20200101-000000F","timeStarted":"2020-01-01T00:00:00Z","backupLocation":"legacy2-loc","stanzaName":"legacy2-stanza"}}'
 # a source whose instance is gone but whose backup and location are still there
 seed c1 postgresbackup pg-gone gone-full-1 '{"kind":"PostgresBackup","metadata":{"name":"gone-full-1","namespace":"pg-gone"},"spec":{"sourceInstance":{"name":"gone-db"},"type":"full"},"status":{"phase":"Succeeded","restoreLabel":"20200101-000000F","timeStarted":"2020-01-01T00:00:00Z","backupLocation":"gone-loc","stanzaName":"gone-stanza"}}'
 seed c1 postgresbackuplocation pg-gone gone-loc '{"kind":"PostgresBackupLocation","metadata":{"name":"gone-loc","namespace":"pg-gone"},"spec":{"storage":{"azure":{"container":"gone-container","repoPath":"/gone","secret":{"name":"backup-storage"}}}}}'
@@ -546,6 +553,7 @@ expect "the next pair (a new instance) is not affected by the refused one" SUCCE
 yq -i '.clusters.c1.instances.orders-declared.instance = {"namespace": "pg-orders", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
 RK=c1.orders-declared; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-declared "$BACKUP_T"; run "$PJ"
 expect "an entry declared in clusters/fleet.yaml but not deployed is a new target: planned" SUCCEEDED DRY_RUN
+grep -q 'the entry would be replaced (it is declared but not deployed) (a copy of the entry of c1/orders-db)' "$TMP/rec/plan.restore.c1.orders-declared.detail" && ok "…the plan says its entry would be replaced by a copy of the source's" || bad "declared plan" "$(cat "$TMP/rec/plan.restore.c1.orders-declared.detail")"
 reset
 RK=c1.orders-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db'; snap="$(snapshot)"; run "$PJ"
 expect "in place with confirm: SUCCEEDED/DRY_RUN (the live source is the target: not TARGET_EXISTS)" SUCCEEDED DRY_RUN
@@ -656,8 +664,17 @@ expect "a lower minor version: BLOCKED RESTORE_VERSION_LOWER" BLOCKED RESTORE_VE
 tgt orders-old.yaml 'skipMinorVersionCheck: true'; run "$PJ"
 expect "…skipMinorVersionCheck does not lift it: still BLOCKED RESTORE_VERSION_LOWER" BLOCKED RESTORE_VERSION_LOWER "only sets the operator's annotation"
 [[ ! -e "$TMP/rec/warning.c2.orders-dr.RESTORE_VERSION_LOWER_SKIPPED.status" ]] && ok "…RESTORE_VERSION_LOWER_SKIPPED does not exist any more" || bad "skipped warning"
+# a PostgresVersion whose spec.dbVersion has three parts (17.5.9) is compared as major.minor (17.5), not as a bash arithmetic error
+tgt orders-175.yaml; run "$PJ"
+expect "a target whose PostgresVersion has a three-part dbVersion (17.5.9) below the source (17.6): BLOCKED RESTORE_VERSION_LOWER" BLOCKED RESTORE_VERSION_LOWER "postgres-17.5 (17.5)" "lower version than 17.6"
 tgt orders-new.yaml; run "$PJ"
 expect "a higher minor version is allowed" SUCCEEDED DRY_RUN
+for c in c1 c2; do jq '.spec.dbVersion = "17.6.2"' "$TMP/cl/$c/postgresversion/_/postgres-17.6.json" > "$TMP/x" && mv "$TMP/x" "$TMP/cl/$c/postgresversion/_/postgres-17.6.json"; done
+tgt orders-new.yaml; run "$PJ"
+expect "a source PostgresVersion with a three-part dbVersion (17.6.2) and a higher target: allowed (no arithmetic error)" SUCCEEDED DRY_RUN
+tgt orders-175.yaml; run "$PJ"
+expect "…and a lower target is still blocked" BLOCKED RESTORE_VERSION_LOWER "lower version than 17.6"
+for c in c1 c2; do jq '.spec.dbVersion = "17.6"' "$TMP/cl/$c/postgresversion/_/postgres-17.6.json" > "$TMP/x" && mv "$TMP/x" "$TMP/cl/$c/postgresversion/_/postgres-17.6.json"; done
 tgt orders-16.yaml; run "$PJ"
 expect "a lower major version: BLOCKED RESTORE_VERSION_LOWER" BLOCKED RESTORE_VERSION_LOWER "postgres-16.9"
 tgt orders-18.yaml; run "$PJ"
@@ -717,6 +734,24 @@ reset
 RK=c2.orders-dr
 mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/missing.yaml]'; run "$PJ"
 expect "a repo: spec file that is not on the fleet branch: SPEC_FILE_NOT_FOUND" FAILED SPEC_FILE_NOT_FOUND "no such file"
+# a committed symlink under restore-specs/ is no spec file (it could point at any file of the clone)
+RSR="$TMP/fleet.repo/helm_artifacts/instance/tpg-instance/restore-specs"
+ln -s orders-dr.yaml "$RSR/link-same.yaml"            # a valid spec file, reached through a link inside the folder
+ln -s ../../../../clusters/fleet.yaml "$RSR/link-out.yaml"   # a file outside the folder
+ln -s ../../../../clusters "$RSR/sub"                 # a folder outside the folder: restore-specs/sub/fleet.yaml
+for f in link-same.yaml link-out.yaml sub/fleet.yaml; do
+  mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr "pitrEnabled: false
+targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/$f]"; run "$PJ"
+  expect "a spec file that is, or lies behind, a symbolic link ($f): SPEC_FILE_INVALID" FAILED SPEC_FILE_INVALID "symbolic link" "restore-specs/"
+done
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c1/pg-orders/orders-db $'pitrEnabled: false\nconfirm: orders-db\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/link-same.yaml]'; RK=c1.orders-db; run "$PJ"
+expect "…the same for an in-place restore" FAILED SPEC_FILE_INVALID "symbolic link"
+RK=c2.orders-dr
+rm -f "$RSR/link-same.yaml" "$RSR/link-out.yaml" "$RSR/sub"
+mv "$RSR" "$RSR.real"; ln -s restore-specs.real "$RSR"   # the folder itself replaced by a link to another folder
+mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/legacy.yaml]'; run "$PJ"
+expect "…restore-specs/ itself a link to another folder: SPEC_FILE_INVALID" FAILED SPEC_FILE_INVALID "symbolic link"
+rm -f "$RSR"; mv "$RSR.real" "$RSR"
 mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [./local.yaml]'; run "$PJ" P_PATCH_FILES='{}'
 expect "a local spec file that is not in patchFiles: SPEC_FILE_NOT_RECEIVED" FAILED SPEC_FILE_NOT_RECEIVED "patchFiles"
 B64="$(base64 -w0 "$RSD/orders-dr.yaml")"
@@ -789,10 +824,21 @@ rm -f "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json"
 printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"restore-src-c1-pg-orders-orders-db","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"other","repoPath":"/x"}},"backupSync":{"enabled":true}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-orders-orders-db.json"
 run "$PJ"
 expect "the copy's name taken by a location of another repository: SOURCE_LOCATION_CONFLICT" FAILED SOURCE_LOCATION_CONFLICT "another repository"
+# a list of the locations that fails is not an empty list: the pair fails closed, in a dry run too
+reset
+set_flag tkfail.nslist.c2.postgresbackuplocation
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ"
+expect "the PostgresBackupLocations of the target namespace cannot be listed: TARGET_UNREADABLE, not an empty list (dry run)" FAILED TARGET_UNREADABLE "PostgresBackupLocations" "pg-dr" "Forbidden"
+run "$PJ" P_DRY_RUN=false
+expect "…and in a real run, before anything is created" FAILED TARGET_UNREADABLE "PostgresBackupLocations"
+! ev_has '^(apply|push|sync|create|label)' && ok "…nothing was created, applied or pushed" || bad "acted after the unreadable list" "$(cat "$TMP/events")"
 reset
 mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/legacy.yaml]'; run "$PJ"
 expect "a source location with its own Secret (src-creds): planned" SUCCEEDED DRY_RUN
-grep -q 'Secret src-creds: copied from c1/pg-legacy in memory' "$TMP/rec/plan.restore.c2.orders-dr.detail" && ok "the plan says the Secret is copied in memory" || bad "secret plan" "$(cat "$TMP/rec/plan.restore.c2.orders-dr.detail")"
+grep -q 'Secret restore-src-c1-pg-legacy-legacy-db-creds .*: copied from c1/pg-legacy/src-creds in memory' "$TMP/rec/plan.restore.c2.orders-dr.detail" && ok "the plan says the copy gets its own Secret (named after the copy), copied in memory" || bad "secret plan" "$(cat "$TMP/rec/plan.restore.c2.orders-dr.detail")"
+RKP=c2.orders-dr; C="$(plan_block 'PostgresBackupLocation .* on ')"
+[[ "$(yq '.spec.storage.azure.secret.name' <<<"$C")" == restore-src-c1-pg-legacy-legacy-db-creds ]] \
+  && ok "…and the copy's spec.storage.azure.secret.name points at it (not at the source's src-creds)" || bad "copy secret name" "$C"
 rm -f "$TMP/cl/c1/secret/pg-legacy/src-creds.json"
 run "$PJ"
 expect "…a source Secret that cannot be read: SOURCE_SECRET_UNREADABLE (also in a dry run)" FAILED SOURCE_SECRET_UNREADABLE "src-creds"
@@ -990,12 +1036,36 @@ expect "two owners after the pushes (pull requests merged side by side): NAMESPA
 
 reset
 set_flag sync.names "orders-full-1"
-yq -i '.clusters.c2.instances.declared-db.instance = {"namespace": "pg-declared", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
+declare_db() {  # declare_db: c2/declared-db in pg-declared as a user could have declared it, with settings that must not survive a restore into it
+  yq -i '.clusters.c2.instances.declared-db = {"instance": {"namespace": "pg-declared", "postgresVersion": "postgres-17.6", "disableInitialBackup": true, "sharedSecretsOwner": false, "storageSize": "7Gi"},
+    "ferret": {"enabled": true, "replicas": 2}, "patches": {"postgres": {"current": "patches/declared-ex4m1.yaml"}},
+    "backup": {"repoPath": "/declared-own"}}' "$TMP/fleet.repo/clusters/fleet.yaml"
+}
+declare_db
 RK=c2.declared-db; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-declared/declared-db "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
-expect "an instance declared in clusters/fleet.yaml but not deployed: restored into, SUCCEEDED" SUCCEEDED "" "restored c1/pg-orders/orders-db into c2/pg-declared/declared-db"
-[[ "$(grep -c '^push' "$TMP/events")" -eq 1 ]] && ev_has 'push mode=direct restore: record the restore-patch of c2/declared-db' && ev_has 'resources=:ServiceAccount:pg-declared/tpg-vso' && ev_has '^adopt c2 declared-db' \
-  && [[ "$(yq '.clusters.c2.instances.declared-db.instance.namespace' "$TMP/fleet.repo/clusters/fleet.yaml")" == pg-declared ]] \
-  && ok "…its entry is kept (the only push records the restore-patch read from the cluster); its Application provides the shared objects and adopts the restored instance" || bad "declared target" "$(cat "$TMP/events")"
+expect "an instance declared in clusters/fleet.yaml but not deployed is a new target: restored into, SUCCEEDED" SUCCEEDED "" "restored c1/pg-orders/orders-db into c2/pg-declared/declared-db"
+E="$(yq '.clusters.c2.instances.declared-db' "$TMP/fleet.repo/clusters/fleet.yaml")"
+[[ "$(grep -c '^push' "$TMP/events")" -eq 2 ]] && ev_has 'push mode=direct restore: add c2/declared-db from c1/orders-db' && ev_has 'push mode=direct restore: record the restore-patch of c2/declared-db' \
+  && ev_has 'resources=:ServiceAccount:pg-declared/tpg-vso' && ev_has '^adopt c2 declared-db' \
+  && [[ "$(yq '.instance.namespace' <<<"$E")" == pg-declared ]] \
+  && ok "…the declared entry is replaced like a new target's (pushed first, then the restore-patch read from the cluster), keeping its namespace; its Application provides the shared objects and adopts the restored instance" || bad "declared target" "$(cat "$TMP/events")
+$E"
+[[ "$(yq 'has("ferret")' <<<"$E")" == false && "$(yq '.patches // {} | has("postgres")' <<<"$E")" == false && "$(yq '.instance | has("disableInitialBackup")' <<<"$E")" == false \
+   && "$(yq '.instance | has("sharedSecretsOwner")' <<<"$E")" == false && "$(yq '.instance.storageSize' <<<"$E")" != 7Gi && "$(yq '.backup | has("repoPath")' <<<"$E")" == false ]] \
+  && ok "…and nothing of the declared entry survives: no ferret, patches.postgres, disableInitialBackup, foreign sharedSecretsOwner, storageSize 7Gi or backup.repoPath (the entry is a copy of the source's, with the source's disableInitialBackup, ferret and repoPath dropped)" || bad "declared entry survived" "$E"
+reset
+declare_db
+yq -i '.clusters.c2.instances.declared-db.instance.sharedSecretsOwner = true' "$TMP/fleet.repo/clusters/fleet.yaml"
+yq -i '.clusters.c2.instances.pg-declared-owner.instance = {"namespace": "pg-declared", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
+run "$PJ"
+expect "a declared entry that claims the shared Secrets of a namespace another instance owns: planned" SUCCEEDED DRY_RUN
+grep -q 'shared Secrets of pg-declared: owned by pg-declared-owner' "$TMP/rec/plan.restore.c2.declared-db.detail" && ok "…the replaced entry follows the owner rules (the other instance keeps them), not the declared flag" || bad "declared owner" "$(cat "$TMP/rec/plan.restore.c2.declared-db.detail")"
+reset
+mkdir -p "$TMP/cl/c2/secret/pg-declared"
+jq -cn '{kind: "Secret", metadata: {name: "regsecret", namespace: "pg-declared"}, data: {x: ("eA==")}}' > "$TMP/cl/c2/secret/pg-declared/regsecret.json"
+declare_db
+run "$PJ"
+expect "a declared entry in a namespace with a Secret regsecret the fleet does not manage: NAMESPACE_SECRET_CONFLICT (a new target's check, also in a dry run)" FAILED NAMESPACE_SECRET_CONFLICT "regsecret"
 
 echo "-- an in-place target: confirm, in-progress and busy (any other existing target is TARGET_EXISTS)"
 reset
@@ -1019,28 +1089,103 @@ printf '%s' '{"kind":"PostgresRestore","metadata":{"name":"orders-db-restore-old
 run "$PJ" P_DRY_RUN=false
 expect "a restore of the target is still running: SKIPPED_IN_PROGRESS after the wait" SKIPPED_IN_PROGRESS "" "orders-db-restore-old phase Running"
 
-echo "-- the Secret of the copied location"
+echo "-- the Secret of the copied location: one Secret per copy, named after the copy"
+SECA=restore-src-c1-pg-legacy-legacy-db-creds      # the Secret of the copy of c1/pg-legacy/legacy-db
+SECB=restore-src-c1-pg-legacy2-legacy2-db-creds    # the Secret of the copy of c1/pg-legacy2/legacy2-db
+LEGACY_SPEC=$'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/legacy.yaml]'
+secret_data() { jq -r '.data.accountKey | @base64d' "$TMP/cl/c2/secret/pg-dr/$1.json" 2>/dev/null || true; }
+secret_label() { jq -r '.metadata.labels["tpg.fleet/restore-source"] // ""' "$TMP/cl/c2/secret/pg-dr/$1.json" 2>/dev/null || true; }
 reset
 RK=c2.orders-dr
 set_flag sync.names "legacy-full-1"
-mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/legacy.yaml]'; run "$PJ" P_DRY_RUN=false
-expect "a location with its own Secret: SUCCEEDED, the Secret copied" SUCCEEDED "" "Secret pg-dr/src-creds was copied from c1/pg-legacy"
-[[ "$(jq -r '.data.accountKey | @base64d' "$TMP/cl/c2/secret/pg-dr/src-creds.json")" == "$COPIED" && "$(jq -r '.metadata.labels["tpg.fleet/restore-source"]' "$TMP/cl/c2/secret/pg-dr/src-creds.json")" == c1.legacy-db ]] \
-  && ok "the target namespace has the Secret with the source's data, labelled as a restore copy" || bad "copied secret" "$(cat "$TMP/cl/c2/secret/pg-dr/src-creds.json" 2>/dev/null)"
+mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr "$LEGACY_SPEC"; run "$PJ" P_DRY_RUN=false
+expect "a location with its own Secret: SUCCEEDED, the Secret copied under the copy's own name" SUCCEEDED "" "Secret pg-dr/${SECA} was copied from c1/pg-legacy/src-creds"
+[[ "$(secret_data "$SECA")" == "$COPIED" && "$(secret_label "$SECA")" == c1.legacy-db ]] \
+  && ok "the target namespace has the Secret ${SECA} with the source's data, labelled as a restore copy" || bad "copied secret" "$(cat "$TMP/cl/c2/secret/pg-dr/$SECA.json" 2>/dev/null)"
+[[ ! -e "$TMP/cl/c2/secret/pg-dr/src-creds.json" ]] && ok "…and no Secret src-creds (the source's name) is written to the target namespace" || bad "src-creds written"
+[[ "$(jq -r '.spec.storage.azure.secret.name' "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-legacy-legacy-db.json")" == "$SECA" ]] \
+  && ok "…the applied copy of the location reads it (spec.storage.azure.secret.name)" || bad "copy secret name" "$(cat "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-legacy-legacy-db.json")"
 no_secret_leak "copied Secret" "$COPIED"
+
+echo "-- two sources whose locations use a Secret of the same name, into one target namespace: both keep working"
+set_flag sync.names "legacy-full-1 legacy2-full-1"
+RK=c2.orders-dr2; mk c1/pg-legacy2/legacy2-db 'sourceBackupName: legacy2-full-1' c2/pg-dr/orders-dr2 "$LEGACY_SPEC"; run "$PJ" P_DRY_RUN=false
+expect "the second source (src-creds with other contents) is restored into the same namespace: SUCCEEDED" SUCCEEDED "" "Secret pg-dr/${SECB} was copied from c1/pg-legacy2/src-creds"
+[[ "$(secret_data "$SECA")" == "$COPIED" && "$(secret_data "$SECB")" == "$COPIED2" && "$(secret_label "$SECA")" == c1.legacy-db && "$(secret_label "$SECB")" == c1.legacy2-db ]] \
+  && ok "each copy has its own Secret with its own contents; the first one is untouched" || bad "two secrets" "$(ls "$TMP/cl/c2/secret/pg-dr")"
+[[ "$(jq -r '.spec.storage.azure.secret.name' "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-legacy-legacy-db.json")" == "$SECA" \
+   && "$(jq -r '.spec.storage.azure.secret.name' "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-legacy2-legacy2-db.json")" == "$SECB" ]] \
+  && ok "…and each location reads its own" || bad "location secrets"
+no_secret_leak "two copied Secrets" "$COPIED" "$COPIED2"
+
+echo "-- keepSourceLocation=false deletes the copy's own Secret and nothing else"
 reset
-set_flag sync.names "legacy-full-1"
+RK=c2.orders-dr; set_flag sync.names "legacy-full-1 legacy2-full-1"
+mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr "$LEGACY_SPEC"; run "$PJ" P_DRY_RUN=false
+RK=c2.orders-dr2; mk c1/pg-legacy2/legacy2-db 'sourceBackupName: legacy2-full-1' c2/pg-dr/orders-dr2 "$LEGACY_SPEC"
+# a Secret src-creds of somebody else in the namespace (the name the source locations use)
+jq -cn '{kind: "Secret", metadata: {name: "src-creds", namespace: "pg-dr"}, data: {accountKey: ("SOMEBODY-ELSES" | @base64)}}' > "$TMP/cl/c2/secret/pg-dr/src-creds.json"
+: > "$TMP/events"; run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
+expect "keepSourceLocation=false for the second copy: SUCCEEDED, copy removed" SUCCEEDED "" "restore-src-c1-pg-legacy2-legacy2-db removed (keepSourceLocation=false)"
+[[ ! -e "$TMP/cl/c2/secret/pg-dr/$SECB.json" ]] && ev_has "^delete c2 secret pg-dr/${SECB}\$" && ok "its own Secret ${SECB} is deleted with it" || bad "own secret not deleted" "$(cat "$TMP/events")"
+[[ "$(secret_data "$SECA")" == "$COPIED" && "$(secret_data src-creds)" == SOMEBODY-ELSES && -e "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-legacy-legacy-db.json" ]] \
+  && ! ev_has '^delete c2 secret pg-dr/(src-creds|restore-src-c1-pg-legacy-legacy-db-creds)$' \
+  && ok "…the Secret of the first copy (still used by its location) and a foreign src-creds are not touched" || bad "other secrets touched" "$(cat "$TMP/events")"
+reset
+RK=c2.orders-dr; set_flag sync.names "legacy-full-1"
+mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr "$LEGACY_SPEC"
 mkdir -p "$TMP/cl/c2/secret/pg-dr"
 jq -cn '{kind: "Secret", metadata: {name: "src-creds", namespace: "pg-dr"}, data: {accountKey: ("OTHER" | @base64)}}' > "$TMP/cl/c2/secret/pg-dr/src-creds.json"
 run "$PJ" P_DRY_RUN=false
-expect "a Secret of that name with other contents that is not a restore copy: SOURCE_SECRET_CONFLICT" FAILED SOURCE_SECRET_CONFLICT "rename that Secret"
+expect "a Secret src-creds of somebody else with other contents is no conflict any more: the copy has its own Secret" SUCCEEDED ""
+[[ "$(secret_data src-creds)" == OTHER && "$(secret_data "$SECA")" == "$COPIED" ]] && ok "…src-creds is left alone" || bad "src-creds changed"
+
+echo "-- the copy's own Secret exists already"
 reset
 set_flag sync.names "legacy-full-1"
 mkdir -p "$TMP/cl/c2/secret/pg-dr"
-jq -cn '{kind: "Secret", metadata: {name: "src-creds", namespace: "pg-dr", labels: {"tpg.fleet/restore-source": "c1.legacy-db"}}, data: {accountKey: ("OLD" | @base64)}}' > "$TMP/cl/c2/secret/pg-dr/src-creds.json"
+jq -cn --arg n "$SECA" '{kind: "Secret", metadata: {name: $n, namespace: "pg-dr"}, data: {accountKey: ("OTHER" | @base64)}}' > "$TMP/cl/c2/secret/pg-dr/$SECA.json"
+RK=c2.orders-dr; mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr "$LEGACY_SPEC"; run "$PJ" P_DRY_RUN=false
+expect "a Secret of that name with other contents and no restore-source label: SOURCE_SECRET_CONFLICT" FAILED SOURCE_SECRET_CONFLICT "rename that Secret"
+[[ "$(secret_data "$SECA")" == OTHER ]] && ok "…it is not overwritten" || bad "secret overwritten"
+jq -cn --arg n "$SECA" '{kind: "Secret", metadata: {name: $n, namespace: "pg-dr", labels: {"tpg.fleet/restore-source": "c9.somebody-else"}}, data: {accountKey: ("OTHER" | @base64)}}' > "$TMP/cl/c2/secret/pg-dr/$SECA.json"
 run "$PJ" P_DRY_RUN=false
-expect "an earlier restore copy of the Secret is updated" SUCCEEDED ""
-[[ "$(jq -r '.data.accountKey | @base64d' "$TMP/cl/c2/secret/pg-dr/src-creds.json")" == "$COPIED" ]] && ok "…to the source's current contents" || bad "secret not updated"
+expect "…labelled as the copy of another source (c9.somebody-else): SOURCE_SECRET_CONFLICT" FAILED SOURCE_SECRET_CONFLICT "c9.somebody-else" "c1.legacy-db"
+[[ "$(secret_data "$SECA")" == OTHER && "$(secret_label "$SECA")" == c9.somebody-else ]] && ok "…it is not overwritten" || bad "secret of another source overwritten"
+! ev_has '^apply c2 (secret|postgresbackuplocation|postgresrestore)' && ok "…and nothing else was applied" || bad "applied after the conflict" "$(cat "$TMP/events")"
+jq -cn --arg n "$SECA" '{kind: "Secret", metadata: {name: $n, namespace: "pg-dr", labels: {"tpg.fleet/restore-source": "c9.somebody-else"}}, data: {accountName: ("legacyacct" | @base64), accountKey: ("'"$COPIED"'" | @base64)}}' > "$TMP/cl/c2/secret/pg-dr/$SECA.json"
+run "$PJ" P_DRY_RUN=false
+expect "…with the contents the source has: no conflict, nothing to update" SUCCEEDED ""
+[[ "$(secret_label "$SECA")" == c9.somebody-else ]] && ! ev_has "^apply c2 secret pg-dr/${SECA}\$" && ok "…and it is not written" || bad "identical secret written" "$(cat "$TMP/events")"
+reset
+set_flag sync.names "legacy-full-1"
+mkdir -p "$TMP/cl/c2/secret/pg-dr"
+jq -cn --arg n "$SECA" '{kind: "Secret", metadata: {name: $n, namespace: "pg-dr", labels: {"tpg.fleet/restore-source": "c1.legacy-db"}}, data: {accountKey: ("OLD" | @base64)}}' > "$TMP/cl/c2/secret/pg-dr/$SECA.json"
+run "$PJ" P_DRY_RUN=false
+expect "a Secret of an earlier restore of the same source (label c1.legacy-db) is updated" SUCCEEDED ""
+[[ "$(secret_data "$SECA")" == "$COPIED" ]] && ok "…to the source's current contents" || bad "secret not updated"
+
+echo "-- a reused copy keeps using its own Secret"
+reset
+set_flag sync.names "legacy-full-1"
+mkdir -p "$TMP/cl/c2/secret/pg-dr" "$TMP/cl/c2/postgresbackuplocation/pg-dr"
+printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"earlier-copy","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"legacy-container","repoPath":"/legacy","secret":{"name":"earlier-creds"}}},"backupSync":{"enabled":true}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json"
+jq -cn '{kind: "Secret", metadata: {name: "earlier-creds", namespace: "pg-dr", labels: {"tpg.fleet/restore-source": "c1.legacy-db"}}, data: {accountKey: ("OLD" | @base64)}}' > "$TMP/cl/c2/secret/pg-dr/earlier-creds.json"
+mkdir -p "$TMP/cl/c2/postgresbackup/pg-dr"   # the backups the earlier restore synced
+printf '%s' '{"kind":"PostgresBackup","metadata":{"name":"legacy-full-1","namespace":"pg-dr"},"status":{"phase":"Succeeded"}}' > "$TMP/cl/c2/postgresbackup/pg-dr/legacy-full-1.json"
+RK=c2.orders-dr; mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr "$LEGACY_SPEC"; run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
+expect "the location of an earlier restore is reused: SUCCEEDED, its Secret earlier-creds refreshed (label equals this source)" SUCCEEDED "" "Secret pg-dr/earlier-creds was copied from c1/pg-legacy/src-creds"
+rm -f "$TMP/cl/c2/postgres/pg-dr/orders-dr.json"   # the restored instance of that run, so the next run restores into a new target again
+[[ "$(secret_data earlier-creds)" == "$COPIED" && ! -e "$TMP/cl/c2/secret/pg-dr/$SECA.json" ]] && ! ev_has 'apply c2 postgresbackuplocation' && ok "the reused copy keeps its own Secret; no Secret of the derived name and no new location" || bad "reused copy secret" "$(cat "$TMP/events")"
+[[ -e "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json" && -e "$TMP/cl/c2/secret/pg-dr/earlier-creds.json" ]] && ! ev_has '^delete' && ok "keepSourceLocation=false never removes a copy this run did not create, nor its Secret" || bad "reused copy removed" "$(cat "$TMP/events")"
+jq '.metadata.labels["tpg.fleet/restore-source"] = "c9.somebody-else"' "$TMP/cl/c2/secret/pg-dr/earlier-creds.json" | jq '.data.accountKey = ("OLD" | @base64)' > "$TMP/x" && mv "$TMP/x" "$TMP/cl/c2/secret/pg-dr/earlier-creds.json"
+run "$PJ" P_DRY_RUN=false
+expect "…its Secret labelled for another source with other contents: SOURCE_SECRET_CONFLICT" FAILED SOURCE_SECRET_CONFLICT "earlier-creds" "c9.somebody-else"
+[[ "$(secret_data earlier-creds)" == OLD ]] && ok "…and it is not overwritten" || bad "reused secret overwritten"
+rm -f "$TMP/cl/c2/secret/pg-dr/earlier-creds.json"
+run "$PJ" P_DRY_RUN=false
+expect "…its Secret missing: created again under the reused copy's name" SUCCEEDED "" "Secret pg-dr/earlier-creds was copied"
+[[ "$(secret_data earlier-creds)" == "$COPIED" && "$(secret_label earlier-creds)" == c1.legacy-db ]] && ok "…with the source's contents and label" || bad "reused secret not recreated"
 reset
 # a new target that joins a namespace whose shared Secrets are not the fleet's own (it does not own them: sharedSecretsOwner false):
 # the Secret backup-storage the copied location reads is checked against the fleet's key (Vault), never written
@@ -1361,12 +1506,25 @@ expect "the restore-patch cannot be pushed after a successful restore: the pair 
 echo "-- an instance declared in fleet.yaml but not deployed, with a spec file"
 reset
 RK=c2.declared-db; set_flag sync.names "orders-full-1"
-yq -i '.clusters.c2.instances.declared-db.instance = {"namespace": "pg-declared", "postgresVersion": "postgres-17.6"}' "$TMP/fleet.repo/clusters/fleet.yaml"
+declare_db
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-declared/declared-db $'pitrEnabled: false\n'"$SPEC_ORDERS"; run "$PJ" P_DRY_RUN=false
 expect "declared, not deployed, with a spec file: SUCCEEDED" SUCCEEDED ""
 order="$(grep -nE '^(apply c2 postgresrestore|wait ready|push|adopt)' "$TMP/events" | sed -E 's/^[0-9]+://' | cut -c1-24 | paste -sd'|' -)"
-[[ "$order" == "apply c2 postgresrestore|wait ready declared-db|push mode=direct restore|adopt c2 declared-db" && "$(yq '.clusters.c2.instances.declared-db.restorePatch.current' "$TMP/fleet.repo/clusters/fleet.yaml")" =~ ^restore-patch/declared-db-restore- ]] \
-  && ok "the entry is kept; the restore-patch is committed after the restore and before the adoption sync" || bad "declared order" "$order $(yq '.clusters.c2.instances.declared-db' "$TMP/fleet.repo/clusters/fleet.yaml")"
+[[ "$order" == "push mode=direct restore|apply c2 postgresrestore|wait ready declared-db|adopt c2 declared-db" && "$(yq '.clusters.c2.instances.declared-db.restorePatch.current' "$TMP/fleet.repo/clusters/fleet.yaml")" =~ ^restore-patch/declared-db-restore- ]] \
+  && ok "the declared entry is replaced like a new target's: entry and restore-patch in one commit before the restore, then the restore, then the adoption sync" || bad "declared order" "$order $(yq '.clusters.c2.instances.declared-db' "$TMP/fleet.repo/clusters/fleet.yaml")"
+E="$(yq '.clusters.c2.instances.declared-db' "$TMP/fleet.repo/clusters/fleet.yaml")"
+[[ "$(yq 'has("ferret")' <<<"$E")" == false && "$(yq '.patches // {} | has("postgres")' <<<"$E")" == false && "$(yq '.instance | has("disableInitialBackup")' <<<"$E")" == false && "$(yq '.instance | has("sharedSecretsOwner")' <<<"$E")" == false ]] \
+  && ok "…and the declared ferret, patches.postgres, disableInitialBackup and sharedSecretsOwner are gone" || bad "declared entry survived (spec file)" "$E"
+echo "-- a declared entry whose source is not in clusters/fleet.yaml: replaced by the skeleton of the spec file"
+reset
+RK=c2.declared-db; set_flag sync.names "legacy-full-1"
+declare_db
+mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-declared/declared-db "$LEGACY_SPEC"; run "$PJ" P_DRY_RUN=false
+expect "declared, source not in the fleet, with a spec file: SUCCEEDED" SUCCEEDED ""
+E="$(yq '.clusters.c2.instances.declared-db' "$TMP/fleet.repo/clusters/fleet.yaml")"
+[[ "$(yq '.instance.namespace' <<<"$E")" == pg-declared && "$(yq '.instance.restored' <<<"$E")" == true && "$(yq 'has("ferret")' <<<"$E")" == false && "$(yq 'has("patches")' <<<"$E")" == false \
+   && "$(yq 'has("backup")' <<<"$E")" == false && "$(yq '.instance | has("disableInitialBackup") or has("sharedSecretsOwner") or has("storageSize")' <<<"$E")" == false ]] \
+  && ok "the whole declared entry is replaced by the skeleton of the spec file (namespace, version, what the restore-patch adds), not merged into it" || bad "skeleton replace" "$E"
 
 echo "-- spec file errors"
 reset
