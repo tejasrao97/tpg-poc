@@ -465,7 +465,7 @@ fi
 # The restore-patch of an existing entry (in place, or declared in fleet.yaml but not deployed) is recorded in a commit of its own after the
 # restore succeeded: the spec file's spec, or the spec read from the cluster. Mode over for an in-place restore with a spec file (the operator
 # merged the file into the existing Postgres), base otherwise. An instance that has no entry is not managed by Argo CD: nothing is recorded.
-RP_MODE=base; [[ -z "$SPEC_JSON" || "$TGT_EXISTS" != true ]] || RP_MODE=over
+RP_FORM=base; [[ -z "$SPEC_JSON" || "$TGT_EXISTS" != true ]] || RP_FORM=over
 # Only a new instance and an in-place restore have a restore-patch: another existing instance keeps its spec, the restore overwrites its data only
 RP_APPLIES=true; [[ "$TGT_EXISTS" != true || "$IN_PLACE" == true ]] || RP_APPLIES=false
 if [[ "$RP_APPLIES" != true ]]; then
@@ -473,7 +473,7 @@ if [[ "$RP_APPLIES" != true ]]; then
 elif [[ "$TGT_EXISTS" == true && "$TGT_FLEET" != true ]]; then
   RP_NOTE="${TC}/${TI} has no entry in ${FLEET_REL}: $( [[ -n "$SPEC_JSON" ]] && echo "the spec file is used for the restore only" || echo "its spec is not read" ), no restore-patch is recorded (Argo CD does not manage this instance)"
 elif [[ "$TGT_FLEET" == true && -n "$SPEC_JSON" ]]; then
-  stage_restore_patch "$SPEC_JSON" "$RP_MODE" || fail FLEET_EDIT_FAILED "$FLEET_REL (restorePatch of ${TI})"
+  stage_restore_patch "$SPEC_JSON" "$RP_FORM" || fail FLEET_EDIT_FAILED "$FLEET_REL (restorePatch of ${TI})"
 fi
 
 if [[ "$TGT_EXISTS" == false ]]; then
@@ -494,7 +494,7 @@ if [[ "$TGT_EXISTS" == false ]]; then
   plan "target: new instance ${TC}/${TNS}/${TI}, version ${T_PGV:-unknown}; spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is" || echo "none, only the name: the operator creates the instance and fills in its spec (lab item: how it fills it)" ); ${FLEET_REL}: $( [[ "$ENTRY_NEW" == true ]] && echo "the entry would be added$( [[ "$SRC_FLEET" == true ]] && echo " (a copy of the entry of ${SC}/${SI})" || echo " (from the spec file)" ) (pushMode ${PUSH_MODE})" || echo "the entry already exists" ); shared Secrets of ${TNS}: $( [[ "$T_OWNER" == true ]] && echo "owned by ${TI}" || echo "owned by ${OWNER_NOTE:-another instance}" )"
 fi
 RP_WHAT="the spec file"; [[ -n "$SPEC_JSON" ]] || RP_WHAT="the spec of the restored Postgres, read from ${TC} once it runs"
-RP_PLAN="mode ${RP_MODE}, restorePatch.current of ${TC}/${TI}, instance.restored: true and the fleet-equivalent fields of the spec written into the entry; the chart renders the Postgres from it (its fields, backupLocation and imagePullSecret, then the later changes of the entry and the tpg-patch patch file)"
+RP_PLAN="mode ${RP_FORM}, restorePatch.current of ${TC}/${TI}, instance.restored: true and the fleet-equivalent fields of the spec written into the entry; the chart renders the Postgres from it (its fields, backupLocation and imagePullSecret, then the later changes of the entry and the tpg-patch patch file)"
 if [[ "$RP_APPLIES" != true ]]; then
   plan "restore-patch: none (${TC}/${TI} is an existing instance other than the source: the restore overwrites its data, its spec stays and is not recorded)"
 elif [[ "$ENTRY_NEW" == true && -n "$SPEC_JSON" ]]; then
@@ -879,14 +879,14 @@ else
   if [[ -n "$RP_SPEC" ]]; then
     rp_ok=false
     [[ "$PUSH_MODE" != direct ]] || fleet_lock_acquire || true
-    if git_clone "$REPO" >/dev/null 2>&1 && fleet_has_instance "$REPO" "$TC" "$TI" && stage_restore_patch "$RP_SPEC" "$RP_MODE" \
+    if git_clone "$REPO" >/dev/null 2>&1 && fleet_has_instance "$REPO" "$TC" "$TI" && stage_restore_patch "$RP_SPEC" "$RP_FORM" \
        && git_commit_push "$REPO" "restore: record the restore-patch of ${TC}/${TI} (${WF})" "$FLEET_REL" "$RESTORE_PATCH_DIR"; then
       rp_ok=true; PUSHED_REV="${PUSHED_REVISION:-$PUSHED_REV}"
     fi
     [[ "$PUSH_MODE" != direct ]] || fleet_lock_release
     if [[ "$rp_ok" == true ]]; then
       RP_RECORDED=true
-      note "the spec of ${TI} is recorded as restorePatch.current of ${TC}/${TI} in ${FLEET_REL} (${RP_PATH}, mode ${RP_MODE}); the chart of Application tpg-${TC}-${TI} renders the Postgres from it"
+      note "the spec of ${TI} is recorded as restorePatch.current of ${TC}/${TI} in ${FLEET_REL} (${RP_PATH}, mode ${RP_FORM}); the chart of Application tpg-${TC}-${TI} renders the Postgres from it"
     else
       warn RESTORE_PATCH_NOT_RECORDED "the restore succeeded, but the spec could not be recorded as the restore-patch of ${TC}/${TI} in ${FLEET_REL} (pushMode ${PUSH_MODE}); the next sync of Application tpg-${TC}-${TI} renders the entry without it$( [[ "$TGT_EXISTS" == true ]] || echo " (not synced by this run)" )"
     fi
