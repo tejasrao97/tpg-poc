@@ -2557,6 +2557,15 @@ patch_values_errors() {
   done
   [[ "$5" == running ]] || return 0
   yq -e '.instance.storageClassName == null' "$f" >/dev/null 2>&1 || echo "${n}: instance.storageClassName cannot change on a running instance"
+  # Round 23: a restored instance (tpg-restore, instance.restored) has its Postgres rendered from its restore-patch; a values patch
+  # that sets an instance: key which reaches the Postgres object (templates/postgres.yaml, tpg.services: the sizes, resources and the
+  # Service fields) is refused. Keys that do not reach it (backup, network, ferret, ...) stay allowed
+  if [[ "$(fleet_instance_value "$REPO" "$3" "$4" '.instance.restored' false)" == true ]]; then
+    for k in .instance.storageSize .instance.walStorageSize .instance.resources .instance.exposure .instance.readOnlyExposure .instance.serviceAnnotations .instance.readOnlyServiceAnnotations .instance.allowedSourceRanges .instance.internalLoadBalancerSubnet; do
+      yq -e "${k} == null" "$f" >/dev/null 2>&1 \
+        || echo "${n}: RESTORED_VALUES_PATCH: ${k#.} cannot be set by a values ${PATCH_NOUN} on ${4}: it was restored by tpg-restore and its Postgres is rendered from its restore-patch; change it with tpg-scale-instance (highAvailability), tpg-upgrade component=postgres (postgresVersion) or a postgres patch file (storageSize, resources, the Service fields, ...)"
+    done
+  fi
   # tpg-instances ignores these PostgresBackupLocation fields (ignoreDifferences with
   # RespectIgnoreDifferences), so a sync would never apply them to a running instance
   for k in .backup.additionalParameters .backup.forcePathStyle; do

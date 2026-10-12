@@ -17,10 +17,12 @@ What goes here, and what does not:
   field against the CRD (`patchcheck.py spec`), and it is the spec of the restored instance
   (`postgresrestore.spec.targetInstance.spec`, as it is, not merged over a chart render). Give a complete
   instance spec: Argo CD renders the restored instance from this spec (as its restore-patch), so a field
-  the file leaves out stays unset, the chart does not fill it in from its defaults (only the fleet's
-  `backupLocation` and `imagePullSecret` are always rendered).
+  the file leaves out stays unset, the chart does not fill it in from its defaults. The fleet's
+  `backupLocation` (`<instance>-backup-location`) and `imagePullSecret` (`regsecret`) are filled in only
+  when the file omits them; a `backupLocation` or `imagePullSecret` the file sets wins (a location it names
+  must exist in the target namespace).
 - Only tpg-restore reads this folder, and it accepts a spec file for a **new** target and for an
-  **in-place** restore; any other existing target refuses the key (`TARGET_SPEC_FILE_REFUSED`).
+  **in-place** restore (a restore never goes into any other existing instance: `TARGET_EXISTS`).
 - **Not** a patch or an overlay: nothing in the chart reads these files (`.Files.Get` is never given a
   path in this folder, and `.helmignore` keeps the folder out of the packaged chart), no instance entry
   of `clusters/fleet.yaml` lists them, and editing a file changes no running instance. What a run stores

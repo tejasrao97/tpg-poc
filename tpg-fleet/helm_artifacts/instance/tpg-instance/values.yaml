@@ -29,7 +29,8 @@ instance:
   # values but from the restore-patch file the entry records (clusters/fleet.yaml,
   # clusters.<cluster>.instances.<instance>.restorePatch; helm_artifacts/instance/tpg-instance/restore-patch/README.md,
   # templates/_helpers.tpl tpg.restoredPostgres). tpg-day0 refuses such an instance
-  # (INSTANCE_RESTORED); tpg-scale-instance, tpg-upgrade (postgres) and tpg-patch change it
+  # (INSTANCE_RESTORED); tpg-scale-instance, tpg-upgrade (postgres) and tpg-patch (postgres patch files) change it;
+  # a values patch with an instance: key that reaches the Postgres is refused for it (RESTORED_VALUES_PATCH)
   restored: false
   postgresVersion: ""
   storageClassName: tpg-data-retain

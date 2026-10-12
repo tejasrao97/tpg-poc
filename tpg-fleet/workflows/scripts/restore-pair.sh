@@ -328,7 +328,7 @@ if [[ "$SAME_NS" != true ]]; then
   fi
 fi
 
-# ---- 5. the target: existing instance or new one
+# ---- 5. the target: the source itself (in place) or a new instance; any other live Postgres of that name is TARGET_EXISTS
 to_tgt
 TGT_FLEET=false
 fleet_has_instance "$REPO" "$TC" "$TI" && TGT_FLEET=true
@@ -365,7 +365,7 @@ load_spec() {  # load_spec: SPEC_JSON from the file; the pair fails with the rea
 if [[ "$TGT_EXISTS" == true && "$IN_PLACE" != true ]]; then
   # a restore overwrites the data of the instance it restores into: only the source itself may be that (in place); anything else that
   # runs under the target name is somebody's instance
-  fail TARGET_EXISTS "a Postgres named ${TI} already runs in namespace ${TNS} on ${TC} and is not the source instance of this pair: restore in place (the source and the target are the same instance), or choose a new instance name for the target; a restore never overwrites another instance"
+  fail TARGET_EXISTS "a Postgres named ${TI} already runs at ${TC}/${TNS}/${TI} and is not the source instance of this pair: restore in place or choose a new instance name (in place means the source and the target are the same cluster, namespace and instance; a restore never overwrites another instance)"
 fi
 
 ENTRY_NEW=false; T_OWNER=""; BUSY=""; T_PGV=""; T_BLN=""; RP_NOTE=""
@@ -475,11 +475,7 @@ fi
 # restore succeeded: the spec file's spec, or the spec read from the cluster. Mode over for an in-place restore with a spec file (the operator
 # merged the file into the existing Postgres), base otherwise. An instance that has no entry is not managed by Argo CD: nothing is recorded.
 RP_FORM=base; [[ -z "$SPEC_JSON" || "$TGT_EXISTS" != true ]] || RP_FORM=over
-# Only a new instance and an in-place restore have a restore-patch: another existing instance keeps its spec, the restore overwrites its data only
-RP_APPLIES=true; [[ "$TGT_EXISTS" != true || "$IN_PLACE" == true ]] || RP_APPLIES=false
-if [[ "$RP_APPLIES" != true ]]; then
-  :
-elif [[ "$TGT_EXISTS" == true && "$TGT_FLEET" != true ]]; then
+if [[ "$TGT_EXISTS" == true && "$TGT_FLEET" != true ]]; then
   RP_NOTE="${TC}/${TI} has no entry in ${FLEET_REL}: $( [[ -n "$SPEC_JSON" ]] && echo "the spec file is used for the restore only" || echo "its spec is not read" ), no restore-patch is recorded (Argo CD does not manage this instance)"
 elif [[ "$TGT_FLEET" == true && -n "$SPEC_JSON" ]]; then
   stage_restore_patch "$SPEC_JSON" "$RP_FORM" || fail FLEET_EDIT_FAILED "$FLEET_REL (restorePatch of ${TI})"
@@ -503,10 +499,8 @@ if [[ "$TGT_EXISTS" == false ]]; then
   plan "target: new instance ${TC}/${TNS}/${TI}, version ${T_PGV:-unknown}; spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is" || echo "none, only the name: the operator creates the instance and fills in its spec (lab item: how it fills it)" ); ${FLEET_REL}: $( [[ "$ENTRY_NEW" == true ]] && echo "the entry would be added$( [[ "$SRC_FLEET" == true ]] && echo " (a copy of the entry of ${SC}/${SI})" || echo " (from the spec file)" ) (pushMode ${PUSH_MODE})" || echo "the entry already exists" ); shared Secrets of ${TNS}: $( [[ "$T_OWNER" == true ]] && echo "owned by ${TI}" || echo "owned by ${OWNER_NOTE:-another instance}" )"
 fi
 RP_WHAT="the spec file"; [[ -n "$SPEC_JSON" ]] || RP_WHAT="the spec of the restored Postgres, read from ${TC} once it runs"
-RP_PLAN="mode ${RP_FORM}, restorePatch.current of ${TC}/${TI}, instance.restored: true and the fleet-equivalent fields of the spec written into the entry; the chart renders the Postgres from it (its fields, backupLocation and imagePullSecret, then the later changes of the entry and the tpg-patch patch file)"
-if [[ "$RP_APPLIES" != true ]]; then
-  plan "restore-patch: none (${TC}/${TI} is an existing instance other than the source: the restore overwrites its data, its spec stays and is not recorded)"
-elif [[ "$ENTRY_NEW" == true && -n "$SPEC_JSON" ]]; then
+RP_PLAN="mode ${RP_FORM}, restorePatch.current of ${TC}/${TI}, instance.restored: true and the fleet-equivalent fields of the spec written into the entry; the chart renders the Postgres from it (its fields; its own backupLocation and imagePullSecret win and the fleet's fill in where it omits them (${TI}-backup-location, regsecret); then the later changes of the entry and the tpg-patch patch file)"
+if [[ "$ENTRY_NEW" == true && -n "$SPEC_JSON" ]]; then
   plan "restore-patch: ${RP_WHAT} would be stored as helm_artifacts/instance/tpg-instance/restore-patch/${TI}-restore-<uid>.yaml in the same commit as the entry: ${RP_PLAN}"
 elif [[ -n "$RP_NOTE" ]]; then
   plan "restore-patch: ${RP_NOTE}"
@@ -561,10 +555,9 @@ if [[ "$ENTRY_NEW" == true && "$T_OWNER" == true ]]; then
   done
 fi
 if [[ -n "$SPEC_JSON" && -n "${T_BLN:-}" && "$T_BLN" != "${TI}-backup-location" ]]; then
+  # a backupLocation the spec file names wins over the fleet's (tpg.restoredPostgres): it must exist for the restored instance to use it
   get_obj "$TNS" postgresbackuplocation "$T_BLN" || true
-  [[ -n "$OBJ" ]] || fail BACKUP_LOCATION_MISSING "the spec file names backupLocation ${T_BLN}, which does not exist in ${TNS} on ${TC} (the fleet renders ${TI}-backup-location for the instance)"
-  # the fleet-managed references are always rendered (tpg.restoredPostgres): the restored instance is backed up through its own location
-  warn SPEC_LOCATION_REPLACED "the spec file names backupLocation ${T_BLN}; the chart renders ${TI}-backup-location for ${TI}, so the first sync of its Application points the instance at that location (the restore itself uses ${T_BLN})"
+  [[ -n "$OBJ" ]] || fail BACKUP_LOCATION_MISSING "the spec file names backupLocation ${T_BLN}, which does not exist in ${TNS} on ${TC}: create it there, or leave backupLocation out of the spec file (the fleet then renders ${TI}-backup-location for the instance)"
 fi
 
 # ---- 6. another namespace or cluster: the copy of the source backup location (reused when one exists)
@@ -656,7 +649,7 @@ if [[ "$DRY" == true ]]; then
   plan_save
   dump_plan
   w="$(join_list ${WARNS[@]+"${WARNS[@]}"})"
-  record "$RKEY" SUCCEEDED DRY_RUN "would restore ${SC}/${SNS}/${SI} into ${TC}/${TNS}/${TI} ($( [[ "$METHOD" == backup ]] && echo "backup ${SBK}" || echo "pitr ${METHOD}" ), $( [[ "$TGT_EXISTS" == true ]] && echo "existing target" || echo "new instance" )); nothing was changed; the plan is in plan.restore.${TC}.${TI}${w:+; warnings: ${w}}"
+  record "$RKEY" SUCCEEDED DRY_RUN "would restore ${SC}/${SNS}/${SI} into ${TC}/${TNS}/${TI} ($( [[ "$METHOD" == backup ]] && echo "backup ${SBK}" || echo "pitr ${METHOD}" ), $( [[ "$TGT_EXISTS" == true ]] && echo "in place" || echo "new instance" )); nothing was changed; the plan is in plan.restore.${TC}.${TI}${w:+; warnings: ${w}}"
   exit 0
 fi
 
@@ -872,9 +865,7 @@ snapshot_spec() {  # snapshot_spec: SNAP_SPEC = the .spec of the restored Postgr
   SNAP_ERR=""
 }
 RP_RECORDED=true   # false: the Application of the new or declared instance must not be synced (the chart would render it from the entry)
-if [[ "$RP_APPLIES" != true ]]; then
-  :   # another existing instance: nothing is recorded
-elif [[ "$ENTRY_NEW" == true && -n "$SPEC_JSON" ]]; then
+if [[ "$ENTRY_NEW" == true && -n "$SPEC_JSON" ]]; then
   :   # recorded with the entry
 elif [[ -n "$RP_NOTE" ]]; then
   note "$RP_NOTE"

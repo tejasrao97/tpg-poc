@@ -607,6 +607,32 @@ plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_CLEAR_KINDS='[postgresValue
 cluster P_PUSH_MODE=direct P_CLEAR_KINDS='[postgresValues]' P_PATCH_MODE=clear P_INSTANCES='[restored-db]' P_CLUSTERS='[c1]' S_INV=restored-db
 [[ "$(rpyaml)" == "$RP_BEFORE" ]] \
   && ok "24 patchMode=clear does not touch the restore-patch" || bad "24 clear" "$(rpyaml) $OUT"
+# Round 23, third revision: a values patch that sets instance: keys reaching the Postgres CR (templates/postgres.yaml, tpg.services:
+# storageSize, walStorageSize, resources, exposure, readOnlyExposure, serviceAnnotations, readOnlyServiceAnnotations, allowedSourceRanges,
+# internalLoadBalancerSubnet) for a restored instance is refused RESTORED_VALUES_PATCH: tpg-scale-instance, tpg-upgrade and postgres patch
+# files are the ways to change a restored instance. Keys that do not reach the CR stay allowed
+git -C "$REPO" reset -q --hard "$RSHA"
+for kv in 'storageSize: 60Gi' 'walStorageSize: 20Gi' $'resources:\n    data:\n      limits:\n        memory: 8Gi' 'exposure: loadBalancer' 'readOnlyExposure: internalLoadBalancer' \
+          $'serviceAnnotations:\n    a: b' $'readOnlyServiceAnnotations:\n    a: b' $'allowedSourceRanges:\n    - 10.0.0.0/8' 'internalLoadBalancerSubnet: snet-db'; do
+  key="${kv%%:*}"
+  printf 'instance:\n  %s\n' "$kv" > "$L/v-rvp.yaml"
+  plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_VALUES_PATCH='[v-rvp.yaml]' P_PATCH_FILES="$(pack v-rvp.yaml)" S_INV=restored-db S_DIFF=0
+  R="$(rec "precheck.c1|BLOCKED|PATCH_REFUSED")"
+  grep -q "v-rvp.yaml: RESTORED_VALUES_PATCH: instance.${key} " <<<"$R" && grep -q "tpg-scale-instance" <<<"$R" && grep -q "tpg-upgrade" <<<"$R" && grep -q "postgres patch file" <<<"$R" \
+    && ok "24 a values patch with instance.${key} on a restored instance: RESTORED_VALUES_PATCH naming tpg-scale-instance, tpg-upgrade and the postgres patch files" || bad "24 restored values ${key}" "$(cat "$TMP/records") $OUT"
+  [[ "$(rec "result.c1.restored-db|FAILED|PATCH_REFUSED" | wc -l)" -ge 1 ]] || bad "24 restored values result ${key}" "$(cat "$TMP/records")"
+done
+printf 'instance:\n  storageSize: 60Gi\n  exposure: loadBalancer\nbackup:\n  fullRetention: 6\n' > "$L/v-rvp.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_VALUES_PATCH='[v-rvp.yaml]' P_PATCH_FILES="$(pack v-rvp.yaml)" S_INV=restored-db S_DIFF=0
+R="$(rec "precheck.c1|BLOCKED|PATCH_REFUSED")"
+grep -q "instance.storageSize " <<<"$R" && grep -q "instance.exposure " <<<"$R" && ! grep -q "backup.fullRetention" <<<"$R" \
+  && ok "24 …a file with several keys: every instance key that reaches the CR is named, the key that does not (backup.fullRetention) is not" || bad "24 restored values several" "$R"
+printf 'backup:\n  fullRetention: 6\nnetwork:\n  policy: baseline\nferret:\n  replicas: 2\n' > "$L/v-rvp.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_VALUES_PATCH='[v-rvp.yaml]' P_PATCH_FILES="$(pack v-rvp.yaml)" S_INV=restored-db
+! rec "precheck.c1|BLOCKED" | grep -q . && ok "24 …a values patch whose keys do not reach the Postgres CR (backup, network, ferret) stays allowed on a restored instance" || bad "24 restored values allowed" "$(cat "$TMP/records") $OUT"
+printf 'instance:\n  exposure: loadBalancer\n' > "$L/v-rvp.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-rvp.yaml]' P_PATCH_FILES="$(pack v-rvp.yaml)" S_DIFF=0
+! grep -q "RESTORED_VALUES_PATCH" "$TMP/records" && ok "24 …the same instance: key on an instance that was not restored is not refused for that reason" || bad "24 not restored" "$(cat "$TMP/records")"
 git -C "$REPO" reset -q --hard "$BASE_SAVED2"
 printf 'restorePatch:\n  current: restore-patch/x.yaml\n' > "$L/v-rp.yaml"
 plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-rp.yaml]' P_PATCH_FILES="$(pack v-rp.yaml)" S_DIFF=0

@@ -10,7 +10,7 @@
 #   - the fleet repository as a directory (git_clone copies it, git_commit_push writes the clone back), vault_secret,
 #     record/record_entry (files), sleep (moves SECONDS forward), pg_wait_ready, sync_instance_app, backup-instance.sh
 # Cases (every refusal and branch of the 10 steps has one):
-#   1 plans (dryRun): same namespace, another cluster, every PITR type, the annotation, existing target; read-only
+#   1 plans (dryRun): same namespace, another cluster, every PITR type, the annotation, TARGET_EXISTS for a live target that is not the source; read-only
 #   2 the named backup checks (same namespace: BACKUP_NOT_FOUND, BACKUP_NOT_SUCCEEDED; another one: SOURCE_BACKUP_UNVERIFIED)
 #   3 the PITR derivation (live, from the source backup, PITR_SOURCE_UNKNOWN, warnings for a given value that differs)
 #   4 the matrix (RESTORE_FLAVOUR_UNSUPPORTED, RESTORE_VERSION_LOWER, RESTORE_MAJOR_DIFFERS, skipMinorVersionCheck)
@@ -425,7 +425,7 @@ mk c1/pg-orders/orders-db '' c1/pg-orders/orders-copy "$LATEST"; run "$PJ"
 RKP=c1.orders-copy; Y="$(restore_yaml)"
 [[ "$(yq '.spec.pitr.sourceBackupLocation.name' <<<"$Y")" == orders-db-backup-location ]] && ok "PITR inside the source namespace names the source's own location (no copy)" || bad "same ns pitr" "$Y"
 
-echo "== 1c. skipMinorVersionCheck, existing target, confirm"
+echo "== 1c. skipMinorVersionCheck, TARGET_EXISTS, in place and confirm"
 reset
 RK=c2.orders-dr; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\nskipMinorVersionCheck: true'; run "$PJ"
 Y="$(RKP=c2.orders-dr restore_yaml)"
@@ -657,7 +657,7 @@ mkdir -p "$TMP/cl/c2/postgresbackuplocation/pg-dr"
 printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"shared-location","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"pg-backups","repoPath":"/pg-dr/shared"}}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/shared-location.json"
 run "$PJ"
 expect "…the location exists in the target namespace: the pair plans" SUCCEEDED DRY_RUN
-[[ ! -e "$TMP/rec/warning.c2.orders-dr.SPEC_LOCATION_REPLACED.status" ]] && ! grep -q 'SPEC_LOCATION_REPLACED\|first sync of its Application points' "$TMP/records" \
+[[ -z "$(find "$TMP/rec" -name 'warning.c2.orders-dr.*' 2>/dev/null)" ]] && ! grep -q 'first sync of its Application points' "$TMP/records" \
   && ok "the restore-patch names its own location: no replacement warning (it wins over the fleet's orders-dr-backup-location)" || bad "location warning" "$(cat "$TMP/records")"
 grep -q 'its own backupLocation and imagePullSecret win and the fleet.s fill in' "$TMP/rec/plan.restore.c2.orders-dr.detail" && ok "the plan tells the render: the restore-patch's backupLocation and imagePullSecret win, the fleet's fill in where it omits them" || bad "plan references" "$(cat "$TMP/rec/plan.restore.c2.orders-dr.detail")"
 reset
@@ -1022,7 +1022,7 @@ mkdir -p "$TMP/cl/c2/postgresbackuplocation/pg-dr"
 printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"shared-location","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"pg-backups","repoPath":"/pg-dr/shared"}}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/shared-location.json"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-loc.yaml]'; run "$PJ" P_DRY_RUN=false
 expect "a spec file that names an existing backupLocation: SUCCEEDED, no warning" SUCCEEDED ""
-! grep -q 'SPEC_LOCATION_REPLACED' "$TMP/records" && ok "…no SPEC_LOCATION_REPLACED warning" || bad "location warning" "$(cat "$TMP/records")"
+[[ -z "$(find "$TMP/rec" -name 'warning.c2.orders-dr.*' 2>/dev/null)" ]] && ok "…no warning at all (the spec file's own location is not replaced)" || bad "location warning" "$(cat "$TMP/records")"
 RS="$(rendered_spec c2 orders-dr)"
 [[ "$(jq -r '.backupLocation.name' <<<"$RS")" == shared-location && "$(jq -r '.imagePullSecret.name' <<<"$RS")" == regsecret ]] \
   && [[ "$(jq -r '.spec.targetInstance.spec.backupLocation.name' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json)" == shared-location ]] \
@@ -1072,8 +1072,8 @@ LIVE="$(jq -c '.spec | del(.certificateSecretName)' "$TMP/cl/c2/postgres/pg-dr/o
 [[ "$(grep -c '^push' "$TMP/events")" -eq 2 ]] && ev_has 'push mode=direct restore: record the restore-patch of c2/orders-dr' \
   && ok "two commits: the entry before the restore, the restore-patch after it (the Application is adopted only after the second)" || bad "snapshot pushes" "$(cat "$TMP/events")"
 RS="$(rendered_spec c2 orders-dr)"
-[[ "$(jq -S -c 'del(.backupLocation)' <<<"$RS")" == "$(jq -S -c 'del(.backupLocation)' <<<"$LIVE")" && "$(jq -r '.backupLocation.name' <<<"$RS")" == orders-dr-backup-location ]] \
-  && ok "the chart renders the live spec as it is (storageClassName operator-default, HA 1, logLevel Debug, nothing of the source's patches), with the fleet-managed backupLocation" || bad "snapshot render" "$RS
+[[ "$(jq -S -c . <<<"$RS")" == "$(jq -S -c . <<<"$LIVE")" && "$(jq -r '.backupLocation.name' <<<"$RS")" == restore-src-location ]] \
+  && ok "the chart renders the live spec as it is (storageClassName operator-default, HA 1, logLevel Debug, nothing of the source's patches): the backupLocation and imagePullSecret the live spec sets win over the fleet's" || bad "snapshot render" "$RS
 $LIVE"
 [[ "$(jq 'has("spec")' <<<"$(jq -c '.spec.targetInstance' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json)")" == false ]] && ok "…and the PostgresRestore carries spec.targetInstance.name only" || bad "restore without spec"
 grep -q 'lab item' <<<"$(detail)" && ok "…the result records that how the operator fills the spec is a lab item" || bad "lab note" "$(detail)"

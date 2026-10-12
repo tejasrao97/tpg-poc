@@ -18,8 +18,9 @@ must live inside the chart, and `.helmignore` must not list this folder.
       it; fields with a `null` value are dropped; **nothing else is stripped**: the live spec is the
       truth, including whatever the operator defaulted into it. It must fit the Postgres schema
       (`workflows/scripts/patchcheck.py spec`, the same check as for a spec file); when it does not,
-      or cannot be read, nothing is stored (warning `RESTORE_PATCH_NOT_RECORDED`) and a new
-      instance's Application is not synced by that run.
+      or cannot be read, nothing is stored (warning `RESTORE_PATCH_NOT_RECORDED`, which names the
+      unknown or invalid fields, for example `spec.noSuchField is not a field of the Postgres
+      resource`) and a new instance's Application is not synced by that run.
 - The input spec files that runs name with `repo:` live in `../restore-specs/`; this folder holds
   what a run stored.
 
@@ -59,11 +60,12 @@ the whole truth. In this order:
 1. `R` as it is. A field `R` does not set **stays unset**: nothing of the chart defaults
    (`storageClassName`, `walStorageSize`, `resources`, `highAvailability`, `persistentVolumeClaimPolicy`,
    ...) and nothing of the entry is filled in.
-2. The fleet-managed references, **always**: `backupLocation: {name: <instance>-backup-location}` and
-   `imagePullSecret: {name: regsecret}`. They replace the ones in `R` (a spec file or a snapshot may
-   name others): the instance is backed up through the PostgresBackupLocation this chart renders and
-   pulls with the Secret it renders. tpg-restore warns `SPEC_LOCATION_REPLACED` for a spec file that
-   names another location.
+2. The fleet-managed references, **only where `R` omits them**: `backupLocation:
+   {name: <instance>-backup-location}` and `imagePullSecret: {name: regsecret}` (the
+   PostgresBackupLocation and the Secret this chart renders). When `R` sets its own `backupLocation` or
+   `imagePullSecret` (a spec file or a snapshot), `R`'s value wins, each one on its own. A
+   `backupLocation` a spec file names must exist in the target namespace
+   (tpg-restore: `BACKUP_LOCATION_MISSING`).
 3. **Later changes**: the entry's fleet-equivalent fields that **differ** from `R` (below).
 4. The instance's **current postgres patch file** (tpg-patch), merged over everything. The overlays of
    the creation (`postgresOverlayFilePath`), the values overlay and the `instance:` keys of a values
@@ -74,8 +76,8 @@ the whole truth. In this order:
 Postgres, overwriting the fields it sets): the normal render (chart defaults, the entry, the postgres
 overlay file, the postgres patch file that was current at the restore, `restorePatch.postgresPatch`),
 then `R` merged over it (maps key by key, anything else replaces; a `highAvailability` block that does
-not say `enabled: true` is removed), the fleet-managed references again, the later changes for the
-fields `R` sets, and last the current postgres patch file if it is not the one of the restore (a file
+not say `enabled: true` is removed; `R`'s own `backupLocation` and `imagePullSecret` win over the
+render's), the later changes for the fields `R` sets, and last the current postgres patch file if it is not the one of the restore (a file
 tpg-patch set later is applied after `R`; the one of the restore was already under it).
 
 Last, `tpg.prune` leaves out every field that holds its zero default (as for every instance).
@@ -110,7 +112,11 @@ restore nothing differs. Afterwards:
 - **tpg-patch** postgres patch files apply after `R` and the later changes.
 - Nothing else changes the Postgres of a restored instance: **tpg-day0** (and tpg-create-instance) block
   it with `INSTANCE_RESTORED` (that instance only), a values patch cannot set `instance.restored` or
-  `restorePatch`. tpg-network-policy does not touch the Postgres.
+  `restorePatch`, and a values patch that sets an `instance:` key which reaches the Postgres
+  (`storageSize`, `walStorageSize`, `resources`, `exposure`, `readOnlyExposure`, `serviceAnnotations`,
+  `readOnlyServiceAnnotations`, `allowedSourceRanges`, `internalLoadBalancerSubnet`) is refused by
+  tpg-patch (`RESTORED_VALUES_PATCH`, naming tpg-scale-instance, tpg-upgrade and postgres patch files);
+  keys that do not reach it stay allowed. tpg-network-policy does not touch the Postgres.
 - Without `clusters/fleet.yaml` as a value file (a render by hand) there is no entry to compare:
   `.Values.instance.restored` and `.Values.restorePatch` are read and the restore-patch renders alone.
 
@@ -123,9 +129,9 @@ restore nothing differs. Afterwards:
 - In every other case (a new target without a spec file, an instance declared in `clusters/fleet.yaml`
   but not deployed, an in-place restore) in a commit of its own after the restore succeeded and the
   instance runs (`pushMode` applies): the spec file's spec, or the live snapshot. In place with a spec
-  file is mode `over` (and records `postgresPatch`), everything else mode `base`. An existing instance
-  that is not the source is not recorded (the restore overwrites its data, its spec stays). An in-place
-  instance that has no entry in `clusters/fleet.yaml` records nothing.
+  file is mode `over` (and records `postgresPatch`), everything else mode `base`. A restore never goes
+  into another existing instance (`TARGET_EXISTS`). An in-place instance that has no entry in
+  `clusters/fleet.yaml` records nothing.
 - A **re-restore** writes the new file as `restorePatch.current`, the former current becomes `previous`
   (no longer applied), and the file that was `previous` is deleted (its commit stays in Git). The
   source's restore-patch is never copied to a new target.

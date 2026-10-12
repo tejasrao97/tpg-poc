@@ -9,7 +9,7 @@
 #
 # dryRun is true by default: each pair records its plan (source resolution, the matrix, the
 # PostgresRestore that would be created, the preparation of the target) and nothing changes. A real
-# restore needs dryRun=false, and confirm (the target instance name) for an existing target.
+# restore needs dryRun=false, and confirm (the target instance name) for an in-place pair (confirm is refused on any other pair).
 #
 # rolloutMode: all (default) runs every pair at once; batches runs maxParallel pairs at a time, in
 # the order of the list; canary runs the first pair alone and stops the run when it fails. The
@@ -75,7 +75,7 @@ spec:
         targetClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {pitrEnabled: false, confirm: orders-db}}}}}]
       value: ""
     - name: dryRun
-      description: "true (default): record the plan of every pair and change nothing; false: restore (an existing target needs confirm)"
+      description: "true (default): record the plan of every pair and change nothing; false: restore (an in-place pair needs confirm)"
       value: "true"
       enum: ["true", "false"]
     # ---- optional
