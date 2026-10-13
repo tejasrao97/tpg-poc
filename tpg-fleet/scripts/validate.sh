@@ -28,7 +28,8 @@ echo "ok helm_artifacts/instance/crd-reference and helm_artifacts/instance/tpg-i
 echo "== workflow input types and patch file schemas (generated files up to date)"
 python3 workflows/params/generate.py --check
 python3 workflows/params/clustermap_schema.py --check
-echo "ok workflows/admission/workflow-parameters.yaml, workflows/params/patch-schemas.json, the clusterMap schemas and their docs"
+python3 workflows/params/params_schema.py --check
+echo "ok workflows/admission/workflow-parameters.yaml, workflows/params/patch-schemas.json, the clusterMap and parameter-file schemas and their docs"
 
 # patch_current FLEET_FILE CLUSTER INSTANCE KIND [GROUP: patches|overlays] -> the current patch or
 # overlay file ({current, previous}; any other shape is a fleet repository written before Round 15)

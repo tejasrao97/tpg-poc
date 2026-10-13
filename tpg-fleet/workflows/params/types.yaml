@@ -10,8 +10,9 @@
 # no Workflow is created.
 #
 # tests/params/run.sh checks that this file, the WorkflowTemplates (names,
-# defaults, enums), the generated policy and the Type columns in
-# docs/workflow-commands.md agree.
+# defaults, enums), the generated policy and the Type, Mandatory, Default and
+# enum values of the input tables in docs/workflow-commands.md agree. The same
+# file generates the parameter-file schemas (workflows/params/params_schema.py).
 #
 # Mandatory inputs are still checked by the validate step of each workflow,
 # because some are mandatory only without clusterMap; so is the inside of
@@ -26,6 +27,12 @@
 #               ([a, all] is refused)
 #   bare        list types: the one word valid without brackets (all); the
 #               pattern of "components" lets auto stand bare in the same way
+#   mandatory   absent: optional. always: the validate step refuses the run without it in
+#               every case (it has no default in the template), and the parameter-file schema
+#               lists it as required. conditional: mandatory in some cases only (without
+#               clusterMap, for one mode, ...), so the schema does not require it and the
+#               validate step decides. The Mandatory column of docs/workflow-commands.md says
+#               "yes" / "no" / the condition; tests/params checks the column against this.
 #
 # Lists are strict (Round 23): every list input is bracketed, even with one value,
 # [tpg-poc-01] or [a, b] (YAML flow) or ["a","b"] (JSON); a comma-separated string, [],
@@ -76,13 +83,13 @@ types:
 
 templates:
   tpg-day0:
-    clusters: {type: listOrAll, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: listOrAll, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    highAvailability: {type: boolean, allowEmpty: true}
-    operatorVersion: {type: operatorVersion, allowEmpty: true}
-    postgresVersion: {type: postgresVersion, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    highAvailability: {type: boolean, allowEmpty: true, mandatory: conditional}
+    operatorVersion: {type: operatorVersion, allowEmpty: true, mandatory: conditional}
+    postgresVersion: {type: postgresVersion, allowEmpty: true, mandatory: conditional}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     readReplicas: {type: integer, allowEmpty: true}
     storageSize: {type: quantity, allowEmpty: true}
     walStorageSize: {type: quantity, allowEmpty: true}
@@ -131,12 +138,12 @@ templates:
     toolsImage: {type: string}
 
   tpg-create-instance:
-    clusters: {type: list, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    highAvailability: {type: boolean, allowEmpty: true}
-    postgresVersion: {type: postgresVersion, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    highAvailability: {type: boolean, allowEmpty: true, mandatory: conditional}
+    postgresVersion: {type: postgresVersion, allowEmpty: true, mandatory: conditional}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     readReplicas: {type: integer, allowEmpty: true}
     storageSize: {type: quantity, allowEmpty: true}
     walStorageSize: {type: quantity, allowEmpty: true}
@@ -172,7 +179,7 @@ templates:
     egressToFqdns: {type: fqdnList, allowEmpty: true}
     postgresOverlayFilePath: {type: patchFileList, allowEmpty: true}
     postgresValuesOverlayFilePath: {type: patchFile, allowEmpty: true}
-    patchFiles: {type: jsonMap, allowEmpty: true}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     maxParallel: {type: posint}
     rolloutMode: {type: enum, values: [canary, batches, all]}
     dryRun: {type: boolean}
@@ -181,11 +188,11 @@ templates:
     toolsImage: {type: string}
 
   tpg-upgrade:
-    component: {type: enum, values: [operator, postgres], allowEmpty: true}
-    targetVersion: {type: version, allowEmpty: true}
-    clusters: {type: listOrAll, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
-    instances: {type: listOrAll, allowEmpty: true}
+    component: {type: enum, values: [operator, postgres], allowEmpty: true, mandatory: conditional}
+    targetVersion: {type: version, allowEmpty: true, mandatory: conditional}
+    clusters: {type: listOrAll, allowEmpty: true, mandatory: conditional}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
+    instances: {type: listOrAll, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
     preUpgradeBackup: {type: boolean}
     allowMajor: {type: boolean}
@@ -197,18 +204,18 @@ templates:
     toolsImage: {type: string}
 
   tpg-patch:
-    clusters: {type: listOrAll, allowEmpty: true}
-    instances: {type: listOrAll, allowEmpty: true}
+    clusters: {type: listOrAll, allowEmpty: true, mandatory: conditional}
+    instances: {type: listOrAll, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    postgresPatchFilePath: {type: patchFileList, allowEmpty: true}
-    postgresValuesPatchFilePath: {type: patchFile, allowEmpty: true}
-    operatorValuesPatchFilePath: {type: patchFile, allowEmpty: true}
-    patchFiles: {type: jsonMap, allowEmpty: true}
+    postgresPatchFilePath: {type: patchFileList, allowEmpty: true, mandatory: conditional}
+    postgresValuesPatchFilePath: {type: patchFile, allowEmpty: true, mandatory: conditional}
+    operatorValuesPatchFilePath: {type: patchFile, allowEmpty: true, mandatory: conditional}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     patchMode: {type: enum, values: [apply, clear]}
-    clearKinds: {type: kindList, allowEmpty: true}
+    clearKinds: {type: kindList, allowEmpty: true, mandatory: conditional}
     backupCaBundleFile: {type: caFile, allowEmpty: true}
     backupCaBundleVaultSecret: {type: k8sName, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     maxParallel: {type: posint}
     rolloutMode: {type: enum, values: [canary, batches, all]}
     dryRun: {type: boolean}
@@ -217,12 +224,12 @@ templates:
     toolsImage: {type: string}
 
   tpg-scale-instance:
-    clusters: {type: list, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    replicas: {type: integer, allowEmpty: true}
+    replicas: {type: integer, allowEmpty: true, mandatory: conditional}
     maxReadReplicas: {type: posint, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     enableHAIfNeeded: {type: boolean}
     maxParallel: {type: posint}
     rolloutMode: {type: enum, values: [canary, batches, all]}
@@ -241,10 +248,10 @@ templates:
     toolsImage: {type: string}
 
   tpg-delete-instance:
-    clusters: {type: list, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    confirm: {type: list, allowEmpty: true}
+    confirm: {type: list, allowEmpty: true, mandatory: always}
     finalBackup: {type: enum, values: ["true", "false", required]}
     forceDeleteStuckApps: {type: boolean}
     purgePvcs: {type: boolean}
@@ -256,15 +263,15 @@ templates:
     toolsImage: {type: string}
 
   tpg-delete-apps:
-    clusters: {type: list, allowEmpty: true}
-    apps: {type: jsonMap, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    apps: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    confirm: {type: list, allowEmpty: true}
+    confirm: {type: list, allowEmpty: true, mandatory: always}
     dryRun: {type: boolean}
-    purgePvcs: {type: boolean, allowEmpty: true}
-    purgeNamespace: {type: boolean, allowEmpty: true}
+    purgePvcs: {type: boolean, allowEmpty: true, mandatory: conditional}
+    purgeNamespace: {type: boolean, allowEmpty: true, mandatory: conditional}
     purgeBackups: {type: boolean}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     force: {type: boolean}
     forceDeleteStuckApps: {type: boolean}
     finalBackup: {type: enum, values: ["true", "false", required]}
@@ -273,47 +280,47 @@ templates:
     toolsImage: {type: string}
 
   tpg-backup-expire:
-    clusterMap: {type: map, allowEmpty: true}
+    clusterMap: {type: map, allowEmpty: true, mandatory: always}
     dryRun: {type: boolean}
-    confirm: {type: list, allowEmpty: true}
+    confirm: {type: list, allowEmpty: true, mandatory: conditional}
     timeoutSeconds: {type: posint}
     toolsImage: {type: string}
 
   tpg-helm-addons:
-    clusters: {type: listOrAll, allowEmpty: true}
+    clusters: {type: listOrAll, allowEmpty: true, mandatory: always}
     components: {type: components}
     existingAddons: {type: enum, values: [skip, upgrade]}
     dryRun: {type: boolean}
     toolsImage: {type: string}
 
   tpg-restore:
-    clusterMap: {type: pairList, allowEmpty: true}
+    clusterMap: {type: pairList, allowEmpty: true, mandatory: always}
     rolloutMode: {type: enum, values: [canary, batches, all]}
     pushMode: {type: enum, values: [direct, pr]}
     dryRun: {type: boolean}
     maxParallel: {type: posint}
     restoreTimeoutSeconds: {type: posint}
     prTimeoutSeconds: {type: posint}
-    patchFiles: {type: jsonMap, allowEmpty: true}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     keepSourceLocation: {type: boolean}
     toolsImage: {type: string}
 
   tpg-rotate-credential:
     secretType: {type: enum, values: [broadcom-registry, backup-storage, git-push, git-read, monitoring-remote-write, ca-bundle, custom]}
-    secretName: {type: k8sName, allowEmpty: true}
-    wrappingToken: {type: vaultToken, allowEmpty: true}
+    secretName: {type: k8sName, allowEmpty: true, mandatory: conditional}
+    wrappingToken: {type: vaultToken, allowEmpty: true, mandatory: conditional}
     caBundleFile: {type: caFile, allowEmpty: true}
-    patchFiles: {type: jsonMap, allowEmpty: true}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     clusters: {type: listOrAll}
     maxParallel: {type: posint}
     toolsImage: {type: string}
 
   tpg-network-policy:
-    clusters: {type: list, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    mode: {type: enum, values: [apply, update, remove], allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    mode: {type: enum, values: [apply, update, remove], allowEmpty: true, mandatory: always}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     ingressFromNamespaces: {type: list, allowEmpty: true}
     ingressFromPodLabels: {type: map, allowEmpty: true}
     ingressFromCidrs: {type: cidrList, allowEmpty: true}

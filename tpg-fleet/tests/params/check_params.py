@@ -3,6 +3,8 @@
 
   1 workflows/admission/workflow-parameters.yaml is what generate.py makes of
     workflows/params/types.yaml
+  1b the parameter-file schemas, examples and docs blocks are what
+    workflows/params/params_schema.py makes of types.yaml and the templates
   2 every input of every WorkflowTemplate has a type, every typed input exists,
     enums agree, and every default satisfies its type
   2b the discover step of every template with clusterMap receives the filter,
@@ -11,7 +13,10 @@
     clusterMap, the types exist, and every default input ("flag") is an input
     of that workflow
   4 docs/workflow-commands.md: every input table row carries the Type of that
-    input as types.yaml declares it
+    input as types.yaml declares it, the Mandatory column (yes, no, or a condition)
+    that types.yaml says (mandatory: always / conditional), the Default that the
+    template declares (a cell of literals; prose needs an empty template default)
+    and, for an Enum, every value of types.yaml in the Description
   5 the clusterMap schemas, examples and the key reference of the docs are what
     workflows/params/clustermap_schema.py makes of cluster-map-keys.yaml; every
     example passes clustermap.py validate and its schema; maps the validate step
@@ -49,6 +54,13 @@ r = subprocess.run([sys.executable, os.path.join(ROOT, "workflows/params/generat
                    capture_output=True, text=True)
 if r.returncode != 0:
     problems.append(r.stderr.strip() or "generate.py --check failed")
+
+# 1b the parameter-file schemas, examples and the generated blocks of the docs are what params_schema.py makes of
+# types.yaml and the templates (tests/params/check_param_files.py runs the files through them)
+r = subprocess.run([sys.executable, os.path.join(ROOT, "workflows/params/params_schema.py"), "--check"],
+                   capture_output=True, text=True)
+if r.returncode != 0:
+    problems.append(r.stderr.strip() or "params_schema.py --check failed")
 
 src = yaml.safe_load(open(os.path.join(ROOT, "workflows/params/types.yaml")))
 types, typed = src["types"], src["templates"]
@@ -186,40 +198,91 @@ if "clusterMap" not in templates.get("tpg-restore", {}):
 # 4 input tables: a table whose header starts with "| Input | Type |", inside the
 # section "## N. tpg-<name>" of that WorkflowTemplate
 md = open(os.path.join(ROOT, "docs/workflow-commands.md")).read()
-section, in_table = None, False
-documented = {s: set() for s in typed}
-for line in md.splitlines():
-    m = re.match(r"^## \d+\. (tpg-[a-z0-9-]+)", line)
-    if line.startswith("## "):
-        section = m.group(1) if m else None
-        in_table = False
-        continue
-    if not line.startswith("|"):
-        in_table = False
-        continue
-    if re.match(r"^\| Input \| Type \|", line):
-        in_table = True
-        if section not in typed:
-            problems.append(f"docs/workflow-commands.md: an input table outside a tpg-<name> section ({section})")
-        continue
-    if not in_table or section not in typed or line.startswith("|---"):
-        continue
-    cells = [c.strip() for c in line.strip().strip("|").split("|")]
-    names = re.findall(r"`([A-Za-z]+)`", cells[0])
-    if not names:
-        problems.append(f"docs/workflow-commands.md {section}: input row without an input name: {line}")
-    for n in names:
-        documented[section].add(n)
-        if n not in typed[section]:
-            problems.append(f"docs/workflow-commands.md {section}: `{n}` is not an input of the template")
+
+
+def table_problems(md):
+    """Problems of the input tables of a docs/workflow-commands.md text."""
+    problems = []
+    section, in_table = None, False
+    documented = {s: set() for s in typed}
+    for line in md.splitlines():
+        m = re.match(r"^## \d+\. (tpg-[a-z0-9-]+)", line)
+        if line.startswith("## "):
+            section = m.group(1) if m else None
+            in_table = False
             continue
-        want = types[typed[section][n]["type"]]["display"]
-        if cells[1].strip("`") != want:
-            problems.append(f"docs/workflow-commands.md {section}: `{n}` Type is '{cells[1]}', types.yaml says '{want}'")
-for s, params in typed.items():
-    missing = [p for p in params if p != "toolsImage" and p not in documented.get(s, set())]
-    if missing:
-        problems.append(f"docs/workflow-commands.md {s}: inputs without a row in an input table: {', '.join(missing)}")
+        if not line.startswith("|"):
+            in_table = False
+            continue
+        if re.match(r"^\| Input \| Type \|", line):
+            in_table = True
+            if section not in typed:
+                problems.append(f"docs/workflow-commands.md: an input table outside a tpg-<name> section ({section})")
+            continue
+        if not in_table or section not in typed or line.startswith("|---"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        names = re.findall(r"`([A-Za-z]+)`", cells[0])
+        if not names:
+            problems.append(f"docs/workflow-commands.md {section}: input row without an input name: {line}")
+        for n in names:
+            documented[section].add(n)
+            if n not in typed[section]:
+                problems.append(f"docs/workflow-commands.md {section}: `{n}` is not an input of the template")
+                continue
+            want = types[typed[section][n]["type"]]["display"]
+            if cells[1].strip("`") != want:
+                problems.append(f"docs/workflow-commands.md {section}: `{n}` Type is '{cells[1]}', types.yaml says '{want}'")
+            if len(cells) < 5:
+                problems.append(f"docs/workflow-commands.md {section}: `{n}` row has no Mandatory, Default and Description cells")
+                continue
+            spec, tdef = typed[section][n], str(templates[section][n].get("value", ""))
+            # Mandatory: yes = mandatory in every case (types.yaml mandatory: always, no default in the
+            # template), no = optional, anything else = the condition (mandatory: conditional)
+            got = "always" if cells[2] == "yes" else ("" if cells[2] == "no" else "conditional")
+            if got != (spec.get("mandatory") or ""):
+                problems.append(f"docs/workflow-commands.md {section}: `{n}` Mandatory is '{cells[2]}', types.yaml says "
+                                f"'{spec.get('mandatory') or 'optional'}' (always = yes, conditional = a condition)")
+            if spec.get("mandatory") == "always" and tdef != "":
+                problems.append(f"{section}.{n}: mandatory: always in types.yaml but the template has the default '{tdef}'")
+            # Default: a cell of literals (`a` or `a`, `b`) is the template default of the input (of each input of
+            # a shared row, in order); an empty cell means the template default is empty; any other text is prose
+            # (template, a computed default) and needs an empty template default
+            lits = re.fullmatch(r"`([^`]*)`(?:, `([^`]*)`)*", cells[3]) and "<" not in cells[3] and re.findall(r"`([^`]*)`", cells[3])
+            if lits:
+                idx = names.index(n)
+                exp = lits[idx] if len(lits) == len(names) else (lits[0] if len(lits) == 1 else None)
+                if exp is None:
+                    problems.append(f"docs/workflow-commands.md {section}: `{n}` Default '{cells[3]}' has {len(lits)} values for {len(names)} inputs")
+                elif exp != tdef:
+                    problems.append(f"docs/workflow-commands.md {section}: `{n}` Default is '{exp}', the template says '{tdef}'")
+            elif tdef != "":
+                problems.append(f"docs/workflow-commands.md {section}: `{n}` Default is '{cells[3]}', the template says '{tdef}'")
+            # enum values: every value of the enum is named, in code font, in the Description
+            if spec["type"] == "enum":
+                for v in spec["values"]:
+                    if f"`{v}`" not in cells[4]:
+                        problems.append(f"docs/workflow-commands.md {section}: `{n}` Description does not name the value `{v}` (types.yaml)")
+    for s, params in typed.items():
+        missing = [p for p in params if p != "toolsImage" and p not in documented.get(s, set())]
+        if missing:
+            problems.append(f"docs/workflow-commands.md {s}: inputs without a row in an input table: {', '.join(missing)}")
+    return problems
+
+
+problems += table_problems(md)
+# the table check finds a wrong Mandatory, Default and enum value, and a missing cell
+_row = "| `pushMode` | `Enum` | yes | | `direct` or `pr` |"
+assert _row in md and "| `maxParallel` | `Integer` | no | `2` |" in md
+for _what, _old, _new, _want in (
+        ("Mandatory", _row, _row.replace("| yes |", "| no |"), "Mandatory is 'no'"),
+        ("Mandatory (condition)", _row, _row.replace("| yes |", "| yes, without `clusterMap` |"), "Mandatory is 'yes, without `clusterMap`'"),
+        ("Default", "| `maxParallel` | `Integer` | no | `2` |", "| `maxParallel` | `Integer` | no | `3` |", "Default is '3', the template says '2'"),
+        ("Default (empty)", _row, _row.replace("| yes | |", "| yes | `direct` |"), "Default is 'direct', the template says ''"),
+        ("enum value", _row, _row.replace("`direct` or `pr`", "`direct`"), "does not name the value `pr`")):
+    _found = table_problems(md.replace(_old, _new, 1))
+    if not any(_want in m for m in _found):
+        problems.append(f"the input table check misses a wrong {_what} ({_want}): {_found[:2]}")
 
 # 5
 r = subprocess.run([sys.executable, os.path.join(ROOT, "workflows/params/clustermap_schema.py"), "--check"],

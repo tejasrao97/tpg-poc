@@ -480,7 +480,7 @@ The operator step waits until the Postgres CRDs are Established and the operator
 | `operatorIncrementalSchedule` | `String (cron)` | no | `0 0 * * 1-6` | `backupSchedule=operator`: cron (UTC) of the incremental backups; empty: full backups only |
 | `installAddons` | `Boolean` | no | `true` | Install or upgrade cert-manager (and the standalone monitoring agent) |
 | `existingAddons` | `Enum` | no | `skip` | A Helm release that differs: `skip` or `upgrade` (section 12) |
-| `monitoringOption` | `Enum` | no | `tpg-settings` | Override: `none`, `azure`, `standalone` |
+| `monitoringOption` | `Enum` | no | empty (`tpg-settings`) | Override: `none`, `azure`, `standalone` |
 | `backupEnableSSL` | `Boolean` | no | `false` | `enableSSL` of the instances' `PostgresBackupLocation`: `false` uses HTTP to Azure Blob (the storage account must accept HTTP, Terraform `backup_storage_https_only = false`); `true` uses HTTPS and writes a CA bundle as `caBundle` (the two inputs below, else `tpg-settings` `backupCaBundle` from Terraform) |
 | `disableInitialBackup` | `Boolean` | no | `false` | `true` writes the annotation `sql.tanzu.vmware.com/skip-initial-backup: "true"` on the new Postgres objects, so the operator takes no initial backup at creation (Round 22; the first backup then comes from the schedule or tpg-backup). Only new instances: a running instance is not changed. The 4.5 CRDs and documentation do not list this annotation: confirm in the lab that the operator honours it (HANDOFF, lab items) |
 | `backupCaBundleFile` | `List (one file path)` | no | | `backupEnableSSL=true`: the CA bundle, a PEM file (`.pem`, `.crt`, `.cer`) of the submitting machine (its contents in `patchFiles`) or `repo:ca-bundles/<file>` in the fleet repository. Not with `backupCaBundleVaultSecret`; a `clusterMap` key of the instance or its cluster wins (section 14) |
@@ -491,13 +491,13 @@ The operator step waits until the Postgres CRDs are Established and the operator
 | `postgresValuesOverlayFilePath` | `List (one file path)` | no | | New instances (Round 22; was `postgresValuesPatchFilePath`): a tpg-instance chart values file (section 7), a local path or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>` |
 | `operatorValuesOverlayFilePath` | `List (one file path)` | no | | The operator values overlay (Round 22; was `operatorValuesPatchFilePath`), applied when the run installs the operator (a local path or `repo:helm_artifacts/operator/overlays/<file>`). A running operator with another file is `BLOCKED` `OVERLAY_USE_TPG_PATCH` |
 | `patchFiles` | `Map (JSON)` | no | | The contents of the local files the path inputs and `clusterMap` name, `{"<path as given>": "<base64>"}`. Written by `scripts/submit/pack-patch-files.sh -o <parameter file>` (section 7), never typed |
-| `exposure` | `Enum` | no | `clusterIP` | Read-write Service of each instance: `clusterIP` (inside the cluster), `internalLoadBalancer` (Azure internal load balancer, an IP of the cluster VNet) or `loadBalancer` (public IP) |
+| `exposure` | `Enum` | no | empty (`clusterIP`) | Read-write Service of each instance: `clusterIP` (inside the cluster), `internalLoadBalancer` (Azure internal load balancer, an IP of the cluster VNet) or `loadBalancer` (public IP) |
 | `serviceAnnotations` | `Map` | no | | Extra annotations of the read-write Service, for example `{service.beta.kubernetes.io/azure-dns-label-name: orders}` |
-| `readOnlyExposure` | `Enum` | no | `clusterIP` | Read-only Service of an HA instance, same values |
+| `readOnlyExposure` | `Enum` | no | empty (`clusterIP`) | Read-only Service of an HA instance: `clusterIP`, `internalLoadBalancer` or `loadBalancer` |
 | `readOnlyServiceAnnotations` | `Map` | no | | Extra annotations of the read-only Service |
 | `allowedSourceRanges` | `List (CIDRs)` | no | | Client ranges a load balancer accepts (annotation `service.beta.kubernetes.io/azure-allowed-ip-ranges`) |
 | `internalLoadBalancerSubnet` | `String (Azure name)` | no | | `internalLoadBalancer`: subnet of the cluster VNet for the load balancer IP (empty: the node subnet) |
-| `networkPolicy` | `Enum` | no | `none` | `none`, or `baseline`: default deny plus the flows the instance needs, then the rules below (section 9) |
+| `networkPolicy` | `Enum` | no | empty (`none`) | `none`, or `baseline`: default deny plus the flows the instance needs, then the rules below (section 9) |
 | `ingressFromNamespaces` | `List` | no | | `baseline`: namespaces whose pods may connect on 5432 |
 | `ingressFromPodLabels` | `Map` | no | | `baseline`: pod labels allowed on 5432, in `ingressFromNamespaces` or in any namespace |
 | `ingressFromCidrs` | `List (CIDRs)` | no | | `baseline`: client ranges allowed on 5432 (clients through a load balancer) |
@@ -506,13 +506,42 @@ The operator step waits until the Postgres CRDs are Established and the operator
 | `ferret` | `Boolean` | no | | `true`: a FerretDB (MongoDB wire protocol on 27017, PostgresFerretDocumentDB, Tech Preview) for each instance; `false`: none (removes it); empty: an existing instance keeps what it has. Needs Postgres 17.5 or later and the documentdb extension, which you prepare by hand (below) |
 | `ferretReplicas` | `Integer` | no | `1` | FerretDB read-write proxies (1 or more) |
 | `ferretReadOnlyReplicas` | `Integer` | no | `0` | FerretDB read-only proxies on the standby; above 0 needs `highAvailability=true` |
-| `ferretExposure` | `Enum` | no | `clusterIP` | FerretDB Services `ferretdb-rw-<instance>` and `ferretdb-ro-<instance>`: `clusterIP`, `internalLoadBalancer` or `loadBalancer`, with the instance's `allowedSourceRanges` and `internalLoadBalancerSubnet` |
+| `ferretExposure` | `Enum` | no | empty (`clusterIP`) | FerretDB Services `ferretdb-rw-<instance>` and `ferretdb-ro-<instance>`: `clusterIP`, `internalLoadBalancer` or `loadBalancer`, with the instance's `allowedSourceRanges` and `internalLoadBalancerSubnet` |
 | `ferretSecretName` | `String (name)` | no | `<instance>-app-user-db-secret` | Connection Secret of the read-write proxies (created by the operator with the instance) |
 | `ferretReadOnlySecretName` | `String (name)` | no | `<instance>-read-only-user-db-secret` | Connection Secret of the read-only proxies |
 | `maxParallel` | `Integer` | no | `2` | Clusters per batch after the canary |
 | `rolloutMode` | `Enum` | no | `canary` | `canary`, `batches` or `all` (section 2) |
 | `dryRun` | `Boolean` | no | `false` | Show the `fleet.yaml` change and run the pre-check only |
 | `syncTimeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `1800`, `3600` | Timeouts |
+
+<!-- BEGIN GENERATED: params-day0 -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-day0.schema.json` (also `params-day0.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-day0.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-day0.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-day0.schema.json
+# tpg-day0: A dry run on one cluster: validation, the fleet.yaml diff and the pre-check; nothing is written.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-day0.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-day0 --parameter-file params-day0.example.yaml --watch
+clusters: [aks-tpg-poc-01]
+instances: [orders-db]
+highAvailability: "true"
+readReplicas: "1"
+operatorVersion: v4.5.0
+postgresVersion: postgres-17.6
+pushMode: direct
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-day0 -->
 
 The pre-check is read-only and runs before anything is written to Git. A cluster that fails it is `BLOCKED`:
 
@@ -736,18 +765,18 @@ Adds Postgres instances to clusters that already run the fleet's operator (deplo
 | `backupCaBundleVaultSecret` | `String (name)` | no | | As tpg-day0: the CA bundle from Vault `tpg/ca-bundles/<name>` (section 14) |
 | `backupFullRetention` | `Integer` | no | template (`4`) | As tpg-day0 |
 | `backupFullRetentionType` | `Enum` | no | template (`count`) | As tpg-day0: `count` or `time` |
-| `exposure`, `readOnlyExposure` | `Enum` | no | `clusterIP` | As tpg-day0 |
+| `exposure`, `readOnlyExposure` | `Enum` | no | empty (`clusterIP`) | As tpg-day0: `clusterIP`, `internalLoadBalancer` or `loadBalancer` |
 | `serviceAnnotations`, `readOnlyServiceAnnotations` | `Map` | no | | As tpg-day0 |
 | `allowedSourceRanges` | `List (CIDRs)` | no | | As tpg-day0 |
 | `internalLoadBalancerSubnet` | `String (Azure name)` | no | | As tpg-day0 |
-| `networkPolicy` | `Enum` | no | `none` | As tpg-day0 (section 9) |
+| `networkPolicy` | `Enum` | no | empty (`none`) | As tpg-day0 (section 9): `none` or `baseline` |
 | `ingressFromNamespaces` | `List` | no | | As tpg-day0 |
 | `ingressFromPodLabels` | `Map` | no | | As tpg-day0 |
 | `ingressFromCidrs`, `egressToCidrs` | `List (CIDRs)` | no | | As tpg-day0 |
 | `egressToFqdns` | `List (host names)` | no | | As tpg-day0; needs ACNS |
 | `ferret` | `Boolean` | no | | As tpg-day0: a FerretDB for each new instance (Postgres 17.5 or later) |
 | `ferretReplicas`, `ferretReadOnlyReplicas` | `Integer` | no | `1`, `0` | As tpg-day0 |
-| `ferretExposure` | `Enum` | no | `clusterIP` | As tpg-day0 |
+| `ferretExposure` | `Enum` | no | empty (`clusterIP`) | As tpg-day0: `clusterIP`, `internalLoadBalancer` or `loadBalancer` |
 | `ferretSecretName`, `ferretReadOnlySecretName` | `String (name)` | no | | As tpg-day0 |
 | `postgresOverlayFilePath` | `List (file paths)` | no | | Files of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, merged into the new instance's objects (creation rules below; section 7). Renamed from `postgresPatchFilePath` in Round 22; local paths or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>` |
 | `postgresValuesOverlayFilePath` | `List (one file path)` | no | | A tpg-instance chart values file. Renamed from `postgresValuesPatchFilePath` in Round 22; a local path or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>` |
@@ -756,6 +785,33 @@ Adds Postgres instances to clusters that already run the fleet's operator (deplo
 | `rolloutMode` | `Enum` | no | `canary` | `canary`, `batches` or `all` (section 2) |
 | `dryRun` | `Boolean` | no | `false` | Validate, plan, pre-check and dry-run; push and deploy nothing |
 | `syncTimeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `1800`, `3600` | Per cluster, pull request |
+
+<!-- BEGIN GENERATED: params-create-instance -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-create-instance.schema.json` (also `params-create-instance.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-create-instance.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-create-instance.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-create-instance.schema.json
+# tpg-create-instance: A dry run: one single-node instance on one cluster.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-create-instance.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-create-instance --parameter-file params-create-instance.example.yaml --watch
+clusters: [aks-tpg-poc-01]
+instances: [reports-db]
+highAvailability: "false"
+postgresVersion: postgres-17.6
+pushMode: direct
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-create-instance -->
 
 The run, in order:
 
@@ -882,6 +938,32 @@ Upgrades the operator (`component=operator`) or Postgres instances (`component=p
 | `rolloutMode` | `Enum` | no | `canary` | `canary`, `batches` or `all` (section 2). With `allowMajor=true`, the approval pause comes before every batch after the first |
 | `dryRun` | `Boolean` | no | `false` | Record the planned upgrade (minor or major, current and target) per target |
 | `timeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `1800`, `3600` | Per cluster (operator) or per instance (Postgres) |
+
+<!-- BEGIN GENERATED: params-upgrade -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-upgrade.schema.json` (also `params-upgrade.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-upgrade.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-upgrade.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-upgrade.schema.json
+# tpg-upgrade: A dry run: the operator of one cluster.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-upgrade.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-upgrade --parameter-file params-upgrade.example.yaml --watch
+component: operator
+targetVersion: v4.5.1
+clusters: [aks-tpg-poc-01]
+pushMode: direct
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-upgrade -->
 
 Minor or major is detected per instance. Downgrades fail. Instances not selected are reported as `SKIPPED_NOT_SELECTED`. An operator upgrade requires every instance that exists on the cluster to be `Running`; an instance declared in `fleet.yaml` that does not exist on the cluster (never deployed, for example after a blocked tpg-day0) is left out with the warning `INSTANCE_NOT_DEPLOYED`. Only a NotFound answer counts as absent: any other error reading the instance (API timeout, permissions) fails the cluster with `CLUSTER_API_ERROR`. With `clusterMap`, every listed instance must be declared on its cluster, and on each cluster the operator is upgraded first; the Postgres part does not start on a cluster whose operator upgrade failed.
 
@@ -1032,6 +1114,33 @@ Only `current` is applied, so a new values or operator file must hold every over
 | `dryRun` | `Boolean` | no | `false` | Check, render, dry-run and print the diff; commit and sync nothing |
 | `timeoutSeconds` | `Integer` | no | `1800` | Per operator and per instance |
 | `prTimeoutSeconds` | `Integer` | no | `3600` | `pushMode=pr`: how long each cluster's pull request may wait for the merge before the cluster is synced back |
+
+<!-- BEGIN GENERATED: params-patch -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-patch.schema.json` (also `params-patch.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-patch.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-patch.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-patch.schema.json
+# tpg-patch: A dry run: remove the schedule documents of one instance (no files to pack).
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-patch.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-patch --parameter-file params-patch.example.yaml --watch
+clusters: [aks-tpg-poc-01]
+instances: [orders-db]
+patchMode: clear
+clearKinds: [PostgresBackupSchedule]
+pushMode: direct
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-patch -->
 
 The run, in order:
 
@@ -1185,6 +1294,32 @@ Sets the read replica count of the selected instances in `clusters/fleet.yaml` (
 | `dryRun` | `Boolean` | no | `false` | Record the change only |
 | `timeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `900`, `3600` | Per instance, pull request |
 
+<!-- BEGIN GENERATED: params-scale-instance -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-scale-instance.schema.json` (also `params-scale-instance.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-scale-instance.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-scale-instance.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-scale-instance.schema.json
+# tpg-scale-instance: A dry run: scale one instance to 2 read replicas.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-scale-instance.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-scale-instance --parameter-file params-scale-instance.example.yaml --watch
+clusters: [aks-tpg-poc-01]
+instances: [orders-db]
+replicas: "2"
+pushMode: direct
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-scale-instance -->
+
 An instance that is not declared on one of the listed clusters fails the run with `UNKNOWN_INSTANCE` before anything changes. `replicas=0` scales the instance down to a single node, as the 4.5 documentation does: `clusters/fleet.yaml` gets `enabled: false` and `readReplicas: 0`, and the chart renders no `highAvailability` block (design decision D72). It is refused with `FERRET_READONLY_NEEDS_HA` while the instance runs read-only FerretDB proxies (set `ferret.readOnlyReplicas` to 0 with a tpg-patch values file first). The sync removes `spec.highAvailability` from the live object only when Argo CD is the only field manager of those fields; when another manager (the operator) co-owns `enabled` and it stays `true`, the step applies `enabled: false` and `readReplicas: 0` with a server-side apply as field manager `tpg-scale` and records the warning `HA_FIELD_CO_OWNED` with the managers it found. When the new count gives an instance more database pods (1 + `replicas`) than its data pool has zones, the run warns `HA_NODES_EXCEED_ZONES` (section 4) and goes on.
 
 The plan step writes every count and cap in one commit. A cap is written after the counts: when the scale of an instance does not happen (not `Running`, for example) and the instance would be left above the new cap, the cap stays as it was (`MAX_BELOW_CURRENT` on `result.<cluster>.maxReadReplicas`). A run that only changes caps syncs nothing, because the cap is read by the workflows, not by the cluster. When a batch fails, the later batches do not run; the exit handler then gives every instance the rollout did not reach its previous `highAvailability` back in `clusters/fleet.yaml` (one commit) and records it `NOT_RUN`, so no later sync scales it unasked. Instances that ran keep what they got, as their result says.
@@ -1289,6 +1424,33 @@ A rule is rendered only for a non-empty input, and no peer list is ever empty: a
 | `dryRun` | `Boolean` | no | `false` | Plan and dry-run the policies on each cluster; push and sync nothing |
 | `timeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `900`, `3600` | Per cluster, pull request |
 
+<!-- BEGIN GENERATED: params-network-policy -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-network-policy.schema.json` (also `params-network-policy.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-network-policy.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-network-policy.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-network-policy.schema.json
+# tpg-network-policy: A dry run: the baseline policy for one instance, clients from the namespace orders-app.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-network-policy.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-network-policy --parameter-file params-network-policy.example.yaml --watch
+clusters: [aks-tpg-poc-01]
+instances: [orders-db]
+mode: apply
+ingressFromNamespaces: [orders-app]
+pushMode: direct
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-network-policy -->
+
 The run, in order:
 
 1. **Validate** the inputs and `clusterMap`.
@@ -1362,6 +1524,34 @@ The applications per cluster come from `apps` (JSON) or from `clusterMap`: the i
 | `finalBackup` | `Enum` | no | `true` | `true`, `false` or `required` (fail when the instance is not Running) |
 | `purgeBackups` | `Boolean` | no | `false` | `true` expires every PostgresBackup of each instance while it runs and, after the instance is gone, deletes every blob left under its container and `repoPath` (irreversible; needs `finalBackup=false`; a `repoPath` another PostgresBackupLocation on any registered cluster also uses is expired only, the blobs stay and the result says so). Also a `clusterMap` key per instance |
 | `timeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `1800`, `3600` | Timeouts |
+
+<!-- BEGIN GENERATED: params-delete-apps -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-delete-apps.schema.json` (also `params-delete-apps.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-delete-apps.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-delete-apps.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-delete-apps.schema.json
+# tpg-delete-apps: A dry run: the plan to remove one instance of one cluster, keeping its volumes and namespace.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-delete-apps.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-delete-apps --parameter-file params-delete-apps.example.yaml --watch
+clusters: [aks-tpg-poc-01]
+apps: '{"aks-tpg-poc-01": ["tpg-instances:orders-db"]}'
+confirm: [aks-tpg-poc-01]
+purgePvcs: "false"
+purgeNamespace: "false"
+pushMode: direct
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-delete-apps -->
 
 Order per cluster: instances (final backup, `fleet.yaml` removal, Application removal without cascade, Postgres objects, optional PVC and namespace purge), remaining Tanzu Postgres custom resources, operator (`fleet.yaml`, Application, leftover cluster-scoped objects, namespace `tanzu-postgres-operator`), CRDs. The Azure Blob backup repository is kept unless `purgeBackups` is true. With a `postgresVersion` key in `clusterMap`, an instance that runs another version is `SKIPPED_VERSION_MISMATCH` and kept.
 
@@ -1456,6 +1646,34 @@ Guarded delete of instances (the per-instance step that `tpg-delete-apps` uses).
 | `pushMode` | `Enum` | no | `direct` | `direct` or `pr` |
 | `timeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `1800`, `3600` | Per instance, pull request |
 
+<!-- BEGIN GENERATED: params-delete-instance -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-delete-instance.schema.json` (also `params-delete-instance.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-delete-instance.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-delete-instance.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-delete-instance.schema.json
+# tpg-delete-instance: No dryRun input. The least-impact run: one instance, a final backup, volumes and namespace kept.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-delete-instance.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-delete-instance --parameter-file params-delete-instance.example.yaml --watch
+clusters: [aks-tpg-poc-01]
+instances: [orders-db]
+confirm: [orders-db]
+finalBackup: "true"
+purgePvcs: "false"
+purgeNamespace: "false"
+pushMode: direct
+```
+
+<!-- END GENERATED: params-delete-instance -->
+
 An instance that is not declared on one of the listed clusters fails the run with `UNKNOWN_INSTANCE` before anything is deleted. The instance's FerretDB and its operator backup schedules (D70, D71) are deleted after the final backup and before the entry leaves `clusters/fleet.yaml`: FerretDB would lose its backend, and no scheduled backup may start during the delete. A run that stops earlier (a guard, a failed final backup) leaves both in place.
 
 ```bash
@@ -1501,6 +1719,30 @@ when a removed flag comes back.
 | `existingAddons` | `Enum` | no | `skip` | A release that exists with another chart version or other values: `skip` (report `SKIPPED_EXISTS`) or `upgrade` |
 | `dryRun` | `Boolean` | no | `false` | `helm upgrade --install --dry-run=server` |
 
+<!-- BEGIN GENERATED: params-helm-addons -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-helm-addons.schema.json` (also `params-helm-addons.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-helm-addons.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-helm-addons.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-helm-addons.schema.json
+# tpg-helm-addons: A dry run: cert-manager on one cluster.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-helm-addons.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-helm-addons --parameter-file params-helm-addons.example.yaml --watch
+clusters: [aks-tpg-poc-01]
+components: [cert-manager]
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-helm-addons -->
+
 Every component is classified before anything is installed, and the result is reported per release:
 
 | Status | Meaning |
@@ -1545,6 +1787,30 @@ Creates one `PostgresBackup` per selected instance and waits for it.
 | `clusterMap` | `Map` | no | | Instances per cluster, with `backupType` and `backupTimeoutSeconds` per instance (section 3) |
 | `scheduledOnly` | `Boolean` | no | `false` | `true` (used by the CronWorkflows): skip instances with `backup.scheduled: false` |
 | `backupTimeoutSeconds` | `Integer` | no | `10800` | Time to wait per backup |
+
+<!-- BEGIN GENERATED: params-backup -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-backup.schema.json` (also `params-backup.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-backup.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-backup.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-backup.schema.json
+# tpg-backup: No dryRun input. The least-impact run: a full backup of one instance.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-backup.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-backup --parameter-file params-backup.example.yaml --watch
+clusters: [aks-tpg-poc-01]
+instances: [orders-db]
+backupType: full
+```
+
+<!-- END GENERATED: params-backup -->
 
 The schedule is one full backup a week and an incremental one on the other days:
 
@@ -1658,6 +1924,38 @@ Restores Postgres instances from a list of pairs. Each pair is one restore: `sou
 | `patchFiles` | `Map (JSON)` | with a local `targetInstanceSpecFilePath` | | The contents of the local spec files; `scripts/submit/pack-patch-files.sh -o <parameter file>` writes it |
 | `restoreTimeoutSeconds`, `prTimeoutSeconds` | `Integer` | no | `7200`, `3600` | Timeouts: `restoreTimeoutSeconds` covers the restore phase of one pair (the wait for synced backups and for the PostgresRestore); waiting for the restored instance to run has its own timeout (1800 s) and the post-restore backup another; `prTimeoutSeconds` is the wait for a pull request (`pushMode=pr`) |
 
+<!-- BEGIN GENERATED: params-restore -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-restore.schema.json` (also `params-restore.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-restore.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-restore.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-restore.schema.json
+# tpg-restore: A dry run: one pair, a named backup restored into a new instance of the same namespace (dryRun is true by default; nothing changes).
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-restore.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file params-restore.example.yaml --watch
+clusterMap: |
+  - sourceClusterConfig:
+      aks-tpg-poc-01:
+        pg-orders-db:
+          orders-db:
+            sourceBackupName: orders-db-full-20260914000000
+    targetClusterConfig:
+      aks-tpg-poc-01:
+        pg-orders-db:
+          orders-db-restored: {}
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-restore -->
+
 Keys of a pair (`workflows/params/cluster-map-keys.yaml`, section `restore`; schema `workflows/params/schemas/clustermap-restore.schema.json`, example `clustermap-restore.example.yaml`):
 
 | Side | Key | Meaning |
@@ -1733,6 +2031,29 @@ The new value comes from a wrapping token (section 14), or for a CA bundle from 
 | `patchFiles` | `Map (JSON)` | with a local `caBundleFile` | | The contents of the file, written by `scripts/submit/pack-patch-files.sh -o` |
 | `clusters` | `List` | no | `all` | Registered clusters to verify, or `all` |
 | `maxParallel` | `Integer` | no | `5` | Clusters verified at the same time |
+
+<!-- BEGIN GENERATED: params-rotate-credential -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-rotate-credential.schema.json` (also `params-rotate-credential.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-rotate-credential.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-rotate-credential.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-rotate-credential.schema.json
+# tpg-rotate-credential: No dryRun input. The least-impact run: verify a value that was written in Vault by hand, on one cluster.
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-rotate-credential.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-rotate-credential --parameter-file params-rotate-credential.example.yaml --watch
+secretType: git-read
+clusters: [aks-tpg-poc-01]
+```
+
+<!-- END GENERATED: params-rotate-credential -->
 
 **What the step logs while it waits (Round 21).** Every wait prints each poll (number and elapsed seconds), the command it runs, and what it found, so a slow sync can be followed with `argo logs -f` and a stuck one diagnosed from the log alone:
 
@@ -2102,6 +2423,34 @@ Not both. `includeDependents: true` (with `backups`) is required to expire a bac
 | `dryRun` | `Boolean` | no | `true` | `true` records the plan (what would be expired, dependents included, what is `BLOCKED`) and changes nothing; `false` expires |
 | `confirm` | `List` | with `dryRun=false` | | The cluster names of `clusterMap`, for example `[aks-tpg-poc-01]` |
 | `timeoutSeconds` | `Integer` | no | `600` | How long to wait for the operator's answer to the expire of one backup |
+
+<!-- BEGIN GENERATED: params-backup-expire -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-backup-expire.schema.json` (also `params-backup-expire.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-backup-expire.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-backup-expire.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-backup-expire.schema.json
+# tpg-backup-expire: A dry run: the plan to expire one backup with its dependents (dryRun is true by default).
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-backup-expire.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-backup-expire --parameter-file params-backup-expire.example.yaml --watch
+clusterMap: |
+  aks-tpg-poc-01:
+    instances:
+      orders-db:
+        backups: [orders-db-full-202609010100]
+        includeDependents: true
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-backup-expire -->
 
 Results per instance: `SUCCEEDED` (`DRY_RUN` for the plan; `DECLINED_SOME` when `purgeBackups` ran and pgBackRest declined some), `BLOCKED` (`HAS_DEPENDENTS`), `FAILED` (`UNKNOWN_BACKUP`, `NOT_EXPIRABLE`, `INSTANCE_NOT_RUNNING`, `OPERATION_IN_PROGRESS`, `BACKUP_EXPIRE_DECLINED`: a backup you named, or a dependent of it, was declined; the detail is the operator's message and the later backups are not attempted), `TIMEOUT`. Lab item: how the operator reports an expire, and what it does when pgBackRest refuses (for example the last full backup), is a lab item of Round 23 (verify it on the lab cluster). Two points of the guess: (1) an object the operator keeps after an expire (phase `Expired` or `Expiring`, or any PostgresBackup with `spec.expire=true`) is not an unfinished operation, so it never makes a later backup, restore, scale or delete fail with `OPERATION_IN_PROGRESS`; (2) only conditions written after this run's patch count as the answer: with `observedGeneration`, it must be at least `metadata.generation`; without it, `lastTransitionTime` must not be older than the patch (less 2 minutes for clock skew), and with neither field the condition counts only when this run set `spec.expire`. So on a re-run where `spec.expire` is already `true` an old `Expired=False` is not read as a refusal; without a fresh signal the step waits and times out like for any expire (`TIMEOUT`). Both depend on how the operator really writes status; confirm them together with the rest of this item.
 

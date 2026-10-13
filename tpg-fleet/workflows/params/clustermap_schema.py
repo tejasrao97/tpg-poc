@@ -550,7 +550,8 @@ def main():
     if os.path.isdir(OUT_DIR):
         for f in os.listdir(OUT_DIR):
             p = os.path.join(OUT_DIR, f)
-            if p not in expected:
+            # params-W.* belong to params_schema.py (Round 23, phase 7a)
+            if p not in expected and not f.startswith("params-"):
                 stale.append(p + " (no longer generated)")
                 if not args.check:
                     os.remove(p)
