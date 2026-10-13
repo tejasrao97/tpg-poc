@@ -79,7 +79,11 @@ backup:
   # required" off on a pre-created account (the preflight checks it). Set it per
   # cluster (clusters.<cluster>.backup.enableSSL) or per instance
   # (clusters.<cluster>.instances.<instance>.backup.enableSSL) in
-  # clusters/fleet.yaml, or with the tpg-day0 input backupEnableSSL. It is
+  # clusters/fleet.yaml, or with the tpg-day0 input backupEnableSSL. tpg-day0
+  # and tpg-create-instance write the value per instance (false unless the
+  # input or the clusterMap key backupEnableSSL says true), so a cluster-level
+  # true does not reach the instances they create, and a tpg-day0 re-run writes
+  # it again (Round 23). It is
   # always written, so the operator sees the value that was chosen; the
   # tpg-instances ApplicationSet ignores the field because the CRD drops false
   # when the operator writes the object back.

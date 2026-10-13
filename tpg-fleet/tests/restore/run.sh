@@ -1725,6 +1725,33 @@ mk c1/pg-orders/orders-db '' c2/pg-dr/orders-dr "$LATEST"; yq -i '.clusters.c1.i
 RC=0; OUT="$(cd "$TMP" && env P_DRY_RUN=true P_PAIR="$PJ" bash "$TMP/restore-pair-crash.sh" tpg-restore-x 2>&1)" || RC=$?
 expect "an unexpected failure in a helper: FAILED/UNEXPECTED_ERROR with the script and line" FAILED UNEXPECTED_ERROR "restore-pair-crash.sh exited 7"
 
+echo "== 9. docs/workflow-commands.md section 16 names every reason restore-pair.sh records, and only reasons the scripts know"
+DOC="$ROOT/docs/workflow-commands.md"
+SEC16="$(awk '/^## 16\. tpg-restore/{f=1; next} /^## 17\./{f=0} f' "$DOC")"
+TABLE="$(printf '%s\n' "$SEC16" | awk '/^### Reasons the restore records/{f=1; next} /^### /{f=0} f')"
+if [[ -z "$TABLE" ]]; then bad "section 16 of the docs has no 'Reasons the restore records' table"; else
+  missing=""
+  # every code the script passes to fail, block or warn (the placeholders REASON and CODE are the helpers' own parameters)
+  for code in $(grep -oE '\b(fail|block|warn) [A-Z][A-Z_]{3,}' "$ROOT/workflows/scripts/restore-pair.sh" | awk '{print $2}' | sort -u | grep -vxE 'REASON|CODE'); do
+    printf '%s\n' "$TABLE" | grep -q "\`${code}\`" || missing="${missing} ${code}"
+  done
+  # the codes record() writes directly
+  for code in INVALID_PAIR SKIPPED_IN_PROGRESS TIMEOUT DRY_RUN UNEXPECTED_ERROR; do
+    printf '%s\n' "$TABLE" | grep -q "\`${code}\`" || [[ "$code" == DRY_RUN ]] || missing="${missing} ${code}"
+  done
+  # the validate step's own code
+  printf '%s\n' "$TABLE" | grep -q '`IN_PLACE_NOT_ALLOWED`' || missing="${missing} IN_PLACE_NOT_ALLOWED"
+  [[ -z "$missing" ]] && ok "every reason of restore-pair.sh is in the table of section 16" || bad "section 16 lacks the reasons:${missing}"
+  unknown=""
+  for code in $(printf '%s\n' "$TABLE" | awk -F'|' 'NF > 3 {print $2}' | grep -oE '`[A-Z][A-Z_<>]+`' | tr -d '`' | sort -u); do
+    case "$code" in
+      TARGET_POD_\<REASON\>) code=TARGET_ ;;
+    esac
+    grep -qE "\b${code}" "$ROOT/workflows/scripts/restore-pair.sh" "$ROOT/workflows/scripts/validate-params.sh" || unknown="${unknown} ${code}"
+  done
+  [[ -z "$unknown" ]] && ok "every reason of the table of section 16 is written by restore-pair.sh or the validate step" || bad "the table of section 16 names reasons no script writes:${unknown}"
+fi
+
 echo
 echo "tests/restore: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

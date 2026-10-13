@@ -29,6 +29,9 @@ backup:
   # storage account must accept HTTP: Terraform backup_storage_https_only =
   # false), true uses HTTPS. Override per cluster or per instance under backup in
   # fleet.yaml, or with the tpg-day0 and tpg-create-instance input backupEnableSSL.
+  # Those workflows write the value per instance (false unless the input or the
+  # clusterMap key says true), so true here does not reach the instances they
+  # create: set the input or the key (Round 23).
   # With true, the workflows also write backup.caBundle (the storage account's
   # root CAs from tpg-settings backupCaBundle); the chart refuses true without it.
   enableSSL: false

@@ -54,8 +54,9 @@ An instance restored by tpg-restore (`instance.restored: true` in its entry) is 
 over the restore-patch and over the entry's later changes, so a patch is the way to change a restored
 instance's Postgres beyond the scale and upgrade workflows. tpg-patch never touches the restore-patch
 (it also patches other kinds, and the restore-patch stays the initial source of truth); the `instance:`
-keys of a **values** patch do not reach the Postgres of a restored instance, and a values patch cannot
-set `instance.restored` or `restorePatch`.
+keys of a **values** patch do not reach the Postgres of a restored instance: tpg-patch refuses a values
+patch that sets one for such an instance (`PATCH_REFUSED`, `RESTORED_VALUES_PATCH`), and a values patch
+cannot set `instance.restored` or `restorePatch`.
 
 tpg-patch refuses a file of the wrong kind (a Postgres manifest passed as values,
 and the reverse), unknown keys and fields, a second document for one object, fields

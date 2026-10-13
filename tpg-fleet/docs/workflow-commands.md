@@ -91,7 +91,7 @@ tpg-scale-instance: cluster is not an input of tpg-scale-instance. See docs/work
 | `Map` | YAML or JSON (section 3) | `{"aks-tpg-poc-01": {"instances": {"orders-db": {"replicas": 2}}}}` |
 | `Map (JSON)` | A JSON object | `{"aks-tpg-poc-01": ["tpg-operator"]}` |
 
-**List syntax** (Round 23; lists were comma-separated strings before). Every `List` input is written in brackets, also with one value: `[aks-tpg-poc-01]`, `[a, b]` (a YAML flow list) or `["a", "b"]` (a JSON array). Only two words stay bare: `all` where the table of the workflow says so, and `auto` for `components`. These are refused, with the list syntax and a corrected form (`Did you mean [a, b]?`) in the message: a comma-separated string without brackets (`a,b`), a bare name (`orders-db`), `[]`, an empty element (`[a, , b]`), a nested list and `all` inside brackets (`[a, all]`). The admission policy refuses them when the run is submitted, the `validate` step again for a run created another way, and one parser reads every list: the inputs, the list values of `clusterMap` (YAML sequences, section 3), the prompts of the submit scripts (they take plain names and send the bracketed form) and `pack-patch-files.sh`. A single-file input (`List (one file path)`) is a list of exactly one path.
+**List syntax** (Round 23; lists were comma-separated strings before). Every `List` input is written in brackets, also with one value: `[aks-tpg-poc-01]`, `[a, b]` (a YAML flow list) or `["a", "b"]` (a JSON array). Only two words stay bare: `all` where the table of the workflow says so, and `auto` for `components`. These are refused, with the list syntax and a corrected form (`Did you mean [a, b]?`) in the message: a comma-separated string without brackets (`a,b`), a bare name (`orders-db`), `[]`, an empty element (`[a, , b]`), a nested list and `all` inside brackets (`[a, all]`). The admission policy refuses them when the run is submitted, the `validate` step again for a run created another way, and one parser reads every list (`clustermap.py list`, `list_items` in the shell scripts): the inputs, the list values of `clusterMap` (YAML sequences, section 3) and the paths that `pack-patch-files.sh` packs. The submit scripts take plain names at their prompts and send the bracketed form. A single-file input (`List (one file path)`) is a list of exactly one path.
 
 A file path has one more rule. YAML reads `repo: helm_artifacts/x.yaml` (a space after the colon) as a mapping and not as text, so `[repo: x.yaml]` is a list of one mapping, and a path with a space in it is no path. Both fail with `repo:<file path> "check for white spaces in between"`. That message is for whitespace and `repo: path` map entries only. Every other malformed path keeps the message that names the input and the fix: a file that is not `.yaml` or `.yml` (CA bundles: `.pem`, `.crt`, `.cer`), a `repo:` path with `..` or outside the folder the input accepts (for example `targetInstanceSpecFilePath` takes `repo:helm_artifacts/instance/tpg-instance/restore-specs/<file>` only), a per-cluster copy the workflows write themselves, a local file whose contents are not in `patchFiles`.
 
@@ -99,9 +99,9 @@ Inputs used by several workflows:
 
 | Common input | Type | Values | Used by |
 |---|---|---|---|
-| `clusters` | `List` | Registered clusters, or `all` where accepted | every workflow except restore |
+| `clusters` | `List` | Registered clusters, or `all` where accepted | every workflow except restore and backup-expire |
 | `instances` | `List` | Declared instances, or `all` where accepted (new instances for create-instance) | day0, create-instance, upgrade, patch, scale, network-policy, backup, delete-instance |
-| `clusterMap` | `Map` | Targets with per-cluster and per-instance values (section 3); replaces `clusters` and `instances`. tpg-restore takes a list of pairs instead (`List (pairs)`, section 16) | day0, create-instance, upgrade, patch, scale, network-policy, backup, delete-instance, delete-apps, restore |
+| `clusterMap` | `Map` | Targets with per-cluster and per-instance values (section 3); replaces `clusters` and `instances`. tpg-restore takes a list of pairs instead (`List (pairs)`, section 16) | day0, create-instance, upgrade, patch, scale, network-policy, backup, delete-instance, delete-apps, backup-expire (the only target input), restore |
 | `pushMode` | `Enum` | `direct`: push the `clusters/fleet.yaml` change to the fleet branch. `pr`: push a branch, open a GitHub pull request and continue once it is merged (`prTimeoutSeconds`, default 3600). tpg-patch syncs the pull request branch before the merge (section 7) | day0, create-instance, upgrade, patch, scale, network-policy, delete-apps, delete-instance, restore |
 | `dryRun` | `Boolean` | `true`: validate and record the plan; change nothing (tpg-restore and tpg-backup-expire: `true` is the default) | day0, create-instance, upgrade, patch, scale, network-policy, delete-apps, helm-addons, backup-expire, restore |
 | `rolloutMode` | `Enum` | `canary` (default): the wave-0 cluster alone, then the other waves in batches of `maxParallel`. `batches`: no canary, batches of `maxParallel` in wave order. `all`: every selected cluster in one batch. tpg-restore: the unit is a pair of `clusterMap` and the default is `all` (section 16) | day0, create-instance, upgrade, patch, network-policy, restore |
@@ -134,7 +134,7 @@ How the values are written:
 - **A list input**: a YAML sequence (preferred), `clusters: [aks-tpg-poc-01, aks-tpg-poc-02]`, or the quoted bracketed string, `clusters: '[aks-tpg-poc-01, aks-tpg-poc-02]'`. The argo CLI sends a sequence as its JSON text, `["aks-tpg-poc-01","aks-tpg-poc-02"]` (verified with argo 4.1.3), which the workflow reads as the same list. `all` and `auto` stay plain words (`clusters: all`). An empty sequence is refused.
 - **`clusterMap` and the other Map inputs** are strings, written as a block: `clusterMap: |` and the map indented below it (the map itself is checked by the `clustermap-<workflow>` schema, section 3). A YAML mapping in place of the block is refused by the schema. `patchFiles` is written by `scripts/submit/pack-patch-files.sh -o <parameter file>`, never typed.
 - **Quote versions, quantities and Booleans** (YAML 1.1). Argo reads the file as YAML, which turns an unquoted number into a number before the workflow sees it: `postgresVersion: 17.10` arrives as `17.1` (a different PostgreSQL release) and `1.0` as `1`. Write a version that is a bare number and a decimal quantity as strings, `postgresVersion: "17.10"`, `storageSize: "0.5"`. `postgres-17.10`, `v4.5.1`, `20Gi` and `500m` are strings already, and a whole number (`cpu: 2`, `maxParallel: 3`) is exact. Write Booleans as `"true"` and `"false"`, as the generated examples do: YAML 1.1 readers also take `yes`, `no`, `on` and `off` for Booleans, and the workflow accepts `true` and `false` only. The generated schemas refuse an unquoted version or decimal, because after the YAML reader has changed `17.10` into `17.1` nothing can tell the two apart; they accept the YAML booleans `true` and `false` and whole numbers. `-p name=value` on the command line is always a string and has no such problem.
-- **Set an input in one place.** With an input in the file and in a `-p`, argo 4.1.3 puts both into the Workflow (the input is listed twice, the `-p` value first) and the `-p` does not replace the file's value: the run takes the value of the file, not the one you typed. Use `-p` for inputs the file does not set (the examples submit a file without `dryRun` with `-p dryRun=true`), or change the file. `tests/params` fails a command of this page that does this.
+- **Set an input in one place.** With an input in the file and in a `-p`, argo 4.1.3 puts both into the Workflow (the input is listed twice, the `-p` value first): the `-p` does not replace the file's value, and the run is not guaranteed to use the one you typed. Use `-p` for inputs the file does not set (the examples submit a file without `dryRun` with `-p dryRun=true`), or change the file. `tests/params` fails a command of this page that does this.
 
 ---
 
@@ -575,7 +575,7 @@ The pre-check is read-only and runs before anything is written to Git. A cluster
 |---|---|
 | `FOREIGN_OPERATOR`, `FOREIGN_CRD` | An operator Deployment or a Postgres CRD exists that the cluster's operator Application (`tpg-<cluster>-operator`) does not manage. The operator Deployment (found by its label `app=postgres-operator` or by its image) is ours when its Argo CD tracking annotation names that Application. A CRD is ours when the Application lists it in its resource list or its annotation names it, because the CRDs, installed from the chart's `crds/` directory, carry no annotation. A cluster the fleet deployed is `MANAGED`, never foreign |
 | `INSTANCE_NAME_IN_USE` | A Postgres of a requested name exists that its instance Application does not manage |
-| `NAMESPACE_SECRET_CONFLICT` | The namespace of a requested instance already has a Secret `regsecret` or `backup-storage` that the fleet does not manage (neither created by a VaultStaticSecret that an Application `tpg-<cluster>-*` tracks nor tracked by such an Application itself); Vault Secrets Operator would overwrite it. Rename that Secret or choose another namespace with the `namespace` key. Only NotFound counts as "no such Secret"; any other answer (Forbidden, a timeout) blocks with `CLUSTER_API_ERROR` |
+| `NAMESPACE_SECRET_CONFLICT` | Round 23: the namespace of a requested instance already has a Secret `regsecret` or `backup-storage` that the fleet does not manage (neither created by a VaultStaticSecret that an Application `tpg-<cluster>-*` tracks nor tracked by such an Application itself); Vault Secrets Operator would overwrite it. Rename that Secret or choose another namespace with the `namespace` key. Only NotFound counts as "no such Secret"; any other answer (Forbidden, a timeout) blocks with `CLUSTER_API_ERROR` |
 | `VERSION_NOT_AVAILABLE` | A requested Postgres version is not offered by the running operator (`kubectl get postgresversion`) |
 | `AZURE_BACKUP_UNSUPPORTED` | The PostgresBackupLocation CRD on the target has no `spec.storage.azure` (or no `caBundle` for `backupEnableSSL=true`). The 4.5 documentation lists S3 and GCS only; the workflows rely on the live CRD |
 | `PGDATA_POOL_NOT_HA_CAPABLE` | `highAvailability=true` and the pool labelled `tpg.fleet/pool=postgres` has fewer than 3 Ready nodes across zones 1, 2 and 3 |
@@ -781,7 +781,7 @@ argo submit --from workflowtemplate/tpg-day0 --parameter-file day0-orders.yaml -
 
 ## 5. tpg-create-instance
 
-Adds Postgres instances to clusters that already run the fleet's operator (deployed by tpg-day0). Each cluster can get its own instances and values (`clusterMap`), or every listed instance goes to every listed cluster. The instance inputs are those of tpg-day0; postgres patch files and a values patch file can be given as well (paths of the machine that submits the run, their contents in `patchFiles`, or `repo:` files of the fleet repository, as for tpg-patch, section 7) and shape the instance from its first render. The postgres files are combined into `helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml`, the values file is stored as `helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml`, and both are recorded as the instance's current patches. The operator, the add-ons and instances that already run are not touched.
+Adds Postgres instances to clusters that already run the fleet's operator (deployed by tpg-day0). Each cluster can get its own instances and values (`clusterMap`), or every listed instance goes to every listed cluster. The instance inputs are those of tpg-day0; postgres patch files and a values patch file can be given as well (paths of the machine that submits the run, their contents in `patchFiles`, or `repo:` files of the fleet repository, as for tpg-patch, section 7) and shape the instance from its first render. The postgres files are combined into `helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml`, the values file is stored as `helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml`, and both are recorded as the instance's current patches. The operator, the add-ons and instances that already run are not touched. Each new instance runs in `pg-<instance>` or in the `namespace` of its `clusterMap` entry (Round 23; immutable, reserved names refused, instances may share a namespace: section 4, Namespace).
 
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
@@ -866,7 +866,7 @@ The run, in order:
 | `SUCCEEDED` `ALREADY_EXISTS` | Declared in `fleet.yaml` and running with the requested values: nothing changed, so a re-run is safe |
 | `BLOCKED` `INSTANCE_EXISTS` | It runs with other values or another version: use tpg-patch, tpg-scale-instance or tpg-upgrade |
 | `BLOCKED` `INSTANCE_NAME_IN_USE` | A Postgres of that name runs but is not declared in `fleet.yaml` |
-| `BLOCKED` `INSTANCE_RESTORED` | The instance was restored by tpg-restore (`instance.restored`): use tpg-scale-instance, tpg-upgrade `component=postgres` or tpg-patch |
+| `BLOCKED` `INSTANCE_RESTORED` | Round 23: the instance was restored by tpg-restore (`instance.restored`): use tpg-scale-instance, tpg-upgrade `component=postgres` or tpg-patch |
 | `BLOCKED` `OVERLAY_REFUSED` | An overlay file (Round 22; `PATCH_REFUSED` before) breaks a creation rule (the detail names the file and the field), or a `repo:` file is not on the fleet branch |
 | `BLOCKED` `RENDER_FAILED`, `DRY_RUN_REJECTED` | The chart cannot render the instance, or the API server or the operator's webhooks refuse it |
 
@@ -1473,7 +1473,7 @@ argo submit --from workflowtemplate/tpg-scale-instance -p pushMode=direct -p rep
 
 ## 9. tpg-network-policy
 
-Creates, changes or removes the network policy of Postgres instances. The rules are written to `clusters/fleet.yaml` (`clusters.<c>.instances.<i>.network`) and rendered by the tpg-instance chart, so Argo CD owns the two objects in the namespace of the instance (`instance.namespace`, default `pg-<instance>`) like the rest of the instance. Both are named after the instance and select its pods by the label `postgres-instance=<instance>`, so instances that share a namespace each have their own pair:
+Creates, changes or removes the network policy of Postgres instances. The rules are written to `clusters/fleet.yaml` (`clusters.<c>.instances.<i>.network`) and rendered by the tpg-instance chart, so Argo CD owns the two objects in the namespace of the instance (`instance.namespace`, default `pg-<instance>`) like the rest of the instance. Both are named after the instance and select its pods by the label `postgres-instance=<instance>` (Round 23; before, one pair `tpg-ingress` and `tpg-egress` covered every pod of the namespace), so instances that share a namespace each have their own pair:
 
 - **NetworkPolicy `tpg-ingress-<instance>`** (the pods of the instance): selecting the pods makes ingress default deny.
 - **CiliumNetworkPolicy `tpg-egress-<instance>`** (the endpoints of the instance): an egress section makes egress default deny. AKS runs Azure CNI powered by Cilium (Terraform `network_policy = "cilium"`), which enforces both kinds and adds up their allow rules.
@@ -1612,7 +1612,7 @@ The applications per cluster come from `apps` (JSON) or from `clusterMap`: the i
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
 | `clusters` | `List` | yes, without `clusterMap` | | Registered clusters to clean up |
-| `apps` | `Map (JSON)` | yes, without `clusterMap` | | Cluster to list of `tpg-instances`, `tpg-instances:<i>` (one element per instance: `"tpg-instances:orders-db", "tpg-instances:billing-db"`, never `tpg-instances:orders-db,billing-db`), `tpg-operator`. Every cluster in `clusters` needs an entry |
+| `apps` | `Map (JSON)` | yes, without `clusterMap` | | Cluster to list of `tpg-instances`, `tpg-instances:<i>` (Round 23: one element per instance, `"tpg-instances:orders-db", "tpg-instances:billing-db"`, never `tpg-instances:orders-db,billing-db`), `tpg-operator`. Every cluster in `clusters` needs an entry |
 | `clusterMap` | `Map` | no | | Instances per cluster, `deleteOperator` and `force` per cluster, `finalBackup`, `purgePvcs`, `purgeNamespace` and `purgeBackups` per instance (section 3) |
 | `confirm` | `List` | yes | | Repeat the cluster names (`clusters`, or the clusters of `clusterMap`) |
 | `dryRun` | `Boolean` | no | `true` | `true` records the plan; `false` deletes (set `false` explicitly to delete) |
@@ -2487,6 +2487,37 @@ argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file restore
 argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file restore-pitr.yaml -p dryRun=false --watch
 ```
 
+Example 2 with a spec file: a named backup restored onto another cluster as an instance with the spec of a file of your machine (`targetInstanceSpecFilePath`, which `pack-patch-files.sh -o` packs into `patchFiles`; a `repo:helm_artifacts/instance/tpg-instance/restore-specs/<file>` needs no packing). The file is the spec of the restored Postgres, one `kind: Postgres` document:
+
+```yaml
+# ./orders-dr.yaml, on your machine
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  postgresVersion:
+    name: postgres-17.6
+  highAvailability:
+    enabled: false
+```
+
+```yaml
+# restore-spec.yaml
+clusterMap: |
+  - sourceClusterConfig:
+      aks-tpg-poc-01:
+        pg-orders-db:
+          orders-db: {sourceBackupName: orders-db-full-20260914000000}
+    targetClusterConfig:
+      aks-tpg-poc-02:
+        pg-orders-dr:
+          orders-db-dr: {targetInstanceSpecFilePath: [./orders-dr.yaml]}
+```
+
+```bash
+<tpg-fleet clone>/scripts/submit/pack-patch-files.sh -o restore-spec.yaml
+argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file restore-spec.yaml --watch
+```
+
 **More commands.** An in-place restore of a named backup (the cluster needs `allowInPlaceRestore: true`; `confirm` repeats the instance name and is needed for the real run only):
 
 ```bash
@@ -2626,7 +2657,7 @@ argo submit -n argo --from workflowtemplate/tpg-rotate-credential -p secretType=
 
 ## 18. Interactive submit scripts
 
-`scripts/submit/tpg-<workflow>.sh` starts a workflow without composing the `argo submit` line by hand: one script per WorkflowTemplate (12). Each script reads the inputs, defaults, allowed values and descriptions from `workflows/templates/<template>.yaml` and the types from `workflows/params/types.yaml`, so it stays in step with the template.
+`scripts/submit/tpg-<workflow>.sh` starts a workflow without composing the `argo submit` line by hand: one script per workflow (13 since Round 23, which added `tpg-backup-expire.sh`; `tpg-restore.sh` builds the list of pairs). Each script reads the inputs, defaults, allowed values and descriptions from `workflows/templates/<template>.yaml` and the types from `workflows/params/types.yaml`, so it stays in step with the template.
 
 1. The targets first: `clusterMap` or the lists, where the workflow takes both. `clusterMap` can be built step by step (the registered clusters are listed from the hub, then the instances declared in your `clusters/fleet.yaml`, then the keys the workflow accepts, with their types), loaded from a file, or pasted. It is checked with the same `clustermap.py` as the `validate` step.
 2. The mandatory inputs, each with its type and an example. A value that does not match its type is refused with the reason and asked again. A list input takes plain names (`aks-tpg-poc-01, aks-tpg-poc-02`) and a single-file input one path: the script sends them in brackets (`[aks-tpg-poc-01, aks-tpg-poc-02]`, `[./ca.pem]`), the form the hub requires; `all` and `auto` stay bare.

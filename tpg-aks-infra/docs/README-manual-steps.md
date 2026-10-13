@@ -1575,6 +1575,8 @@ FAIL verify found 1 issue(s); fix them and re-run: scripts/run.sh ... --only ver
 
 or `All checks passed on the hub aks-tpg-hub and 3 target cluster(s).` The descriptions come from the checks; the layout is as above.
 
+Round 23: when `FLEET_LOCAL_DIR` points at the tpg-fleet clone, verify also reads `clusters/fleet.yaml` of that clone and checks every instance declared for a target in its namespace (`instance.namespace`, default `pg-<instance>`). A reserved namespace (the list `reserved` and `reservedPrefixes` of `namespace` in `workflows/params/cluster-map-keys.yaml`) is an issue, and so is a namespace in which not exactly one instance renders the shared Secrets (`instance.sharedSecretsOwner`); a namespace or a Postgres that does not exist yet is an advisory warning, because tpg-day0 and tpg-create-instance create them. The templates it requires are `tpg-lib` and the thirteen workflows, `tpg-backup-expire` and `tpg-restore` included.
+
 ```bash
 kubectl --context $HUB -n argocd rollout status deploy/argocd-server --timeout=10s
 kubectl --context $HUB -n argocd get cm argocd-cm -o jsonpath='{.data.accounts\.workflow-bot}'; echo
@@ -1586,7 +1588,7 @@ kubectl --context $HUB -n argocd get application tpg-hub-workflows -o jsonpath='
 kubectl --context $HUB get validatingadmissionpolicy tpg-workflow-parameters tpg-application-sync tpg-credential-writer
 kubectl --context $HUB get validatingadmissionpolicybinding tpg-workflow-parameters tpg-application-sync tpg-credential-writer
 kubectl --context $HUB -n argo get serviceaccount tpg-workflow tpg-credential-writer
-kubectl --context $HUB -n argo get workflowtemplate tpg-patch tpg-create-instance tpg-network-policy
+kubectl --context $HUB -n argo get workflowtemplate tpg-patch tpg-create-instance tpg-network-policy tpg-backup-expire tpg-restore
 kubectl --context $HUB -n argo get cm tpg-settings -o jsonpath='{.data.backupCaBundle}' | grep -c 'BEGIN CERTIFICATE'
 kubectl --context $HUB -n argo get cm tpg-settings -o jsonpath='{.data.acnsEnabled}'; echo
 kubectl --context $HUB -n argocd get cm argocd-rbac-cm -o yaml > /tmp/rbac-cm.yaml   # RBAC deny block (argocd CLI)
@@ -1642,7 +1644,7 @@ argo submit -n argo --from workflowtemplate/tpg-day0 \
   -p dryRun=true --watch
 ```
 
-See `tpg-fleet/docs/workflow-commands.md` for every workflow command.
+See `tpg-fleet/docs/workflow-commands.md` for every workflow command: each workflow section has a parameter-file schema and two worked examples with their `argo submit` commands (Round 23).
 
 ---
 
@@ -1672,6 +1674,7 @@ kubectl --context $HUB -n monitoring get secret grafana-admin -o jsonpath='{.dat
 # Postgres instances and their credentials
 for c in $TARGETS; do
   kubectl --context $c get postgres -A
+  # pg-orders-db is the default namespace of orders-db; an instance may have another (clusterMap key namespace, Round 23)
   kubectl --context $c -n pg-orders-db get secret orders-db-db-secret -o jsonpath='{.data.password}' | base64 -d; echo
 done
 ```

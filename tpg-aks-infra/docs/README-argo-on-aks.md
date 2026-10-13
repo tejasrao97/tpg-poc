@@ -452,6 +452,8 @@ argo submit -n argo --from workflowtemplate/tpg-day0 \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct -p dryRun=true --watch
 ```
 
+Every list input is written in brackets (`'instances=[orders-db]'`; Round 23), and `tpg-fleet/docs/workflow-commands.md` has a parameter-file schema and two worked examples for each workflow.
+
 ## 11. Troubleshooting
 
 | Symptom | Likely cause | Fix |

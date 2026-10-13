@@ -259,7 +259,7 @@ def check_file(label, t, path, overrides=()):
     merged = dict(params)
     for o in overrides:
         k, _, v = o.partition("=")
-        if k in params:   # argo 4.1.3 lists the input twice (the -p value first) and the run takes the file's value
+        if k in params:   # argo 4.1.3 lists the input twice (the -p value first); a -p does not replace the file's value
             bad(f"{label}: -p {k} repeats an input the parameter file sets; a -p does not override the file (set it in one place)")
             return
         merged[k] = v
