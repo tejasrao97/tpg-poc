@@ -2061,6 +2061,7 @@ argo submit --from cronwf/tpg-backup-full --watch
 
 ```bash
 # What exists, per instance
+# the namespace of orders-db is the default, pg-orders-db (an instance may have a namespace of its own, section 3)
 kubectl --context aks-tpg-poc-01 -n pg-orders-db get postgresbackup \
   -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,PHASE:.status.phase,STARTED:.status.timeStarted
 ```
