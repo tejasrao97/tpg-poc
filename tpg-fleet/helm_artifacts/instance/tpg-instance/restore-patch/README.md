@@ -1,7 +1,7 @@
 # Instance restore-patch files
 
 tpg-restore stores here the spec of every instance it restored into a **new** instance or **in place**
-(section 15 of `docs/workflow-commands.md`), so that the Argo CD render of the instance equals the
+(section 16 of `docs/workflow-commands.md`), so that the Argo CD render of the instance equals the
 Postgres object the restore made (Round 23). The chart reads the files itself (`.Files.Get`), so they
 must live inside the chart, and `.helmignore` must not list this folder.
 

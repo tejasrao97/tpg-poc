@@ -1,10 +1,12 @@
 # Workflow command reference
 
-Every tpg operation is an Argo Workflows `WorkflowTemplate` in the `argo` namespace on the hub. You start a run with the **argo CLI** (`argo submit --from workflowtemplate/<name>`). Argo CD does not start workflows: the workflows call the Argo CD API to refresh and sync Applications. The **argocd CLI** commands at the end of this page inspect what the workflows did; people cannot sync the tpg target Applications themselves (section 20).
+Every tpg operation is an Argo Workflows `WorkflowTemplate` in the `argo` namespace on the hub. You start a run with the **argo CLI** (`argo submit --from workflowtemplate/<name>`). Argo CD does not start workflows: the workflows call the Argo CD API to refresh and sync Applications. The **argocd CLI** commands at the end of this page inspect what the workflows did; people cannot sync the tpg target Applications themselves (section 21).
 
 Every input has a type (section 2). A Workflow whose inputs do not match their types is rejected when it is submitted, and no Workflow is created. Mandatory inputs have no default: a run without them fails in its first step (`validate`), which lists every missing or invalid input, including the registered cluster names.
 
-Every workflow can also be started with an interactive script, `scripts/submit/tpg-<workflow>.sh`, that asks for the mandatory inputs first and then offers the optional ones in a menu (section 17).
+Every workflow can also be started with an interactive script, `scripts/submit/tpg-<workflow>.sh`, that asks for the mandatory inputs first and then offers the optional ones in a menu (section 18).
+
+Round 23 added a parameter-file schema and two worked examples to every workflow section: the generated block after the input table (`workflows/params/schemas/params-<workflow>.schema.json`, `check-jsonschema`, the example file) and the examples that follow, each with its `argo submit` command (section 2, Parameter files). The restore is rebuilt around a list of source and target pairs (section 16), `tpg-backup-expire` is new (section 14), and an instance may have a namespace of its own (`namespace`, section 3).
 
 ## Contents
 
@@ -21,14 +23,14 @@ Every workflow can also be started with an interactive script, `scripts/submit/t
 11. [tpg-delete-instance](#11-tpg-delete-instance)
 12. [tpg-helm-addons](#12-tpg-helm-addons)
 13. [tpg-backup](#13-tpg-backup)
-14. [CA bundles and new credential values in Vault](#14-ca-bundles-and-new-credential-values-in-vault)
-15. [tpg-restore](#15-tpg-restore)
-16. [tpg-rotate-credential](#16-tpg-rotate-credential)
-17. [Interactive submit scripts](#17-interactive-submit-scripts)
-18. [Test data: pgdata](#18-test-data-pgdata)
-19. [Follow, approve, stop and clean up runs](#19-follow-approve-stop-and-clean-up-runs)
-20. [argocd CLI: inspect the sync steps behind the workflows](#20-argocd-cli-inspect-the-sync-steps-behind-the-workflows)
-21. [tpg-backup-expire](#21-tpg-backup-expire)
+14. [tpg-backup-expire](#14-tpg-backup-expire)
+15. [CA bundles and new credential values in Vault](#15-ca-bundles-and-new-credential-values-in-vault)
+16. [tpg-restore](#16-tpg-restore)
+17. [tpg-rotate-credential](#17-tpg-rotate-credential)
+18. [Interactive submit scripts](#18-interactive-submit-scripts)
+19. [Test data: pgdata](#19-test-data-pgdata)
+20. [Follow, approve, stop and clean up runs](#20-follow-approve-stop-and-clean-up-runs)
+21. [argocd CLI: inspect the sync steps behind the workflows](#21-argocd-cli-inspect-the-sync-steps-behind-the-workflows)
 
 ---
 
@@ -74,20 +76,24 @@ tpg-scale-instance: cluster is not an input of tpg-scale-instance. See docs/work
 | `String (Vault token)` | A Vault wrapping token, as `tpg-aks-infra/scripts/vault-secret.sh wrap` prints it | `hvs.CAESIJ...` |
 | `List (CIDRs)` | A list of IPv4 or IPv6 networks with the host bits zero | `[10.20.0.0/16, 192.168.10.0/24]` |
 | `List (host names)` | A list of DNS names; `*.` in front matches every subdomain | `[api.example.com, *.example.org]` |
-| `List (pairs)` | tpg-restore `clusterMap` (section 15): a list of pairs, one restore each, `{sourceClusterConfig, targetClusterConfig}`, as a YAML block list or a JSON array. A map of clusters (the `clusterMap` of the other workflows) is refused | `- sourceClusterConfig: ...` |
+| `List (pairs)` | tpg-restore `clusterMap` (section 16): a list of pairs, one restore each, `{sourceClusterConfig, targetClusterConfig}`, as a YAML block list or a JSON array. A map of clusters (the `clusterMap` of the other workflows) is refused | `- sourceClusterConfig: ...` |
 | `String` | Any text | `alpine/k8s:1.35.8` |
 | `String (name)` | One lowercase DNS label (a Kubernetes object name for `backupName`, `ferretSecretName` and `ferretReadOnlySecretName`) | `orders-db` |
 | `String (cron)` | A cron schedule of 5 fields: minute, hour, day of month, month, day of week (UTC) | `0 0 * * 0` |
 | `String (Azure name)` | An Azure resource name: letters, digits, `-`, `_` and `.`, at most 80 characters | `aks-apps_subnet` |
-| `String (version)` | Operator: `v4.5.0` (`4.5.0` is accepted). Postgres: `postgres-17.6` (`17.6` is accepted; the version must exist in `kubectl get postgresversion`) | `v4.5.1`, `postgres-16.10` |
-| `String (quantity)` | A Kubernetes quantity | `20Gi`, `500m`, `2` |
+| `String (version)` | Operator: `v4.5.0` (`4.5.0` is accepted). Postgres: `postgres-17.6` (`17.6` is accepted; the version must exist in `kubectl get postgresversion`). In a parameter file a bare number is quoted (`"17.10"`, see Parameter files below) | `v4.5.1`, `postgres-16.10` |
+| `String (quantity)` | A Kubernetes quantity. In a parameter file a decimal is quoted (`"0.5"`); a whole number is exact | `20Gi`, `500m`, `2` |
 | `String (UTC time)` | `YYYY-MM-DDThh:mm:ssZ` | `2026-09-15T08:30:00Z` |
 | `String (LSN)` | A log sequence number | `0/3000060` |
-| `Boolean` | `true` or `false` | `true` |
+| `Boolean` | `true` or `false`; written `"true"` or `"false"` in a parameter file | `true` |
 | `Integer` | Digits only. Counts can be 0; timeouts and `maxParallel` start at 1 | `3`, `1800` |
 | `Enum` | One of the values in the Description column | `direct` |
 | `Map` | YAML or JSON (section 3) | `{"aks-tpg-poc-01": {"instances": {"orders-db": {"replicas": 2}}}}` |
 | `Map (JSON)` | A JSON object | `{"aks-tpg-poc-01": ["tpg-operator"]}` |
+
+**List syntax** (Round 23; lists were comma-separated strings before). Every `List` input is written in brackets, also with one value: `[aks-tpg-poc-01]`, `[a, b]` (a YAML flow list) or `["a", "b"]` (a JSON array). Only two words stay bare: `all` where the table of the workflow says so, and `auto` for `components`. These are refused, with the list syntax and a corrected form (`Did you mean [a, b]?`) in the message: a comma-separated string without brackets (`a,b`), a bare name (`orders-db`), `[]`, an empty element (`[a, , b]`), a nested list and `all` inside brackets (`[a, all]`). The admission policy refuses them when the run is submitted, the `validate` step again for a run created another way, and one parser reads every list: the inputs, the list values of `clusterMap` (YAML sequences, section 3), the prompts of the submit scripts (they take plain names and send the bracketed form) and `pack-patch-files.sh`. A single-file input (`List (one file path)`) is a list of exactly one path.
+
+A file path has one more rule. YAML reads `repo: helm_artifacts/x.yaml` (a space after the colon) as a mapping and not as text, so `[repo: x.yaml]` is a list of one mapping, and a path with a space in it is no path. Both fail with `repo:<file path> "check for white spaces in between"`. That message is for whitespace and `repo: path` map entries only. Every other malformed path keeps the message that names the input and the fix: a file that is not `.yaml` or `.yml` (CA bundles: `.pem`, `.crt`, `.cer`), a `repo:` path with `..` or outside the folder the input accepts (for example `targetInstanceSpecFilePath` takes `repo:helm_artifacts/instance/tpg-instance/restore-specs/<file>` only), a per-cluster copy the workflows write themselves, a local file whose contents are not in `patchFiles`.
 
 Inputs used by several workflows:
 
@@ -95,16 +101,16 @@ Inputs used by several workflows:
 |---|---|---|---|
 | `clusters` | `List` | Registered clusters, or `all` where accepted | every workflow except restore |
 | `instances` | `List` | Declared instances, or `all` where accepted (new instances for create-instance) | day0, create-instance, upgrade, patch, scale, network-policy, backup, delete-instance |
-| `clusterMap` | `Map` | Targets with per-cluster and per-instance values (section 3); replaces `clusters` and `instances`. tpg-restore takes a list of pairs instead (`List (pairs)`, section 15) | day0, create-instance, upgrade, patch, scale, network-policy, backup, delete-instance, delete-apps, restore |
+| `clusterMap` | `Map` | Targets with per-cluster and per-instance values (section 3); replaces `clusters` and `instances`. tpg-restore takes a list of pairs instead (`List (pairs)`, section 16) | day0, create-instance, upgrade, patch, scale, network-policy, backup, delete-instance, delete-apps, restore |
 | `pushMode` | `Enum` | `direct`: push the `clusters/fleet.yaml` change to the fleet branch. `pr`: push a branch, open a GitHub pull request and continue once it is merged (`prTimeoutSeconds`, default 3600). tpg-patch syncs the pull request branch before the merge (section 7) | day0, create-instance, upgrade, patch, scale, network-policy, delete-apps, delete-instance, restore |
 | `dryRun` | `Boolean` | `true`: validate and record the plan; change nothing (tpg-restore and tpg-backup-expire: `true` is the default) | day0, create-instance, upgrade, patch, scale, network-policy, delete-apps, helm-addons, backup-expire, restore |
-| `rolloutMode` | `Enum` | `canary` (default): the wave-0 cluster alone, then the other waves in batches of `maxParallel`. `batches`: no canary, batches of `maxParallel` in wave order. `all`: every selected cluster in one batch. tpg-restore: the unit is a pair of `clusterMap` and the default is `all` (section 15) | day0, create-instance, upgrade, patch, network-policy, restore |
+| `rolloutMode` | `Enum` | `canary` (default): the wave-0 cluster alone, then the other waves in batches of `maxParallel`. `batches`: no canary, batches of `maxParallel` in wave order. `all`: every selected cluster in one batch. tpg-restore: the unit is a pair of `clusterMap` and the default is `all` (section 16) | day0, create-instance, upgrade, patch, network-policy, restore |
 
 - Put values that contain brackets (every list: `-p 'clusters=[aks-tpg-poc-01]'`; the shell reads `[...]` as a file pattern), spaces or JSON in single quotes.
-- `-p name=value` sets one input. `--parameter-file inputs.yaml` reads several from a file (examples in each section, for one cluster and for several with `clusterMap`). In a parameter file, quote `true`, `false` and numbers, write a list input either as a quoted string (`clusters: '[aks-tpg-poc-01, aks-tpg-poc-02]'`) or as a YAML sequence (`clusters: [aks-tpg-poc-01, aks-tpg-poc-02]`; the argo CLI sends it as the JSON text `["aks-tpg-poc-01","aks-tpg-poc-02"]`, which the workflow reads as the same list; `all` stays a plain word, `clusters: all`), and write `clusterMap` as a block (`clusterMap: |`). A `-p` after `--parameter-file` overrides the file (for example `-p dryRun=true`). Files of your machine that the parameter file names are packed into it with `scripts/submit/pack-patch-files.sh -o <parameter file>` (section 7).
+- `-p name=value` sets one input. `--parameter-file inputs.yaml` reads several from a file (Parameter files below; every workflow section has two worked examples). A `-p` adds an input the file does not set (for example `-p dryRun=true`); it does not override one the file sets (see Parameter files below). Files of your machine that the parameter file names are packed into it with `scripts/submit/pack-patch-files.sh -o <parameter file>` (section 7).
 - `--watch` follows the run in the terminal. Without it, the command prints the workflow name.
 - `--name` or `--generate-name` sets the workflow name, which is also the results ConfigMap `tpg-run-<name>`.
-- Every run ends with a report (exit handler). `argo logs @latest -c main | sed -n '/tpg run report/,$p'` prints it again. Warnings (section 19) have their own part of the report.
+- Every run ends with a report (exit handler). `argo logs @latest -c main | sed -n '/tpg run report/,$p'` prints it again. Warnings (section 20) have their own part of the report.
 - Instance lists are checked against `clusters/fleet.yaml` before anything changes: an instance that is not declared on a selected cluster fails the run with `UNKNOWN_INSTANCE` and the list of declared instances.
 - While a step waits for pods (Helm releases, the operator, instances, upgrades, scale, patch, restore), it prints the pod table of the namespace every 5 seconds and stops as soon as a pod cannot start. The failure reason is `POD_<REASON>` (for example `POD_CRASHLOOPBACKOFF`, `POD_CREATECONTAINERCONFIGERROR`, `POD_UNSCHEDULABLE`), followed in the log by the pod's status, events and the logs of the failing container. `CreateContainerConfigError`, `CreateContainerError`, `InvalidImageName` and `RunContainerError` fail at once; `CrashLoopBackOff`, `ImagePullBackOff`/`ErrImagePull`, `Error` and `OOMKilled` after 60 seconds; an unschedulable or Pending pod after 5 minutes.
 - Transient API errors (timeouts, connection resets, HTTP 429/502/503/504) of `kubectl`, `helm`, `az` and the Argo CD API are retried up to 5 times with 5, 10, 20 and 40 seconds between attempts (`TPG_RETRY_ATTEMPTS`, `TPG_RETRY_DELAY`); the log shows `<tool> <verb>: transient error (attempt n/5), retrying in Ns: <error>`.
@@ -113,6 +119,22 @@ Inputs used by several workflows:
 - Some combinations are refused as well, by the same admission policy (`rules` in `workflows/params/types.yaml`), by the submit scripts and by the `validate` step (which also checks the values `clusterMap` gives each instance): `highAvailability=true` with `readReplicas=0` (a single node is `highAvailability=false`), `readReplicas` above 0 with `highAvailability=false` (read replicas need high availability), and `ferretReadOnlyReplicas` above 0 with `highAvailability=false` (the read-only FerretDB proxies connect to the standby). `highAvailability` and `readReplicas` are checked where they are set: both as inputs, or both on one `clusterMap` entry (an entry's own keys, the inputs filling what it leaves out). An input `readReplicas` is a default for HA instances only: it does not apply to an entry that sets `highAvailability: false` itself. `fleet-day0.sh` refuses the same pairs again before it writes anything (it no longer turns a `readReplicas` above 0 into 0).
 - `clusters/fleet.yaml` is written in block YAML. Every workflow that commits it (the tpg-day0 and tpg-create-instance commit step included, which copies each cluster from its JSON plan) turns every flow map and list in the file into block style first, so an entry written as JSON by an earlier version, or a hand-written `{a: b}`, becomes block YAML with the next commit. Quotes stay only where YAML needs them (`"true"`, `"0"`), a comment at the end of a flow line moves above its content, and `caBundle` stays a literal block.
 - **Zero defaults are not written** (design decision D69). The tpg-instance chart leaves out of every object it renders the fields that hold their zero default (`false`, `0`, `[]`, `{}`): a single-node instance gets no `spec.highAvailability` block at all (the operator's defaults are `enabled: false` and `readReplicas: 0`). A field left out takes the same default, so declaring it gains nothing, and a declared field that a writer drops leaves the Application OutOfSync (the PostgresBackupLocation drift of Round 9, the single-node reports of Round 12). `clusters/fleet.yaml` keeps the explicit values (`enabled: false`, `readReplicas: 0`), since `clusters/_template/instance.yaml` defaults to `true` and `1`. The fields come from the registry `helm_artifacts/instance/tpg-instance/files/zero-defaults.yaml`, generated from the 9 live CRDs in `helm_artifacts/instance/crd-reference` (`helm_artifacts/instance/crd-reference/README.md`, section 3). A field whose default is not zero is always written: `enableSSL: false` stays, because its CRD default is `true`.
+- **Namespace of an instance** (Round 23). An instance runs in the namespace `pg-<instance>` unless the `clusterMap` key `namespace` of tpg-day0 or tpg-create-instance names another one (section 3). The namespace is stored in `clusters/fleet.yaml` as `instance.namespace` and every other workflow reads it from there; the examples of this page write `pg-orders-db` where the namespace is the default.
+
+**Parameter files** (Round 23). `argo submit --parameter-file <file>` reads a YAML mapping of input name to value. For each workflow, `workflows/params/schemas/` holds `params-<workflow>.schema.json` (also `.schema.yaml`; JSON Schema, draft 2020-12) and `params-<workflow>.example.yaml`, both generated by `python3 workflows/params/params_schema.py` from `workflows/params/types.yaml` and the WorkflowTemplates (`<workflow>` is the template name without `tpg-`: `params-day0`, `params-create-instance`, `params-backup-expire`, ...). The block after the input table of each workflow section (between `BEGIN GENERATED` and `END GENERATED`, written by the generator, never by hand) names the schema, the command that checks a file with it and the example, which is worked example 1 of the section. Check a file with `check-jsonschema`, or let an editor with the YAML language server do it when the file starts with `# yaml-language-server: $schema=<path to the schema>`:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-day0.schema.json my-inputs.yaml
+```
+
+The schema checks the shape of the file: only the inputs of that workflow, their types and allowed values, and the inputs that are mandatory in every case. It does not check what depends on the cluster or on other inputs (the combinations above, an input that is mandatory only in some cases, registered clusters, the inside of `clusterMap`): the admission policy and the `validate` step of the run remain the authority. `tests/params` runs every example through the schema, the admission policy (a real API server) and the `validate` step.
+
+How the values are written:
+
+- **A list input**: a YAML sequence (preferred), `clusters: [aks-tpg-poc-01, aks-tpg-poc-02]`, or the quoted bracketed string, `clusters: '[aks-tpg-poc-01, aks-tpg-poc-02]'`. The argo CLI sends a sequence as its JSON text, `["aks-tpg-poc-01","aks-tpg-poc-02"]` (verified with argo 4.1.3), which the workflow reads as the same list. `all` and `auto` stay plain words (`clusters: all`). An empty sequence is refused.
+- **`clusterMap` and the other Map inputs** are strings, written as a block: `clusterMap: |` and the map indented below it (the map itself is checked by the `clustermap-<workflow>` schema, section 3). A YAML mapping in place of the block is refused by the schema. `patchFiles` is written by `scripts/submit/pack-patch-files.sh -o <parameter file>`, never typed.
+- **Quote versions, quantities and Booleans** (YAML 1.1). Argo reads the file as YAML, which turns an unquoted number into a number before the workflow sees it: `postgresVersion: 17.10` arrives as `17.1` (a different PostgreSQL release) and `1.0` as `1`. Write a version that is a bare number and a decimal quantity as strings, `postgresVersion: "17.10"`, `storageSize: "0.5"`. `postgres-17.10`, `v4.5.1`, `20Gi` and `500m` are strings already, and a whole number (`cpu: 2`, `maxParallel: 3`) is exact. Write Booleans as `"true"` and `"false"`, as the generated examples do: YAML 1.1 readers also take `yes`, `no`, `on` and `off` for Booleans, and the workflow accepts `true` and `false` only. The generated schemas refuse an unquoted version or decimal, because after the YAML reader has changed `17.10` into `17.1` nothing can tell the two apart; they accept the YAML booleans `true` and `false` and whole numbers. `-p name=value` on the command line is always a string and has no such problem.
+- **Set an input in one place.** With an input in the file and in a `-p`, argo 4.1.3 puts both into the Workflow (the input is listed twice, the `-p` value first) and the `-p` does not replace the file's value: the run takes the value of the file, not the one you typed. Use `-p` for inputs the file does not set (the examples submit a file without `dryRun` with `-p dryRun=true`), or change the file. `tests/params` fails a command of this page that does this.
 
 ---
 
@@ -431,6 +453,10 @@ map that uses every key in `clustermap-<workflow>.example.yaml`:
 
 <!-- END GENERATED: clustermap-keys -->
 
+**The `namespace` key** (Round 23). Without it an instance runs in `pg-<instance>`. With it (tpg-day0 and tpg-create-instance only) the instance runs in that namespace, which is written to `clusters/fleet.yaml` as `instance.namespace` and cannot change afterwards. Reserved namespaces are refused (the list is `reserved` and `reservedPrefixes` of `namespace` in `cluster-map-keys.yaml`), and instances may share a namespace under the rules in the table above and in section 4. Every key of a map for any other workflow addresses the instance by its name; the namespace is read from `clusters/fleet.yaml`. The restore is the exception: it names the namespace of both sides of a pair.
+
+**tpg-restore takes no map of clusters.** Its `clusterMap` is a list of pairs, `{sourceClusterConfig, targetClusterConfig}`, each side `<cluster>: <namespace>: <instance>: {keys}`. Its keys (`sourceBackupName`, `pitrEnabled`, `pitrConfig`, `bestEffort`, `targetInstanceSpecFilePath`, `confirm`, ...) are the `restore` section of `workflows/params/cluster-map-keys.yaml`, are not in the tables above, and have their own schema (`workflows/params/schemas/clustermap-restore.schema.json`) and example (`clustermap-restore.example.yaml`). They are described in section 16.
+
 A map in a parameter file:
 
 ```yaml
@@ -481,10 +507,10 @@ The operator step waits until the Postgres CRDs are Established and the operator
 | `installAddons` | `Boolean` | no | `true` | Install or upgrade cert-manager (and the standalone monitoring agent) |
 | `existingAddons` | `Enum` | no | `skip` | A Helm release that differs: `skip` or `upgrade` (section 12) |
 | `monitoringOption` | `Enum` | no | empty (`tpg-settings`) | Override: `none`, `azure`, `standalone` |
-| `backupEnableSSL` | `Boolean` | no | `false` | `enableSSL` of the instances' `PostgresBackupLocation`: `false` uses HTTP to Azure Blob (the storage account must accept HTTP, Terraform `backup_storage_https_only = false`); `true` uses HTTPS and writes a CA bundle as `caBundle` (the two inputs below, else `tpg-settings` `backupCaBundle` from Terraform) |
+| `backupEnableSSL` | `Boolean` | no | `false` | `enableSSL` of the instances' `PostgresBackupLocation`: `false` uses HTTP to Azure Blob (the storage account must accept HTTP, Terraform `backup_storage_https_only = false`); `true` uses HTTPS and writes a CA bundle as `caBundle` (the two inputs below, else `tpg-settings` `backupCaBundle` from Terraform). Round 23: the value is written per instance (`clusters.<cluster>.instances.<instance>.backup.enableSSL`, `false` unless this input or the map key says `true`), so a cluster-level `clusters.<cluster>.backup.enableSSL: true` in `fleet.yaml` does not reach the instances this workflow creates; set the input or the `clusterMap` key. A re-run of tpg-day0 writes it again: repeat `backupEnableSSL=true` for the instances that use HTTPS, or their entry returns to `false` |
 | `disableInitialBackup` | `Boolean` | no | `false` | `true` writes the annotation `sql.tanzu.vmware.com/skip-initial-backup: "true"` on the new Postgres objects, so the operator takes no initial backup at creation (Round 22; the first backup then comes from the schedule or tpg-backup). Only new instances: a running instance is not changed. The 4.5 CRDs and documentation do not list this annotation: confirm in the lab that the operator honours it (HANDOFF, lab items) |
-| `backupCaBundleFile` | `List (one file path)` | no | | `backupEnableSSL=true`: the CA bundle, a PEM file (`.pem`, `.crt`, `.cer`) of the submitting machine (its contents in `patchFiles`) or `repo:ca-bundles/<file>` in the fleet repository. Not with `backupCaBundleVaultSecret`; a `clusterMap` key of the instance or its cluster wins (section 14) |
-| `backupCaBundleVaultSecret` | `String (name)` | no | | `backupEnableSSL=true`: the CA bundle from Vault `tpg/ca-bundles/<name>` (key `caBundle`; `tpg-aks-infra/scripts/vault-secret.sh ca put`). Not with `backupCaBundleFile` (section 14) |
+| `backupCaBundleFile` | `List (one file path)` | no | | `backupEnableSSL=true`: the CA bundle, a PEM file (`.pem`, `.crt`, `.cer`) of the submitting machine (its contents in `patchFiles`) or `repo:ca-bundles/<file>` in the fleet repository. Not with `backupCaBundleVaultSecret`; a `clusterMap` key of the instance or its cluster wins (section 15) |
+| `backupCaBundleVaultSecret` | `String (name)` | no | | `backupEnableSSL=true`: the CA bundle from Vault `tpg/ca-bundles/<name>` (key `caBundle`; `tpg-aks-infra/scripts/vault-secret.sh ca put`). Not with `backupCaBundleFile` (section 15) |
 | `backupFullRetention` | `Integer` | no | template (`4`) | Full backups the backup location keeps (`retentionPolicy.fullRetention.number`, applied by the operator), 1 or more |
 | `backupFullRetentionType` | `Enum` | no | template (`count`) | `count`: `backupFullRetention` is a number of full backups; `time`: a number of days. A change restarts the instances that use the backup location (operator 4.5 documentation) |
 | `postgresOverlayFilePath` | `List (file paths)` | no | | New instances (Round 22; was `postgresPatchFilePath`): files of `Postgres`, `PostgresBackupLocation`, `PostgresBackupSchedule` and `PostgresFerretDocumentDB` documents (section 7), paths of the submitting machine (absolute, `~/` or relative, contents in `patchFiles`) or `repo:helm_artifacts/instance/tpg-instance/overlays/<file>`. An instance that already runs with other overlay files is `BLOCKED` `OVERLAY_USE_TPG_PATCH` |
@@ -563,7 +589,7 @@ The pre-check is read-only and runs before anything is written to Git. A cluster
 
 Warnings (the run goes on): `ORPHAN_CRD` (Postgres CRDs without any operator: the operator sync adopts them), `HA_NODES_EXCEED_ZONES` (an HA instance has more database pods, 1 + `readReplicas`, than the data pool has zones: the 4.5 release notes say that Patroni does not fail over automatically when the zone holding the leader and the synchronous standby is lost), `EXPOSURE_UNRESTRICTED` (`loadBalancer` without `allowedSourceRanges`), `FERRET_EXTENSION_REQUIRED` (a run with `ferret=true`: FerretDB needs the documentdb extension in the instance, which the workflows do not install).
 
-**FerretDB** (design decision D71, Tech Preview in operator 4.5). With `ferret=true` the chart renders a PostgresFerretDocumentDB named like the instance, in sync wave 2 (after the instance is Healthy). The deploy step then checks that the connection Secrets it names exist (`FERRET_SECRET_MISSING`, with the db Secrets found in `pg-<instance>`; set `ferretSecretName` when the operator names them differently) and that the FerretDB Deployments become available (`FERRET_NOT_READY`, usually the missing documentdb extension). The documentdb extension (`shared_preload_libraries = 'pg_cron,pg_documentdb_core,pg_documentdb'`, `cron.database_name`, the `documentdb` database) is prepared by the DBA as the 4.5 documentation shows ("Using FerretDB for PostgreSQL for Kubernetes"); extensions are out of scope of the fleet. With `networkPolicy=baseline`, port 27017 is open to the same clients as 5432 (section 9).
+**FerretDB** (design decision D71, Tech Preview in operator 4.5). With `ferret=true` the chart renders a PostgresFerretDocumentDB named like the instance, in sync wave 2 (after the instance is Healthy). The deploy step then checks that the connection Secrets it names exist (`FERRET_SECRET_MISSING`, with the db Secrets found in the namespace of the instance; set `ferretSecretName` when the operator names them differently) and that the FerretDB Deployments become available (`FERRET_NOT_READY`, usually the missing documentdb extension). The documentdb extension (`shared_preload_libraries = 'pg_cron,pg_documentdb_core,pg_documentdb'`, `cron.database_name`, the `documentdb` database) is prepared by the DBA as the 4.5 documentation shows ("Using FerretDB for PostgreSQL for Kubernetes"); extensions are out of scope of the fleet. With `networkPolicy=baseline`, port 27017 is open to the same clients as 5432 (section 9).
 
 **Backups by the operator** (`backupSchedule=operator`, design decision D70). The instance leaves the CronWorkflows (`backup.scheduled: false`) and the chart renders `PostgresBackupSchedule` `<instance>-backup-full` (and `<instance>-backup-incremental` when `operatorIncrementalSchedule` is set), in sync wave 2. The chart refuses the schedules while `backup.scheduled` is not `false`, so an instance is never backed up by both. The backup location's retention policy (`backupFullRetention`, `backupFullRetentionType`) expires the operator's backups like the others: the operator applies it.
 
@@ -589,7 +615,84 @@ Warnings (the run goes on): `ORPHAN_CRD` (Postgres CRDs without any operator: th
 
 A blocked cluster keeps its `fleet.yaml` entry as it was; the other clusters go ahead.
 
-**Restored instances** (Round 23). An instance that tpg-restore restored has `instance.restored: true` in its `fleet.yaml` entry (workflow-owned: a values patch or an overlay cannot set it) and is rendered from its restore-patch, not from the values (section 15). When it is in the `instances` input or in the `clusterMap` of tpg-day0 (and of tpg-create-instance), that instance only is `BLOCKED` `INSTANCE_RESTORED`: the detail names the workflows that change a restored instance, tpg-scale-instance (read replicas), tpg-upgrade `component=postgres` (the version) and tpg-patch (patch files). Its entry is not written, it is not synced or verified (discover leaves it out), the other instances and the cluster go ahead, and the run ends `Failed` at the gate. `dryRun` and the plan show the same record.
+**Restored instances** (Round 23). An instance that tpg-restore restored has `instance.restored: true` in its `fleet.yaml` entry (workflow-owned: a values patch or an overlay cannot set it) and is rendered from its restore-patch, not from the values (section 16). When it is in the `instances` input or in the `clusterMap` of tpg-day0 (and of tpg-create-instance), that instance only is `BLOCKED` `INSTANCE_RESTORED`: the detail names the workflows that change a restored instance, tpg-scale-instance (read replicas), tpg-upgrade `component=postgres` (the version) and tpg-patch (patch files). Its entry is not written, it is not synced or verified (discover leaves it out), the other instances and the cluster go ahead, and the run ends `Failed` at the gate. `dryRun` and the plan show the same record.
+
+**Worked examples** (Round 23). Example 1 is the generated file above: a dry run of orders-db (high availability, one read replica) on one cluster with flat inputs. It validates the inputs, shows the `fleet.yaml` change and runs the pre-check; nothing is written. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-day0 \
+  --parameter-file workflows/params/schemas/params-day0.example.yaml --watch
+```
+
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"`. An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 deploys different instances on several clusters with `clusterMap`. The inputs are the defaults (here `operatorVersion`, `postgresVersion` and `highAvailability`), and each map key overrides them for one cluster or one instance. `billing-db` runs in a namespace of its own (`namespace`, section 3), the others in `pg-<instance>`:
+
+```yaml
+# day0-map.yaml
+pushMode: direct
+operatorVersion: v4.5.0
+postgresVersion: postgres-17.6
+highAvailability: "true"
+clusterMap: |
+  aks-tpg-poc-01:
+    instances:
+      orders-db: {readReplicas: 2, memory: 8Gi, exposure: internalLoadBalancer}
+      billing-db: {highAvailability: false, backupSchedule: none, namespace: billing}
+  aks-tpg-poc-02:
+    maxReadReplicas: 5
+    instances:
+      orders-db:
+        postgresVersion: postgres-16.10
+        storageSize: 50Gi
+        networkPolicy: baseline
+        ingressFromNamespaces: [orders-app, reporting]
+        ingressFromPodLabels: {app.kubernetes.io/part-of: orders}
+```
+
+```bash
+argo submit --from workflowtemplate/tpg-day0 --parameter-file day0-map.yaml -p dryRun=true --watch
+argo submit --from workflowtemplate/tpg-day0 --parameter-file day0-map.yaml --watch
+```
+
+Example 2 with local files (Round 15): several clusters, each with its own overlay files and CA bundle source, from one parameter file. The local paths are relative to the directory you run the commands in; `pack-patch-files.sh -o` reads every path of the file (inputs and `clusterMap` keys), checks each file and adds the `patchFiles` line:
+
+```yaml
+# day0-fleet.yaml
+pushMode: direct
+operatorVersion: v4.5.0
+postgresVersion: postgres-17.6
+highAvailability: "true"
+backupEnableSSL: "true"
+backupCaBundleVaultSecret: azure-storage          # default of every cluster below
+clusterMap: |
+  aks-tpg-poc-01:
+    operatorValuesOverlayFilePath: [./operator/resources.yaml]
+    instances:
+      orders-db:
+        postgresOverlayFilePath: [./orders/postgres.yaml, ./orders/backup-schedule.yaml]
+        postgresValuesOverlayFilePath: [./orders/values.yaml]
+        backupSchedule: operator
+  aks-tpg-poc-02:
+    backupCaBundleFile: [repo:ca-bundles/azure-storage-2026.pem]   # this cluster: a bundle from Git
+    instances:
+      orders-db:
+        postgresOverlayFilePath: [repo:helm_artifacts/instance/tpg-instance/overlays/team-orders-postgres.yaml]
+      billing-db:
+        highAvailability: false
+        postgresValuesOverlayFilePath: [~/overlays/billing-values.yaml]
+  aks-tpg-poc-03:
+    instances:
+      orders-db: {}
+```
+
+```bash
+<tpg-fleet clone>/scripts/submit/pack-patch-files.sh -o day0-fleet.yaml
+argo submit -n argo --from workflowtemplate/tpg-day0 --parameter-file day0-fleet.yaml -p dryRun=true --watch
+argo submit -n argo --from workflowtemplate/tpg-day0 --parameter-file day0-fleet.yaml --watch
+```
+
+**More commands.**
 
 ```bash
 # 1. Dry run on every registered cluster: validation, fleet.yaml diff, pre-check
@@ -661,8 +764,8 @@ With a parameter file:
 
 ```yaml
 # day0-orders.yaml
-clusters: '[aks-tpg-poc-01, aks-tpg-poc-02, aks-tpg-poc-03]'
-instances: '[orders-db]'
+clusters: [aks-tpg-poc-01, aks-tpg-poc-02, aks-tpg-poc-03]
+instances: [orders-db]
 highAvailability: "true"
 readReplicas: "1"
 operatorVersion: v4.5.0
@@ -672,71 +775,6 @@ pushMode: direct
 
 ```bash
 argo submit --from workflowtemplate/tpg-day0 --parameter-file day0-orders.yaml --watch
-```
-
-Different settings per cluster and instance, with `clusterMap`. The inputs are the defaults (here `operatorVersion`, `postgresVersion` and `highAvailability`), and each map key overrides them:
-
-```yaml
-# day0-map.yaml
-pushMode: direct
-operatorVersion: v4.5.0
-postgresVersion: postgres-17.6
-highAvailability: "true"
-clusterMap: |
-  aks-tpg-poc-01:
-    instances:
-      orders-db: {readReplicas: 2, memory: 8Gi, exposure: internalLoadBalancer}
-      billing-db: {highAvailability: false, backupSchedule: none}
-  aks-tpg-poc-02:
-    maxReadReplicas: 5
-    instances:
-      orders-db:
-        postgresVersion: postgres-16.10
-        storageSize: 50Gi
-        networkPolicy: baseline
-        ingressFromNamespaces: [orders-app, reporting]
-        ingressFromPodLabels: {app.kubernetes.io/part-of: orders}
-```
-
-```bash
-argo submit --from workflowtemplate/tpg-day0 --parameter-file day0-map.yaml -p dryRun=true --watch
-```
-
-Several clusters, each with its own patch files and CA bundle source, from one parameter file (Round 15). The local paths are relative to the directory you run the commands in; `pack-patch-files.sh -o` reads every path of the file (inputs and `clusterMap` keys), checks each file and adds the `patchFiles` line:
-
-```yaml
-# day0-fleet.yaml
-pushMode: direct
-operatorVersion: v4.5.0
-postgresVersion: postgres-17.6
-highAvailability: "true"
-backupEnableSSL: "true"
-backupCaBundleVaultSecret: azure-storage          # default of every cluster below
-clusterMap: |
-  aks-tpg-poc-01:
-    operatorValuesOverlayFilePath: [./operator/resources.yaml]
-    instances:
-      orders-db:
-        postgresOverlayFilePath: [./orders/postgres.yaml, ./orders/backup-schedule.yaml]
-        postgresValuesOverlayFilePath: [./orders/values.yaml]
-        backupSchedule: operator
-  aks-tpg-poc-02:
-    backupCaBundleFile: [repo:ca-bundles/azure-storage-2026.pem]   # this cluster: a bundle from Git
-    instances:
-      orders-db:
-        postgresOverlayFilePath: [repo:helm_artifacts/instance/tpg-instance/overlays/team-orders-postgres.yaml]
-      billing-db:
-        highAvailability: false
-        postgresValuesOverlayFilePath: [~/overlays/billing-values.yaml]
-  aks-tpg-poc-03:
-    instances:
-      orders-db: {}
-```
-
-```bash
-<tpg-fleet clone>/scripts/submit/pack-patch-files.sh -o day0-fleet.yaml
-argo submit -n argo --from workflowtemplate/tpg-day0 --parameter-file day0-fleet.yaml -p dryRun=true --watch
-argo submit -n argo --from workflowtemplate/tpg-day0 --parameter-file day0-fleet.yaml --watch
 ```
 
 ---
@@ -759,10 +797,10 @@ Adds Postgres instances to clusters that already run the fleet's operator (deplo
 | `cpu`, `memory` | `String (quantity)` | no | template | Request and limit per Postgres pod |
 | `backupSchedule` | `Enum` | no | `fleet` | `fleet`, `none` (excluded from the backup CronWorkflows) or `operator` (PostgresBackupSchedule objects instead, section 4) |
 | `operatorFullSchedule`, `operatorIncrementalSchedule` | `String (cron)` | no | `0 0 * * 0`, `0 0 * * 1-6` | As tpg-day0 |
-| `backupEnableSSL` | `Boolean` | no | `false` | As tpg-day0; `true` writes a CA bundle as `caBundle` |
+| `backupEnableSSL` | `Boolean` | no | `false` | As tpg-day0, per instance (a cluster-level `clusters.<cluster>.backup.enableSSL` does not reach instances created here); `true` writes a CA bundle as `caBundle` |
 | `disableInitialBackup` | `Boolean` | no | `false` | As tpg-day0 |
-| `backupCaBundleFile` | `List (one file path)` | no | | As tpg-day0: the CA bundle as a PEM file (section 14) |
-| `backupCaBundleVaultSecret` | `String (name)` | no | | As tpg-day0: the CA bundle from Vault `tpg/ca-bundles/<name>` (section 14) |
+| `backupCaBundleFile` | `List (one file path)` | no | | As tpg-day0: the CA bundle as a PEM file (section 15) |
+| `backupCaBundleVaultSecret` | `String (name)` | no | | As tpg-day0: the CA bundle from Vault `tpg/ca-bundles/<name>` (section 15) |
 | `backupFullRetention` | `Integer` | no | template (`4`) | As tpg-day0 |
 | `backupFullRetentionType` | `Enum` | no | template (`count`) | As tpg-day0: `count` or `time` |
 | `exposure`, `readOnlyExposure` | `Enum` | no | empty (`clusterIP`) | As tpg-day0: `clusterIP`, `internalLoadBalancer` or `loadBalancer` |
@@ -816,7 +854,7 @@ dryRun: "true"
 The run, in order:
 
 1. **Validate** the inputs and `clusterMap`; each patch file must be in `patchFiles` and fit its input (section 7, step 1).
-2. **Plan** `clusters/fleet.yaml` (nothing is pushed yet). Per cluster: the operator must run (`OPERATOR_NOT_INSTALLED` otherwise) and be declared in `fleet.yaml` (`NOT_IN_FLEET`). Per instance: the patch files are stored under their UID names and checked against the creation rules (a declared instance whose current file holds the same contents keeps it, so a repeated run stays `ALREADY_EXISTS`), the instance is rendered with the chart, and the rendered Postgres object is sent to the cluster with `--dry-run=server` (in namespace `default`, under the name `tpg-create-probe`, because `pg-<instance>` does not exist yet), so the operator's admission webhooks judge it before anything is written.
+2. **Plan** `clusters/fleet.yaml` (nothing is pushed yet). Per cluster: the operator must run (`OPERATOR_NOT_INSTALLED` otherwise) and be declared in `fleet.yaml` (`NOT_IN_FLEET`). Per instance: the patch files are stored under their UID names and checked against the creation rules (a declared instance whose current file holds the same contents keeps it, so a repeated run stays `ALREADY_EXISTS`), the instance is rendered with the chart, and the rendered Postgres object is sent to the cluster with `--dry-run=server` (in namespace `default`, under the name `tpg-create-probe`, because the namespace of the instance does not exist yet), so the operator's admission webhooks judge it before anything is written.
 3. **Pre-check** as tpg-day0, with the operator required to be `MANAGED` (section 4).
 4. **Commit** the plan of the clusters that passed, without the instances that were blocked, with the stored patch files their entries reference.
 5. **Deploy** the new instance Applications, canary first, one run at a time per cluster (the mutex `tpg-cluster-<cluster>`, shared with tpg-day0, tpg-patch, tpg-network-policy and tpg-delete-apps). Each instance is checked like in tpg-day0: `Running`, backup stanza, FerretDB when `ferret=true`, Services following `exposure`.
@@ -844,30 +882,16 @@ An instance that is declared in `fleet.yaml` but absent on the cluster (for exam
 | `PostgresBackupSchedule` | A `metadata.name` other than `<instance>-backup-full` or `<instance>-backup-incremental` (or `backup-full`, `backup-incremental`); `spec.backupTemplate.spec.sourceInstance`, `type` (set by the chart); `expire` (it would expire every scheduled backup; the backup location's retention policy expires backups) |
 | Values patch | A key the chart does not have; `instance.name`, `instance.postgresVersion`, `instance.highAvailability`, `instance.serviceType` (replaced by `instance.exposure`), `cluster`, `patches`, `valuesOverride` (tpg-restore) |
 
-```bash
-# 1. Dry run: a single-node instance on two clusters
-argo submit --from workflowtemplate/tpg-create-instance \
-  -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'instances=[reports-db]' \
-  -p highAvailability=false -p postgresVersion=postgres-17.6 -p pushMode=direct -p dryRun=true --watch
+**Worked examples** (Round 23). Example 1 is the generated file above: a dry run that plans one single-node instance (reports-db) on one cluster with flat inputs. It validates, plans `fleet.yaml`, renders the chart and sends the Postgres object through the API server with `--dry-run=server`; nothing is pushed or deployed. From your tpg-fleet clone:
 
-# 2. An HA instance behind an internal load balancer, with its own resources and
-#    backup location patches (run from the directory that holds the two files)
-cat > audit.yaml <<'YAML'
-clusters: '[aks-tpg-poc-01]'
-instances: '[audit-db]'
-highAvailability: "true"
-readReplicas: "1"
-postgresVersion: postgres-17.6
-exposure: internalLoadBalancer
-allowedSourceRanges: '[10.20.0.0/16]'
-postgresOverlayFilePath: '[./audit-resources.yaml, ./audit-backup-location.yaml]'
-pushMode: pr
-YAML
-~/src/tpg-fleet/scripts/submit/pack-patch-files.sh -o audit.yaml
-argo submit -n argo --from workflowtemplate/tpg-create-instance --parameter-file audit.yaml --watch
+```bash
+argo submit -n argo --from workflowtemplate/tpg-create-instance \
+  --parameter-file workflows/params/schemas/params-create-instance.example.yaml --watch
 ```
 
-Different instances per cluster, with `clusterMap`:
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"`. An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 creates different instances on several clusters with `clusterMap`; `audit-db` gets a namespace of its own (`namespace`, section 3):
 
 ```yaml
 # create-map.yaml
@@ -881,18 +905,20 @@ clusterMap: |
       audit-db:
         highAvailability: true
         readReplicas: 1
+        namespace: audit
         networkPolicy: baseline
-        ingressFromNamespaces: [audit]
+        ingressFromNamespaces: [audit-app]
   aks-tpg-poc-02:
     instances:
       reports-db: {postgresVersion: postgres-16.10, backupSchedule: none}
 ```
 
 ```bash
+argo submit --from workflowtemplate/tpg-create-instance --parameter-file create-map.yaml -p dryRun=true --watch
 argo submit --from workflowtemplate/tpg-create-instance --parameter-file create-map.yaml --watch
 ```
 
-With patch files per cluster and instance: local paths (packed first) and `repo:` files side by side, and a CA bundle from a file of your machine for the HTTPS instances:
+Example 2 with local files: overlay files per cluster and instance, local paths (packed first) and `repo:` files side by side, and a CA bundle from a file of your machine for the HTTPS instances:
 
 ```yaml
 # create-patched.yaml
@@ -915,14 +941,40 @@ clusterMap: |
 
 ```bash
 ~/src/tpg-fleet/scripts/submit/pack-patch-files.sh -o create-patched.yaml
+argo submit -n argo --from workflowtemplate/tpg-create-instance --parameter-file create-patched.yaml -p dryRun=true --watch
 argo submit -n argo --from workflowtemplate/tpg-create-instance --parameter-file create-patched.yaml --watch
+```
+
+**More commands.**
+
+```bash
+# 1. Dry run: a single-node instance on two clusters (flags instead of a parameter file)
+argo submit --from workflowtemplate/tpg-create-instance \
+  -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'instances=[reports-db]' \
+  -p highAvailability=false -p postgresVersion=postgres-17.6 -p pushMode=direct -p dryRun=true --watch
+
+# 2. An HA instance behind an internal load balancer, with its own resources and
+#    backup location patches (run from the directory that holds the two files)
+cat > audit.yaml <<'YAML'
+clusters: [aks-tpg-poc-01]
+instances: [audit-db]
+highAvailability: "true"
+readReplicas: "1"
+postgresVersion: postgres-17.6
+exposure: internalLoadBalancer
+allowedSourceRanges: [10.20.0.0/16]
+postgresOverlayFilePath: [./audit-resources.yaml, ./audit-backup-location.yaml]
+pushMode: pr
+YAML
+~/src/tpg-fleet/scripts/submit/pack-patch-files.sh -o audit.yaml
+argo submit -n argo --from workflowtemplate/tpg-create-instance --parameter-file audit.yaml --watch
 ```
 
 ---
 
 ## 6. tpg-upgrade
 
-Upgrades the operator (`component=operator`) or Postgres instances (`component=postgres`), canary first, and writes the new version to `clusters/fleet.yaml`. With `clusterMap`, one run can upgrade the operator and instances to versions that differ per cluster and per instance. An instance that tpg-restore restored (`instance.restored`, section 15) is upgraded like any other: the new `instance.postgresVersion` differs from its restore-patch's version, so the chart renders the new version (and the rest of the restore-patch as it is).
+Upgrades the operator (`component=operator`) or Postgres instances (`component=postgres`), canary first, and writes the new version to `clusters/fleet.yaml`. With `clusterMap`, one run can upgrade the operator and instances to versions that differ per cluster and per instance. An instance that tpg-restore restored (`instance.restored`, section 16) is upgraded like any other: the new `instance.postgresVersion` differs from its restore-patch's version, so the chart renders the new version (and the rest of the restore-patch as it is).
 
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
@@ -980,6 +1032,38 @@ The `tpg-instances` ApplicationSet ignores `Postgres spec.postgresVersion` (`Res
 
 **The operator image of a values patch.** A current operator values patch (section 7) that sets `operatorImage` carries the tag of the running version. The version commit stores a copy of that file with the new tag under a new UID name and makes it current (the old file is never changed and becomes `previous` with its commit), and rewrites its copy `helm_artifacts/operator/patches/clusters/<cluster>.yaml`, so the image follows the chart. A tag that is not the running version stops the upgrade before anything changes (`OPERATOR_IMAGE_PINNED`); so does an `operator.patches.values` entry that is not `{current, previous}` (`FLEET_ENTRY_INVALID`: a fleet repository written before Round 15).
 
+**Worked examples** (Round 23). Example 1 is the generated file above: a dry run of the operator upgrade of one cluster with flat inputs. The run records the planned upgrade (current and target version) and changes nothing. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-upgrade \
+  --parameter-file workflows/params/schemas/params-upgrade.example.yaml --watch
+```
+
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"`. An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 upgrades the operator and instances to versions that differ per cluster and instance, with `clusterMap` (on each cluster the operator goes first; the Postgres part does not start on a cluster whose operator upgrade failed). Put `-p dryRun=true` in front for the plan:
+
+```yaml
+# upgrade-map.yaml
+pushMode: direct
+clusterMap: |
+  aks-tpg-poc-01:
+    operatorVersion: v4.5.1              # operator first, then the instances below
+    instances:
+      orders-db: {postgresVersion: postgres-17.7}
+  aks-tpg-poc-02:
+    instances:
+      orders-db: {postgresVersion: postgres-17.6, allowMajor: true}
+      billing-db: {postgresVersion: postgres-16.10, preUpgradeBackup: false}
+```
+
+```bash
+argo submit --from workflowtemplate/tpg-upgrade --parameter-file upgrade-map.yaml -p dryRun=true --watch
+argo submit --from workflowtemplate/tpg-upgrade --parameter-file upgrade-map.yaml --watch
+```
+
+**More commands.**
+
 ```bash
 # 1. Operator: dry run on all clusters
 argo submit --from workflowtemplate/tpg-upgrade \
@@ -1011,33 +1095,13 @@ argo submit --from workflowtemplate/tpg-upgrade \
   -p 'instances=[orders-db, billing-db]' -p pushMode=direct --watch
 ```
 
-Different versions per cluster and instance, with `clusterMap`:
-
-```yaml
-# upgrade-map.yaml
-pushMode: direct
-clusterMap: |
-  aks-tpg-poc-01:
-    operatorVersion: v4.5.1              # operator first, then the instances below
-    instances:
-      orders-db: {postgresVersion: postgres-17.7}
-  aks-tpg-poc-02:
-    instances:
-      orders-db: {postgresVersion: postgres-17.6, allowMajor: true}
-      billing-db: {postgresVersion: postgres-16.10, preUpgradeBackup: false}
-```
-
-```bash
-argo submit --from workflowtemplate/tpg-upgrade --parameter-file upgrade-map.yaml --watch
-```
-
 ---
 
 ## 7. tpg-patch
 
 Changes settings of deployed operators and instances that no other workflow owns (Round 14, design decisions D76 to D79; Round 15, D81 to D83 and D86). You write patch files, pass their paths (files of your machine, or files of the fleet repository), and the workflow stores them in the fleet repository, checks them, shows what they change, and syncs them. There are three kinds of patch file, each with its own input and `clusterMap` key. tpg-day0 and tpg-create-instance take the same three kinds as **overlay files** (`postgresOverlayFilePath`, `postgresValuesOverlayFilePath`, `operatorValuesOverlayFilePath`, Round 22), stored in `helm_artifacts/instance/tpg-instance/overlays/` and `helm_artifacts/operator/overlays/` and recorded under `overlays:`; they apply at the initial deployment and the patch files of this section stack on top of them:
 
-On an instance that tpg-restore restored (`instance.restored`, section 15) a **postgres** patch file is applied over the restore-patch and over the entry's later changes (the instance's Postgres is rendered from its restore-patch, not from the values); tpg-patch never retires or changes the restore-patch, and a **values** patch that sets an `instance:` key which reaches the Postgres (`storageSize`, `walStorageSize`, `resources`, `exposure`, `readOnlyExposure`, `serviceAnnotations`, `readOnlyServiceAnnotations`, `allowedSourceRanges`, `internalLoadBalancerSubnet`) for such an instance is refused (`PATCH_REFUSED`, detail `RESTORED_VALUES_PATCH`): the detail names tpg-scale-instance (read replicas), tpg-upgrade `component=postgres` (the version) and postgres patch files, the ways to change a restored instance. Keys that do not reach the Postgres (`backup`, `network`, `ferret`, ...) stay allowed. A values patch cannot set `restorePatch` or `instance.restored`.
+On an instance that tpg-restore restored (`instance.restored`, section 16) a **postgres** patch file is applied over the restore-patch and over the entry's later changes (the instance's Postgres is rendered from its restore-patch, not from the values); tpg-patch never retires or changes the restore-patch, and a **values** patch that sets an `instance:` key which reaches the Postgres (`storageSize`, `walStorageSize`, `resources`, `exposure`, `readOnlyExposure`, `serviceAnnotations`, `readOnlyServiceAnnotations`, `allowedSourceRanges`, `internalLoadBalancerSubnet`) for such an instance is refused (`PATCH_REFUSED`, detail `RESTORED_VALUES_PATCH`): the detail names tpg-scale-instance (read replicas), tpg-upgrade `component=postgres` (the version) and postgres patch files, the ways to change a restored instance. Keys that do not reach the Postgres (`backup`, `network`, `ferret`, ...) stay allowed. A values patch cannot set `restorePatch` or `instance.restored`.
 
 | Input and map key | Level | Stored as | Content | How it is applied |
 |---|---|---|---|---|
@@ -1045,7 +1109,7 @@ On an instance that tpg-restore restored (`instance.restored`, section 15) a **p
 | `postgresValuesPatchFilePath` | instance | `helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml` | A fragment of the chart values; every key must exist in `helm_artifacts/instance/tpg-instance/values.yaml` or `clusters/_template/`, for example `backup.fullRetention`. Renamed from `valuesPatchFilePath` in Round 15 | Merged into the instance's values before the chart renders |
 | `operatorValuesPatchFilePath` | cluster | `helm_artifacts/operator/patches/<name>-<uid>.yaml` | Only these operator chart values: `operatorImage`, `instanceRegistryRepo`, `ferretDBImageRepo`, `dockerRegistrySecretName`, `certManagerClusterIssuerName`, `certManagerNamespace`, `resources` (`limits` and `requests`, `cpu` and `memory`), `enableSecurityContext`. Any other key fails the run | Copied to `helm_artifacts/operator/patches/clusters/<cluster>.yaml`, which the `tpg-operator` Application reads as `$fleet/helm_artifacts/operator/patches/clusters/<cluster>.yaml`, after the overlay copy `$fleet/helm_artifacts/operator/overlays/clusters/<cluster>.yaml` of tpg-day0 |
 
-`backupCaBundleFile` and `backupCaBundleVaultSecret` (inputs and `clusterMap` keys, section 14) replace the CA bundle of running instances with `backup.enableSSL: true`; a run may carry them alone, without patch files.
+`backupCaBundleFile` and `backupCaBundleVaultSecret` (inputs and `clusterMap` keys, section 15) replace the CA bundle of running instances with `backup.enableSSL: true`; a run may carry them alone, without patch files.
 
 **Where the files come from** (D83). A path is one of:
 
@@ -1103,7 +1167,7 @@ Only `current` is applied, so a new values or operator file must hold every over
 | `postgresPatchFilePath` | `List (file paths)` | one patch file input, CA bundle source or map key (`patchMode=apply`) | | Postgres patch files for every selected instance: local paths or `repo:helm_artifacts/instance/tpg-instance/patches/<file>` |
 | `postgresValuesPatchFilePath` | `List (one file path)` | as above | | A values patch file for every selected instance |
 | `operatorValuesPatchFilePath` | `List (one file path)` | as above | | An operator values file for every selected cluster (local, or `repo:helm_artifacts/operator/patches/<file>`) |
-| `backupCaBundleFile` | `List (one file path)` | no | | The CA bundle of the selected `enableSSL` instances: a PEM file of your machine or `repo:ca-bundles/<file>` (section 14) |
+| `backupCaBundleFile` | `List (one file path)` | no | | The CA bundle of the selected `enableSSL` instances: a PEM file of your machine or `repo:ca-bundles/<file>` (section 15) |
 | `backupCaBundleVaultSecret` | `String (name)` | no | | The CA bundle from Vault `tpg/ca-bundles/<name>`; not with `backupCaBundleFile` |
 | `patchFiles` | `Map (JSON)` | with a local file | | The contents of the local files: `{"<path as given>": "<base64>"}`, written by `pack-patch-files.sh -o` or the submit script |
 | `patchMode` | `Enum` | no | `apply` | `apply`: the files become the current patches. `clear`: `clearKinds` are removed |
@@ -1199,8 +1263,8 @@ PACK=~/src/tpg-fleet/scripts/submit/pack-patch-files.sh   # the helper of your t
 # 1. Dry run: the two documents above for orders-db on every cluster (prints the diff per cluster)
 cat > orders.yaml <<'YAML'
 clusters: all
-instances: '[orders-db]'
-postgresPatchFilePath: '[./orders/postgres.yaml]'
+instances: [orders-db]
+postgresPatchFilePath: [./orders/postgres.yaml]
 pushMode: pr
 YAML
 $PACK -o orders.yaml
@@ -1218,8 +1282,8 @@ argo submit -n argo --from workflowtemplate/tpg-patch \
 
 # 4. Operator resources on two clusters, from a file in your home directory
 cat > operator.yaml <<'YAML'
-clusters: '[aks-tpg-poc-01, aks-tpg-poc-02]'
-operatorValuesPatchFilePath: '[~/patches/operator-resources.yaml]'
+clusters: [aks-tpg-poc-01, aks-tpg-poc-02]
+operatorValuesPatchFilePath: [~/patches/operator-resources.yaml]
 pushMode: pr
 YAML
 $PACK -o operator.yaml
@@ -1230,7 +1294,7 @@ argo submit -n argo --from workflowtemplate/tpg-patch \
   -p 'clusters=[aks-tpg-poc-02]' -p 'instances=[orders-db]' -p patchMode=clear \
   -p 'clearKinds=[PostgresBackupSchedule, postgresValues]' -p pushMode=direct --watch
 
-# 6. A new CA bundle for the HTTPS instance orders-db, read from Vault (section 14);
+# 6. A new CA bundle for the HTTPS instance orders-db, read from Vault (section 15);
 #    an instance without backup.enableSSL true is refused, so name the HTTPS instances
 argo submit -n argo --from workflowtemplate/tpg-patch \
   -p clusters=all -p 'instances=[orders-db]' -p backupCaBundleVaultSecret=azure-storage-2027 \
@@ -1245,7 +1309,16 @@ resources:
 enableSecurityContext: true
 ```
 
-Different files per cluster and instance, with `clusterMap`, for several clusters from one parameter file:
+**Worked examples** (Round 23). They use the patch files shown above. Example 1 is the generated file in the block after the input table: a dry run that clears the schedule documents of one instance with flat inputs (no files to pack). It prints the diff and changes nothing. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-patch \
+  --parameter-file workflows/params/schemas/params-patch.example.yaml --watch
+```
+
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"`. An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 patches different files per cluster and instance, with `clusterMap`, for several clusters from one parameter file. The local files are packed into it first:
 
 ```yaml
 # patch-map.yaml
@@ -1278,7 +1351,7 @@ argo submit -n argo --from workflowtemplate/tpg-patch --parameter-file patch-map
 
 ## 8. tpg-scale-instance
 
-Sets the read replica count of the selected instances in `clusters/fleet.yaml` (one commit for the run), then syncs and verifies each instance, cluster by cluster as `rolloutMode` says. It also changes `maxReadReplicas`, the cap on read replicas of a cluster, with a scale or alone (Round 14, D80). On an instance that tpg-restore restored (`instance.restored`, section 15) the `instance.highAvailability` the scale writes differs from the restore-patch's, so the chart renders it over the restore-patch.
+Sets the read replica count of the selected instances in `clusters/fleet.yaml` (one commit for the run), then syncs and verifies each instance, cluster by cluster as `rolloutMode` says. It also changes `maxReadReplicas`, the cap on read replicas of a cluster, with a scale or alone (Round 14, D80). On an instance that tpg-restore restored (`instance.restored`, section 16) the `instance.highAvailability` the scale writes differs from the restore-patch's, so the chart renders it over the restore-patch.
 
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
@@ -1326,6 +1399,43 @@ The plan step writes every count and cap in one commit. A cap is written after t
 
 Then the rollout: the clusters with an instance to sync are put into batches by `rolloutMode` and `maxParallel` (as in tpg-day0, section 2); within a batch every instance of its clusters runs in parallel, one run at a time per instance. Each instance Application is synced at the pushed commit and waited on until the Postgres resource is `Running`; after a 30-second settle (logged) the workflow checks the pods and StatefulSets with the pod watch.
 
+**Worked examples** (Round 23). Example 1 is the generated file above: a dry run that scales one instance to 2 read replicas with flat inputs; the run records the change only. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-scale-instance \
+  --parameter-file workflows/params/schemas/params-scale-instance.example.yaml --watch
+```
+
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"`. An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 sets different counts per cluster and instance, with `clusterMap` (and the new cap of the first cluster):
+
+```yaml
+# scale-map.yaml
+pushMode: pr
+rolloutMode: batches
+maxParallel: "2"
+clusterMap: |
+  aks-tpg-poc-01:
+    maxReadReplicas: 4                   # the new cap of this cluster
+    instances:
+      orders-db: {replicas: 3}
+      billing-db: {replicas: 0}          # single node
+  aks-tpg-poc-02:
+    instances:
+      orders-db: {replicas: 2, postgresVersion: postgres-17.6}   # guard: skipped when it runs another version
+      reporting-db: {replicas: 1, enableHAIfNeeded: false}      # refused if reporting-db is a single node
+  aks-tpg-poc-03:
+    maxReadReplicas: 2                   # cap only: no instance of this cluster is synced
+```
+
+```bash
+argo submit --from workflowtemplate/tpg-scale-instance --parameter-file scale-map.yaml -p dryRun=true --watch
+argo submit --from workflowtemplate/tpg-scale-instance --parameter-file scale-map.yaml --watch
+```
+
+**More commands.**
+
 ```bash
 # 1. Scale out to 2 read replicas
 argo submit --from workflowtemplate/tpg-scale-instance \
@@ -1353,31 +1463,6 @@ argo submit --from workflowtemplate/tpg-scale-instance \
 # 6. Only the cap (no instances, nothing synced)
 argo submit --from workflowtemplate/tpg-scale-instance \
   -p 'clusters=[aks-tpg-poc-03]' -p maxReadReplicas=2 -p pushMode=direct --watch
-```
-
-Different counts per cluster and instance, with `clusterMap`:
-
-```yaml
-# scale-map.yaml
-pushMode: pr
-rolloutMode: batches
-maxParallel: "2"
-clusterMap: |
-  aks-tpg-poc-01:
-    maxReadReplicas: 4                   # the new cap of this cluster
-    instances:
-      orders-db: {replicas: 3}
-      billing-db: {replicas: 0}          # single node
-  aks-tpg-poc-02:
-    instances:
-      orders-db: {replicas: 2, postgresVersion: postgres-17.6}   # guard: skipped when it runs another version
-      reporting-db: {replicas: 1, enableHAIfNeeded: false}      # refused if reporting-db is a single node
-  aks-tpg-poc-03:
-    maxReadReplicas: 2                   # cap only: no instance of this cluster is synced
-```
-
-```bash
-argo submit --from workflowtemplate/tpg-scale-instance --parameter-file scale-map.yaml --watch
 
 # replicas as the default of every map instance that has no replicas key
 argo submit --from workflowtemplate/tpg-scale-instance -p pushMode=direct -p replicas=2 \
@@ -1396,7 +1481,7 @@ Creates, changes or removes the network policy of Postgres instances. The rules 
 
 Lab item: the policies select pods by labels the chart does not write itself, the operator does. The Postgres pods are assumed to carry `postgres-instance=<instance>` (the monitoring PodMonitor, the workflows' pod watches and these policies rely on it) and the FerretDB pods `app=ferretdb-rw-<instance>` or `ferretdb-ro-<instance>`; confirm both in the lab with `kubectl -n <namespace> get pods --show-labels` before relying on the policies, because a selector that matches no pod leaves those pods without the deny and without the rules.
 
-Labs upgraded from before Round 23 keep the old objects `tpg-ingress` and `tpg-egress` (not suffixed with the instance) until a sync with prune removes them: tpg-day0, or tpg-network-policy `mode=remove`. A fresh deployment never has them.
+**Upgrade note** (Round 23; before it one pair `tpg-ingress` and `tpg-egress` covered every pod of the namespace). Round 23 is for fresh deployments: there is no migration step. A lab that ran an earlier version keeps the two old objects until a sync with prune removes them (tpg-day0, tpg-patch, or tpg-network-policy `mode=remove`) or until you delete them by hand (`kubectl -n <namespace> delete networkpolicy tpg-ingress` and `kubectl -n <namespace> delete ciliumnetworkpolicy tpg-egress`); while they exist, the old and the new policies both apply. A fresh deployment never has them.
 
 `networkPolicy=baseline` on tpg-day0 and tpg-create-instance sets the same policy when an instance is created.
 
@@ -1463,6 +1548,38 @@ The run, in order:
 
 Clients outside the cluster reach the database through a load balancer and are matched by `ingressFromCidrs` on their source address. Check in the lab that the client address reaches the pod unchanged before relying on it (it depends on the Service's `externalTrafficPolicy`).
 
+**Worked examples** (Round 23). Example 1 is the generated file above: a dry run of the baseline policy for one instance, clients from the namespace `orders-app`, with flat inputs. The policies are rendered and sent to the API server with `--dry-run=server`; nothing is pushed or synced. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-network-policy \
+  --parameter-file workflows/params/schemas/params-network-policy.example.yaml --watch
+```
+
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"`. An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 gives different rules to the instances of several clusters, with `clusterMap`:
+
+```yaml
+# netpol-map.yaml
+mode: apply
+pushMode: direct
+clusterMap: |
+  aks-tpg-poc-01:
+    instances:
+      orders-db: {ingressFromNamespaces: [orders-app], egressToCidrs: [10.30.0.0/24]}
+      billing-db: {ingressFromNamespaces: [billing], ingressFromPodLabels: {role: api}}
+  aks-tpg-poc-02:
+    instances:
+      orders-db: {ingressFromNamespaces: [orders-app], ingressFromCidrs: [10.20.0.0/16]}
+```
+
+```bash
+argo submit --from workflowtemplate/tpg-network-policy --parameter-file netpol-map.yaml -p dryRun=true --watch
+argo submit --from workflowtemplate/tpg-network-policy --parameter-file netpol-map.yaml --watch
+```
+
+**More commands.**
+
 ```bash
 # 1. Dry run: baseline policy for orders-db, clients from namespace orders-app
 argo submit --from workflowtemplate/tpg-network-policy \
@@ -1482,23 +1599,6 @@ argo submit --from workflowtemplate/tpg-network-policy \
 # 4. Remove the policy
 argo submit --from workflowtemplate/tpg-network-policy \
   -p 'clusters=[aks-tpg-poc-01]' -p 'instances=[orders-db]' -p mode=remove -p pushMode=direct --watch
-```
-
-Different rules per instance, with `clusterMap`:
-
-```yaml
-# netpol-map.yaml
-mode: apply
-pushMode: direct
-clusterMap: |
-  aks-tpg-poc-01:
-    instances:
-      orders-db: {ingressFromNamespaces: [orders-app], egressToCidrs: [10.30.0.0/24]}
-      billing-db: {ingressFromNamespaces: [billing], ingressFromPodLabels: {role: api}}
-```
-
-```bash
-argo submit --from workflowtemplate/tpg-network-policy --parameter-file netpol-map.yaml --watch
 ```
 
 ---
@@ -1553,7 +1653,51 @@ dryRun: "true"
 
 <!-- END GENERATED: params-delete-apps -->
 
-Order per cluster: instances (final backup, `fleet.yaml` removal, Application removal without cascade, Postgres objects, optional PVC and namespace purge), remaining Tanzu Postgres custom resources, operator (`fleet.yaml`, Application, leftover cluster-scoped objects, namespace `tanzu-postgres-operator`), CRDs. The Azure Blob backup repository is kept unless `purgeBackups` is true. With a `postgresVersion` key in `clusterMap`, an instance that runs another version is `SKIPPED_VERSION_MISMATCH` and kept.
+Order per cluster: instances (final backup, `fleet.yaml` removal, Application removal without cascade, Postgres objects, optional PVC and namespace purge), remaining Tanzu Postgres custom resources, operator (`fleet.yaml`, Application, leftover cluster-scoped objects, namespace `tanzu-postgres-operator`), CRDs. The Azure Blob backup repository is kept unless `purgeBackups` is true. With a `postgresVersion` key in `clusterMap`, an instance that runs another version is `SKIPPED_VERSION_MISMATCH` and kept. The namespace of an instance is the one in its `clusters/fleet.yaml` entry (`namespace`, default `pg-<instance>`; the audit copy in `clusters/deleted/` when the entry is gone): the delete is done instance by instance in that namespace, and `purgeNamespace` is refused (`NAMESPACE_SHARED`) while an instance outside the run still uses it (Round 23).
+
+**purgeBackups** (Round 23; the work is done by the per-instance step of section 11, where the failure reasons are described). For each instance the run expires every PostgresBackup while the instance runs, then, once the instance and its backup location are gone, deletes every blob under the container and `repoPath` of the location. The rules:
+
+- It is irreversible and refused before anything changes with `finalBackup` `true` (the default) or `required`: the final backup would be deleted at once. Set `finalBackup=false` (input, or the instance's `clusterMap` key). The admission policy refuses the inputs, the `validate` step refuses the inputs and the map keys, and the instance step checks once more (`INVALID_OPTIONS`).
+- An instance that does not run (its Postgres is not `Running`) cannot be asked to expire: its own repository is purged anyway, without the expire. If another PostgresBackupLocation also uses the repository, the run fails that instance with `BACKUP_EXPIRE_IMPOSSIBLE` and deletes nothing.
+- A `repoPath` that another PostgresBackupLocation on any registered cluster also uses, also as a folder inside or around it (a cluster that cannot be scanned counts as sharing), keeps its blobs: the backups are expired, the result and the warning `BACKUP_REPO_SHARED` say so. While a copy of the location made by tpg-restore exists (`keepSourceLocation`), the repository counts as shared.
+- The check runs per instance, at the start and again before the blobs are deleted. Two instances of one run that share one pinned `backup.repoPath` (the default path `/<namespace>/<instance>` never shares) therefore see each other only while both locations exist: the second one deletes the blobs of the pair. Do not purge such instances in one run.
+- It needs the storage key in Vault (`tpg/shared/backup-storage`) and refuses a location on another storage account (`PURGE_ACCOUNT_MISMATCH`), the root of a container as `repoPath` (`PURGE_REPOPATH_REFUSED`) and a location it cannot find (`PURGE_LOCATION_UNKNOWN`).
+
+**Worked examples** (Round 23). Example 1 is the generated file above: a dry run that plans the removal of one instance of one cluster, keeping its volumes and namespace. `dryRun` is `true` by default, so a command that names no `dryRun` plans only. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-delete-apps \
+  --parameter-file workflows/params/schemas/params-delete-apps.example.yaml --watch
+```
+
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"`. An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 deletes different things on two clusters, with `clusterMap`: on the first, the operator after its instances, one scratch instance with volumes, namespace and backups, and one kept as it is; on the second, a final backup that must succeed. `purgeBackups` needs `finalBackup: false` of its instance. Plan it first (the file has no `dryRun`), then run it:
+
+```yaml
+# delete-map.yaml
+confirm: [aks-tpg-poc-03, aks-tpg-poc-04]
+pushMode: direct
+purgePvcs: "false"            # default of every instance
+purgeNamespace: "false"
+clusterMap: |
+  aks-tpg-poc-03:
+    deleteOperator: true
+    force: true
+    instances:
+      scratch-db: {purgePvcs: true, purgeNamespace: true, finalBackup: false, purgeBackups: true}
+      test-db: {}
+  aks-tpg-poc-04:
+    instances:
+      billing-db: {finalBackup: required}
+```
+
+```bash
+argo submit --from workflowtemplate/tpg-delete-apps --parameter-file delete-map.yaml --watch
+argo submit --from workflowtemplate/tpg-delete-apps --parameter-file delete-map.yaml -p dryRun=false --watch
+```
+
+**More commands.**
 
 ```bash
 # 1. Plan (dry run) a full clean-up of two clusters
@@ -1588,9 +1732,9 @@ With a parameter file (easier for JSON):
 
 ```yaml
 # delete-lab.yaml
-clusters: '[aks-tpg-poc-03]'
+clusters: [aks-tpg-poc-03]
 apps: '{"aks-tpg-poc-03": ["tpg-instances:scratch-db", "tpg-instances:test-db", "tpg-operator"]}'
-confirm: '[aks-tpg-poc-03]'
+confirm: [aks-tpg-poc-03]
 dryRun: "false"
 purgePvcs: "true"
 purgeNamespace: "true"
@@ -1599,31 +1743,6 @@ pushMode: direct
 
 ```bash
 argo submit --from workflowtemplate/tpg-delete-apps --parameter-file delete-lab.yaml --watch
-```
-
-With `clusterMap`, settings per instance:
-
-```yaml
-# delete-map.yaml
-confirm: '[aks-tpg-poc-03, aks-tpg-poc-04]'
-dryRun: "false"
-pushMode: direct
-purgePvcs: "false"            # default of every instance
-purgeNamespace: "false"
-clusterMap: |
-  aks-tpg-poc-03:
-    deleteOperator: true
-    force: true
-    instances:
-      scratch-db: {purgePvcs: true, purgeNamespace: true, finalBackup: false}
-      test-db: {}
-  aks-tpg-poc-04:
-    instances:
-      billing-db: {finalBackup: required}
-```
-
-```bash
-argo submit --from workflowtemplate/tpg-delete-apps --parameter-file delete-map.yaml --watch
 ```
 
 ---
@@ -1675,6 +1794,39 @@ pushMode: direct
 <!-- END GENERATED: params-delete-instance -->
 
 An instance that is not declared on one of the listed clusters fails the run with `UNKNOWN_INSTANCE` before anything is deleted. The instance's FerretDB and its operator backup schedules (D70, D71) are deleted after the final backup and before the entry leaves `clusters/fleet.yaml`: FerretDB would lose its backend, and no scheduled backup may start during the delete. A run that stops earlier (a guard, a failed final backup) leaves both in place.
+
+**Namespace** (Round 23). The instance is deleted in the namespace of its `clusters/fleet.yaml` entry (`namespace`, default `pg-<instance>`). `purgeNamespace` is refused (`NAMESPACE_SHARED`, nothing changes) while another instance of `clusters/fleet.yaml`, or another Postgres, uses the namespace. The owner of the shared Secrets of a namespace hands them to a remaining instance before its entry leaves Git (`HANDOVER_FAILED` reverts the flags and keeps the instance). The PVCs purged are the ones of this instance (label `postgres-instance`), not every PVC of a shared namespace.
+
+**purgeBackups** (Round 23). The input and the `clusterMap` key of an instance (table above) do this, in this order: (1) refused before anything changes with `finalBackup` `true` or `required` (`INVALID_OPTIONS`; the admission policy and the `validate` step refuse it first); (2) while the instance runs, every PostgresBackup is expired (`spec.expire=true`, newest first; what pgBackRest declines is the warning `BACKUP_EXPIRE_DECLINED`, not a failure; no answer in time or an API error stops the run before anything is deleted, `BACKUP_EXPIRE_TIMEOUT`, `BACKUP_EXPIRE_ERROR`); (3) the instance and its backup location are deleted as usual; (4) every blob under the container and `repoPath` of the location is deleted with the storage key from Vault. An instance that is not `Running` cannot expire anything: when the repository is its own, the blobs are deleted without an expire; when another location also uses it, the instance is `FAILED` `BACKUP_EXPIRE_IMPOSSIBLE` and nothing is deleted. A `repoPath` shared with another PostgresBackupLocation on any registered cluster keeps its blobs (`BACKUP_REPO_SHARED`). The reasons `PURGE_LOCATION_UNKNOWN`, `PURGE_REPOPATH_REFUSED`, `PURGE_ACCOUNT_MISMATCH`, `PURGE_ACCOUNT_UNKNOWN` and `BLOB_PURGE_FAILED` are in the table of section 20.
+
+**Worked examples** (Round 23). This workflow has no `dryRun`: example 1 is the generated file above, the least-impact run. It deletes one instance after a final backup and keeps its volumes and its namespace. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-delete-instance \
+  --parameter-file workflows/params/schemas/params-delete-instance.example.yaml --watch
+```
+
+Example 2 deletes different instances on two clusters with `clusterMap`; `confirm` repeats the cluster names of the map. On the first cluster the scratch instance goes with its volumes, its namespace and its backups (no final backup: `purgeBackups` needs `finalBackup: false`), on the second one the final backup must succeed:
+
+```yaml
+# delete-instance-map.yaml
+confirm: [aks-tpg-poc-03, aks-tpg-poc-04]
+pushMode: direct
+clusterMap: |
+  aks-tpg-poc-03:
+    instances:
+      scratch-db: {finalBackup: false, purgePvcs: true, purgeNamespace: true, purgeBackups: true}
+      test-db: {}
+  aks-tpg-poc-04:
+    instances:
+      billing-db: {finalBackup: required}
+```
+
+```bash
+argo submit --from workflowtemplate/tpg-delete-instance --parameter-file delete-instance-map.yaml --watch
+```
+
+**More commands.**
 
 ```bash
 # 1. Delete billing-db, keep volumes and namespace
@@ -1758,6 +1910,31 @@ While `helm --wait` runs, the pod watch prints the pods of the release's namespa
 
 With standalone monitoring, the target's `kps` writes to the hub gateway over https with basic auth: the step first creates the `VaultStaticSecret monitoring/tpg-remote-write` (Vault `tpg/shared/monitoring-remote-write`) and copies the Vault CA to `monitoring/tpg-remote-write-ca`. After the install, the run checks for 5 minutes (`MONITORING_FLOW_TIMEOUT`) that the hub Prometheus receives series labelled `cluster=<cluster>`; if none arrive the cluster ends `FAILED` with `MONITORING_NOT_FLOWING`, and the step log names what to check (the gateway Service, the target's Prometheus logs, the credential). With the Azure option it checks that the `ama-metrics` pods run.
 
+**Worked examples** (Round 23). This workflow takes no `clusterMap`: the clusters and components are lists. Example 1 is the generated file above: a dry run of cert-manager on one cluster (`helm upgrade --install --dry-run=server`). From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-helm-addons \
+  --parameter-file workflows/params/schemas/params-helm-addons.example.yaml --watch
+```
+
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"`. An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 brings the releases of several clusters up to the pinned chart versions and values (`existingAddons: upgrade`); plan it first:
+
+```yaml
+# addons-fleet.yaml
+clusters: [aks-tpg-poc-01, aks-tpg-poc-02, aks-tpg-poc-03]
+components: [cert-manager, vso]
+existingAddons: upgrade
+```
+
+```bash
+argo submit --from workflowtemplate/tpg-helm-addons --parameter-file addons-fleet.yaml -p dryRun=true --watch
+argo submit --from workflowtemplate/tpg-helm-addons --parameter-file addons-fleet.yaml --watch
+```
+
+**More commands.**
+
 ```bash
 # 1. Everything the cluster needs, on every cluster
 argo submit --from workflowtemplate/tpg-helm-addons -p clusters=all --watch
@@ -1823,11 +2000,42 @@ An instance with `backupSchedule=operator` (section 4) is not in the CronWorkflo
 
 ```bash
 # The operator schedules of an instance, and the backups they created
+# the namespace of docs-db is the default, pg-docs-db (Round 23: an instance may have a namespace of its own, section 3)
 kubectl --context aks-tpg-poc-01 -n pg-docs-db get postgresbackupschedule
 kubectl --context aks-tpg-poc-01 -n pg-docs-db get postgresbackup -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,PHASE:.status.phase
 ```
 
 **Retention is applied by the operator** (Round 15, design decision D84). The PostgresBackupLocation of every instance carries `spec.retentionPolicy`: `fullRetention` with `number` (`backup.fullRetention`, default 4) and `type` (`backup.fullRetentionType`: `count` keeps the newest `number` full backups, `time` keeps full backups for `number` days), and `diffRetention.number` (`backup.diffRetention`, default 6). pgBackRest expires the older backups after each backup, chain by chain: an incremental depends on the full backup and on every incremental before it, so the full backup and its incrementals expire together. Set the values per cluster or instance in `clusters/fleet.yaml` (tpg-day0 and tpg-create-instance inputs `backupFullRetention`, `backupFullRetentionType`, or a tpg-patch values file), or patch `spec.retentionPolicy` with a `PostgresBackupLocation` document (section 7). A change restarts the instances that use the backup location (operator 4.5 documentation): plan it like a maintenance. The workflow tpg-backup-retention, its CronWorkflow and the key `retentionDays` were removed in Round 15: the operator already applied the policy, so the workflow's own window was a second, conflicting rule. A differential backup depends only on its full backup; the POC uses incrementals and keeps `differential` available for a manual run.
+
+**Worked examples** (Round 23). This workflow has no `dryRun`: example 1 is the generated file above, the least-impact run, one full backup of one instance with flat inputs. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-backup \
+  --parameter-file workflows/params/schemas/params-backup.example.yaml --watch
+```
+
+Example 2 takes different backups on several clusters with `clusterMap`: a full backup of `orders-db` and the default type (here incremental) for `billing-db` on the first cluster, a longer wait for `orders-db` on the second:
+
+```yaml
+# backup-map.yaml
+backupType: incremental
+clusterMap: |
+  aks-tpg-poc-01:
+    instances:
+      orders-db: {backupType: full}
+      billing-db: {}
+  aks-tpg-poc-02:
+    instances:
+      orders-db: {backupTimeoutSeconds: 21600}
+```
+
+```bash
+argo submit --from workflowtemplate/tpg-backup --parameter-file backup-map.yaml --watch
+```
+
+To expire backups, see section 14 (tpg-backup-expire).
+
+**More commands.**
 
 ```bash
 # 1. Full backup of every instance on every cluster
@@ -1859,7 +2067,97 @@ kubectl --context aks-tpg-poc-01 -n pg-orders-db get postgresbackup \
 
 ---
 
-## 14. CA bundles and new credential values in Vault
+## 14. tpg-backup-expire
+
+Expires PostgresBackups (Round 23). `clusterMap` is the only way to name the targets. Per instance, one of:
+
+- `backups: [orders-db-full-202609010100, ...]`: the PostgresBackup names to expire (a list in brackets, also with one name).
+- `purgeBackups: true`: every backup of the instance. The blobs of the repository are never deleted here (that is `purgeBackups` of `tpg-delete-instance` and `tpg-delete-apps`).
+
+Not both. `includeDependents: true` (with `backups`) is required to expire a backup that has dependents: a full backup takes the differential and incremental backups of its chain with it, a differential the incrementals after it. Without it the instance is `BLOCKED` (`HAS_DEPENDENTS`) with the list of dependents, nothing is expired, and the run ends `Failed` after the other instances ran; naming every dependent in `backups` is the other way. Dependents go first, newest first. A backup is expired by `spec.expire=true` on its PostgresBackup; the operator runs pgBackRest expire and the step waits for its answer (`timeoutSeconds` per backup, every poll logged).
+
+| Input | Type | Mandatory | Default | Description |
+|---|---|---|---|---|
+| `clusterMap` | `Map` | yes | | Cluster to instances to `backups` or `purgeBackups`, `includeDependents` (section 3) |
+| `dryRun` | `Boolean` | no | `true` | `true` records the plan (what would be expired, dependents included, what is `BLOCKED`) and changes nothing; `false` expires |
+| `confirm` | `List` | with `dryRun=false` | | The cluster names of `clusterMap`, for example `[aks-tpg-poc-01]` |
+| `timeoutSeconds` | `Integer` | no | `600` | How long to wait for the operator's answer to the expire of one backup |
+
+<!-- BEGIN GENERATED: params-backup-expire -->
+<!-- written by workflows/params/params_schema.py; do not edit by hand -->
+
+Parameter file schema: `workflows/params/schemas/params-backup-expire.schema.json` (also `params-backup-expire.schema.yaml`). Check a parameter file with it:
+
+```bash
+check-jsonschema --schemafile workflows/params/schemas/params-backup-expire.schema.json <parameter file>
+```
+
+Worked example 1, `workflows/params/schemas/params-backup-expire.example.yaml`:
+
+```yaml
+# yaml-language-server: $schema=params-backup-expire.schema.json
+# tpg-backup-expire: A dry run: the plan to expire one backup with its dependents (dryRun is true by default).
+# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
+# params-backup-expire.schema.json). Submit it with:
+#   argo submit -n argo --from workflowtemplate/tpg-backup-expire --parameter-file params-backup-expire.example.yaml --watch
+clusterMap: |
+  aks-tpg-poc-01:
+    instances:
+      orders-db:
+        backups: [orders-db-full-202609010100]
+        includeDependents: true
+dryRun: "true"
+```
+
+<!-- END GENERATED: params-backup-expire -->
+
+Results per instance: `SUCCEEDED` (`DRY_RUN` for the plan; `DECLINED_SOME` when `purgeBackups` ran and pgBackRest declined some), `BLOCKED` (`HAS_DEPENDENTS`), `FAILED` (`UNKNOWN_BACKUP`, `NOT_EXPIRABLE`, `INSTANCE_NOT_RUNNING`, `OPERATION_IN_PROGRESS`, `BACKUP_EXPIRE_DECLINED`: a backup you named, or a dependent of it, was declined; the detail is the operator's message and the later backups are not attempted), `TIMEOUT`. Lab item: how the operator reports an expire, and what it does when pgBackRest refuses (for example the last full backup), is a lab item of Round 23 (verify it on the lab cluster). Two points of the guess: (1) an object the operator keeps after an expire (phase `Expired` or `Expiring`, or any PostgresBackup with `spec.expire=true`) is not an unfinished operation, so it never makes a later backup, restore, scale or delete fail with `OPERATION_IN_PROGRESS`; (2) only conditions written after this run's patch count as the answer: with `observedGeneration`, it must be at least `metadata.generation`; without it, `lastTransitionTime` must not be older than the patch (less 2 minutes for clock skew), and with neither field the condition counts only when this run set `spec.expire`. So on a re-run where `spec.expire` is already `true` an old `Expired=False` is not read as a refusal; without a fresh signal the step waits and times out like for any expire (`TIMEOUT`). Both depend on how the operator really writes status; confirm them together with the rest of this item.
+
+**Worked examples** (Round 23). Example 1 is the generated file above: the plan to expire one full backup with its dependents (`dryRun` is `true` by default; nothing is expired). From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-backup-expire \
+  --parameter-file workflows/params/schemas/params-backup-expire.example.yaml --watch
+```
+
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"` and add `confirm: [aks-tpg-poc-01]` (the cluster names of the map). An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 expires on two clusters: the named full backup with its chain on the first, every backup of `billing-db` on the second (the blobs stay; deleting them is `purgeBackups` of the delete workflows). Plan it, then run it:
+
+```yaml
+# expire-map.yaml
+clusterMap: |
+  aks-tpg-poc-01:
+    instances:
+      orders-db:
+        backups: [orders-db-full-202609010100]
+        includeDependents: true
+  aks-tpg-poc-02:
+    instances:
+      billing-db: {purgeBackups: true}
+```
+
+```bash
+argo submit --from workflowtemplate/tpg-backup-expire --parameter-file expire-map.yaml --watch
+argo submit --from workflowtemplate/tpg-backup-expire --parameter-file expire-map.yaml \
+  -p dryRun=false -p 'confirm=[aks-tpg-poc-01, aks-tpg-poc-02]' --watch
+```
+
+**More commands.**
+
+```bash
+# 1. Plan: the full backup with its chain
+argo submit --from workflowtemplate/tpg-backup-expire \
+  -p clusterMap='{"aks-tpg-poc-01":{"instances":{"orders-db":{"backups":["orders-db-full-202609010100"],"includeDependents":true}}}}' --watch
+
+# 2. Run it
+argo submit --from workflowtemplate/tpg-backup-expire -p dryRun=false -p 'confirm=[aks-tpg-poc-01]' \
+  -p clusterMap='{"aks-tpg-poc-01":{"instances":{"orders-db":{"backups":["orders-db-full-202609010100"],"includeDependents":true}}}}' --watch
+```
+
+---
+
+## 15. CA bundles and new credential values in Vault
 
 **The backup CA bundle** (Round 15, design decision D86). An instance with `backup.enableSSL: true` verifies the storage account's certificate with the PEM bundle in its PostgresBackupLocation `spec.storage.azure.caBundle`. The workflows write it from one of three sources, the most specific first:
 
@@ -1883,7 +2181,7 @@ scripts/vault-secret.sh --vault-addr https://<vault-ui IP>:8200 --vault-ca-file 
 scripts/vault-secret.sh --yes ca delete azure-storage-2025
 ```
 
-`tpg-rotate-credential` with `secretType=ca-bundle` writes a named bundle as well, from a PEM file (`caBundleFile`) or a wrapping token (section 16).
+`tpg-rotate-credential` with `secretType=ca-bundle` writes a named bundle as well, from a PEM file (`caBundleFile`) or a wrapping token (section 17).
 
 **New credential values: wrapping tokens** (design decision D87). A new password or token must never travel as a workflow input: inputs are stored in the Workflow object and shown in the Argo UI. `scripts/vault-secret.sh wrap <secretType> [<name> [<key>...]]` reads the new value from the shell environment (exported variables) or a hidden prompt, sends it to Vault `sys/wrapping/wrap`, and prints only a wrapping token: a reference to the value, valid for 10 minutes and for one read. The value itself is never in a command-line argument or a file:
 
@@ -1909,9 +2207,9 @@ The workflow unwraps the token once. Whoever unwraps it first gets the value, an
 
 ---
 
-## 15. tpg-restore
+## 16. tpg-restore
 
-Restores Postgres instances from a list of pairs. Each pair is one restore: `sourceClusterConfig` names the instance to restore from and `targetClusterConfig` the instance to restore into, each as `<cluster>: <namespace>: <instance>: {keys}` with exactly one cluster, one namespace and one instance (namespaces are mandatory). The target is the source instance itself (in place), a new instance in another namespace of the cluster, or a new instance on another cluster (added to `clusters/fleet.yaml` and adopted by Argo CD). The recovery point is a named backup (`pitrEnabled: false`, the default when `pitrEnabled` is absent) or point-in-time recovery (`pitrEnabled: true`, `pitrConfig.type` `latest`, `time`, `lsn` or `transaction`). A named backup works into the same namespace, another namespace and another cluster: the restore always uses `sourceBackupName` as `spec.sourceBackup.name` of the PostgresRestore; for another namespace or cluster the workflow re-creates the source backup location there and the operator syncs the backups of the same names. The flat inputs of earlier versions (`sourceCluster`, `instance`, `mode`, `targetTime`, `backupName`, `lsn`, `xid`, `targetCluster`, `targetInstance`, `confirm`, `bestEffort`) are gone; the admission policy refuses them as unknown inputs.
+Restores Postgres instances from a list of pairs (Round 23; the flat inputs of earlier versions, `sourceCluster`, `instance`, `mode`, `targetTime`, `backupName`, `lsn`, `xid`, `targetCluster`, `targetInstance`, `confirm` and `bestEffort`, are gone, and the admission policy refuses them as unknown inputs). Each pair is one restore: `sourceClusterConfig` names the instance to restore from and `targetClusterConfig` the instance to restore into, each as `<cluster>: <namespace>: <instance>: {keys}` with exactly one cluster, one namespace and one instance (namespaces are mandatory). The recovery point is a named backup (`pitrEnabled: false`, the default when `pitrEnabled` is absent) or point-in-time recovery (`pitrEnabled: true`, `pitrConfig.type` `latest`, `time`, `lsn` or `transaction`). The pairs are independent of each other: a failed pair does not stop the others, and the run ends `Failed` when any pair failed, timed out or was blocked. A target is restored once per run and cannot be the source of another pair of the run. This section describes the three methods, the keys of a pair and how they become the PostgresRestore, the version matrix, what the workflow does for each pair, every reason it records, the restore-patch that keeps Argo CD from undoing the restore, `dryRun`, the submit script and two worked examples.
 
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
@@ -1956,39 +2254,240 @@ dryRun: "true"
 
 <!-- END GENERATED: params-restore -->
 
+### The three methods
+
+The method follows from the two sides of the pair. A restore never goes into an instance that already exists unless it is the source itself (in place); a live Postgres of the target's name that is not the source is refused with `TARGET_EXISTS`.
+
+| Method | The pair | What the workflow does | What it needs |
+|---|---|---|---|
+| 1. New cluster | The target is on another cluster than the source, in any namespace that is not reserved | Adds the target to `clusters/fleet.yaml` (a copy of the source's entry, or a skeleton built from the spec file), copies the source backup location and its Secret into the target namespace, restores, and lets Argo CD adopt the new instance | The target cluster has an entry `clusters.<cluster>` in `clusters/fleet.yaml` and a running operator (tpg-day0 first; `UNKNOWN_TARGET_CLUSTER` otherwise) |
+| 2. Same cluster, another namespace, or a new instance in the source namespace | The target is on the source's cluster: in another namespace, or in the same namespace under another instance name | Same as method 1. Inside the source namespace there is nothing to copy: the backup location is the source's own, and a named backup is used where it is | A name that no live Postgres of the cluster uses (`TARGET_EXISTS`, `INSTANCE_NAME_IN_USE`) |
+| 3. In place | The source and the target are the same cluster, namespace and instance | Overwrites the data of the live instance with the recovery point. Nothing is added to `clusters/fleet.yaml`; the restore-patch is recorded for an instance that has an entry | `clusters.<cluster>.cluster.allowInPlaceRestore: true` in `clusters/fleet.yaml` (default `false`, `clusters/_template/cluster.yaml`) and, for a real run, `confirm: <instance>` in the target. Either missing refuses the pair (`IN_PLACE_NOT_ALLOWED` refuses the whole run) |
+
+Into another namespace or cluster a named backup works too: the PostgresRestore still names `sourceBackup.name`, and the operator of the target must see a PostgresBackup of that name, which it gets from the copy of the source backup location (`backupSync`). Point-in-time recovery needs no PostgresBackup of the target: it reads the repository through the copy.
+
+### Keys of a pair and the PostgresRestore
+
 Keys of a pair (`workflows/params/cluster-map-keys.yaml`, section `restore`; schema `workflows/params/schemas/clustermap-restore.schema.json`, example `clustermap-restore.example.yaml`):
 
 | Side | Key | Meaning |
 |---|---|---|
-| source | `sourceBackupName` | The PostgresBackup to restore, in the namespace of the source instance; mandatory when the target restores a named backup (`pitrEnabled: false` or absent), into the same namespace, another namespace or another cluster; optional with PITR (it only gives the backup location and stanza when the source instance is gone) |
-| target | `pitrEnabled` | Default `false`. `true`: point-in-time recovery (`pitrConfig` says to where); `false` or absent: restore `sourceBackupName`, which is then mandatory (the error names both ways out: give `sourceBackupName`, or set `pitrEnabled: true` with `pitrConfig`) |
+| source | `sourceBackupName` | The PostgresBackup to restore, in the namespace of the source instance. Mandatory when the target restores a named backup (`pitrEnabled: false` or absent), into the same namespace, another namespace or another cluster. Optional with PITR: it then only gives the backup location and the stanza when the source instance is gone |
+| target | `pitrEnabled` | Default `false`. `true`: point-in-time recovery (`pitrConfig` says to where). `false` or absent: restore `sourceBackupName`, which is then mandatory (the error names both ways out: give `sourceBackupName`, or set `pitrEnabled: true` with `pitrConfig`) |
 | target | `pitrConfig.type` | `latest`, `time`, `lsn` or `transaction` |
-| target | `pitrConfig.timestamp`, `pitrConfig.target` | `time`: a UTC time; `lsn`: a log sequence number; `transaction`: a transaction ID (mandatory for those types, refused for the others) |
-| target | `pitrConfig.sourceBackupConfig.srcBackupLocationName`, `srcStanzaName`, `srcBackupLabel` | The backup repository to recover from; location and stanza are optional where they can be derived; `srcBackupLabel` (a pgBackRest label) is refused with `latest` |
-| target | `bestEffort` | Mandatory for `time`, `lsn` and `transaction`, refused with `latest` and with a named-backup restore (`pitrEnabled` false or absent) |
-| target | `targetInstanceSpecFilePath` | The spec of the restored Postgres instance: one file with one `kind: Postgres` document, `[./orders-dr.yaml]` (a file of the submitting machine) or `[repo:helm_artifacts/instance/tpg-instance/restore-specs/<file>]` (that folder only, `.yaml` or `.yml`, see its README; no `..`, no absolute path, no `//`; a symbolic link, or a path that resolves outside that folder, is refused with `SPEC_FILE_INVALID`). Its `spec` is the source of truth: it is `spec.targetInstance.spec` of the PostgresRestore as it is (never merged over a chart render) and is stored in the fleet repository as the instance's restore-patch, which the chart renders the restored instance from (below). Allowed for a new target and for an in-place restore (its values override the existing instance's). Optional: without it a new target copies the source's `clusters/fleet.yaml` entry (mandatory when the source is not in `clusters/fleet.yaml`) and the PostgresRestore sends only `spec.targetInstance.name`, so the operator creates the instance and fills in its spec (**lab item**: how operator 4.5 does that is not verified); an in-place restore sends only the name and writes nothing to `clusters/fleet.yaml` |
-| target | `confirm` | The target instance name. **Only for an in-place pair**, where it is mandatory when `dryRun` is `false`; on any other pair it is refused by the validate step as meaningless (a restore never overwrites another instance: a live target of that name is `TARGET_EXISTS`) |
-| target | `skipMinorVersionCheck`, `postRestoreBackup` | Flags, default `false`: the annotation `sql.tanzu.vmware.com/skip-minor-version-check: "true"` on the PostgresRestore; a full backup after the restore |
+| target | `pitrConfig.timestamp`, `pitrConfig.target` | `time`: a UTC time such as `2026-09-15T08:30:00Z`; `lsn`: a log sequence number such as `0/3000060`; `transaction`: a transaction ID (a number). Mandatory for those types, refused for the others |
+| target | `pitrConfig.sourceBackupConfig.srcBackupLocationName`, `srcStanzaName`, `srcBackupLabel` | The backup repository to recover from. Location and stanza are optional where they can be derived from the live source instance, or from the PostgresBackup `sourceBackupName` names (a given value that differs from what they report is a warning and wins); mandatory when there is neither (`PITR_SOURCE_UNKNOWN`). `srcBackupLabel` is a pgBackRest label such as `20260915-020000F`, the backup the recovery starts from; refused with `latest` |
+| target | `bestEffort` | Mandatory for `time`, `lsn` and `transaction`; refused for `latest` and for a named-backup restore |
+| target | `targetInstanceSpecFilePath` | The spec of the restored Postgres instance: one file with one `kind: Postgres` document, `[./orders-dr.yaml]` (a file of the submitting machine, packed into `patchFiles`) or `[repo:helm_artifacts/instance/tpg-instance/restore-specs/<file>]` (that folder only, `.yaml` or `.yml`, see its README; no `..`, no absolute path, no `//`; a symbolic link, or a path that resolves outside that folder, is refused with `SPEC_FILE_INVALID`). Its `spec` is the source of truth: it is `spec.targetInstance.spec` of the PostgresRestore as it is (never merged over a chart render) and is stored as the instance's restore-patch (below). Allowed for a new target and for an in-place restore (its values override the existing instance's). Optional: without it a new target copies the source's `clusters/fleet.yaml` entry (the file is mandatory when the source is not in `clusters/fleet.yaml`: `SPEC_FILE_REQUIRED`) and the PostgresRestore sends only `spec.targetInstance.name`, so the operator creates the instance and fills in its spec (**lab item**: how operator 4.5 does that is not verified) |
+| target | `confirm` | The target instance name. **Only for an in-place pair**, where it is mandatory when `dryRun` is `false`. On any other pair the validate step refuses it as meaningless (`confirm: not allowed: confirm is only for an in-place restore`, also in a dry run) |
+| target | `skipMinorVersionCheck`, `postRestoreBackup` | Flags, default `false`: the annotation `sql.tanzu.vmware.com/skip-minor-version-check: "true"` on the PostgresRestore (for backups taken by operator 4.2.2 or older); a full backup of the target after the restore |
 
-The validate step checks everything that needs no cluster, and names the pair and the key path of each error, for example `clusterMap[1].targetClusterConfig.aks-tpg-poc-02.pg-orders-dr.orders-db-dr.bestEffort is required with pitrConfig.type: time`: the list shape, one cluster, namespace and instance per side, registered clusters, namespaces (a DNS label; the reserved namespaces of tpg-day0 are refused for a target), the key rules above, `[repo: x.yaml]` with a space (`repo:<file path> "check for white spaces in between"`), a target that is restored twice or is the source of another pair, and a named-backup restore without `sourceBackupName`. An in-place pair (same cluster, namespace and instance) needs `confirm` when `dryRun` is `false`; `confirm` on any other pair is refused (`confirm: not allowed: confirm is only for an in-place restore`, even in a dry run). In place also needs `clusters.<cluster>.cluster.allowInPlaceRestore: true` in `clusters/fleet.yaml` (default `false`, `clusters/_template/cluster.yaml`): the validate step reads it from the fleet repository, and when any in-place pair is on a cluster without it the whole run is refused before any pair starts (`IN_PLACE_NOT_ALLOWED`, naming the cluster and the setting); `dryRun` does not skip this check, and a fleet repository that cannot be read refuses the run as well.
+How the keys become the PostgresRestore (checked against the live CRD `helm_artifacts/instance/crd-reference/source-crds/postgresrestores...yaml` by `tests/crd-reference`):
 
-What each pair does (`workflows/scripts/restore-pair.sh`; phase 7 of Round 23 rewrites this section around the three methods and the matrix):
+| Key of the pair | Field of the PostgresRestore |
+|---|---|
+| `sourceBackupName` (`pitrEnabled` false) | `spec.sourceBackup.name` |
+| `pitrConfig.type` | `spec.pitr.type` |
+| `pitrConfig.target` (`lsn`, `transaction`) | `spec.pitr.target` |
+| `pitrConfig.timestamp` (`time`) | `spec.pitr.timestamp` |
+| `bestEffort` | `spec.pitr.bestEffort` |
+| `srcBackupLocationName` | `spec.pitr.sourceBackupLocation.name` (inside the source namespace; into another namespace or cluster the name of the copy, `restore-src-<source cluster>-<source namespace>-<source instance>`, or of the location that is reused instead) |
+| `srcStanzaName` | `spec.pitr.sourceBackupLocation.stanzaName` |
+| `srcBackupLabel` | `spec.pitr.sourceBackupLocation.set` |
+| the target instance, `targetInstanceSpecFilePath` | `spec.targetInstance.name`, `spec.targetInstance.spec` (the file's spec, or absent) |
+| `skipMinorVersionCheck` | the annotation `sql.tanzu.vmware.com/skip-minor-version-check: "true"` |
 
-1. **Source.** The instance on its cluster (live or gone), in `clusters/fleet.yaml` (its namespace must be the one of the pair: `SOURCE_NAMESPACE_MISMATCH`), its PostgresVersion (minor version, and the flavour: a name ending in `-lite`), its backup location (container, `repoPath`, Secret) and stanza.
-2. **Named backup.** Inside the source namespace the PostgresBackup must exist and be `Succeeded` now (`BACKUP_NOT_FOUND`, `BACKUP_NOT_SUCCEEDED`, also in a dry run). Into another namespace or cluster the source PostgresBackup is read first and must be `Succeeded` (`SOURCE_BACKUP_UNVERIFIED` when it is missing or the cluster cannot be read, `BACKUP_NOT_SUCCEEDED`).
-3. **PITR.** `srcBackupLocationName` and `srcStanzaName` come from the live source, or from the PostgresBackup that `sourceBackupName` names when the source is gone; a given value that differs is a warning (`SRC_LOCATION_DIFFERS`, `SRC_STANZA_DIFFERS`) and wins; with neither a live source nor a readable backup they are mandatory (`PITR_SOURCE_UNKNOWN`). The recovery time is checked against the Succeeded full backups (`NO_FULL_BACKUP`, `INVALID_TIMESTAMP`, `OUTSIDE_RECOVERY_WINDOW`).
-4. **Matrix** (that pair only, `BLOCKED`): a standard source into a lite target is `RESTORE_FLAVOUR_UNSUPPORTED`; a target version below the version the backup was taken from (the named backup's `status.fullPostgresVersion`, else the live source's version, else its PostgresVersion) is `RESTORE_VERSION_LOWER`, a lower major version included. `skipMinorVersionCheck` only sets the operator's annotation `sql.tanzu.vmware.com/skip-minor-version-check: "true"` on the PostgresRestore (meant for backups taken by operator v4.2.2 or older) and relaxes none of these checks; another (higher) major version is left to the operator, which refuses a major mismatch itself.
-5. **Target.** A restore into an existing instance is allowed only in place. A live Postgres with the target's name in the target namespace on the target cluster that is not the pair's source instance fails that pair at plan time, also in a dry run, with `TARGET_EXISTS` (restore in place or choose a new instance name); the other pairs go on and the run ends Failed. A target that is only declared in `clusters/fleet.yaml` and not deployed is a new target: its entry is replaced as a whole by the one below (the declared namespace is kept; nothing else of the declared entry survives, neither `ferret`, patch files, `disableInitialBackup` nor a `sharedSecretsOwner`), and the checks of a new target apply to it (`SPEC_FILE_REQUIRED`, `NAMESPACE_SECRET_CONFLICT`, the owner rules). An in-place pair needs `confirm` for a real run (`CONFIRMATION_MISMATCH` is the second line of defence behind the validate step; in a dry run a missing `confirm` is the warning `CONFIRMATION_MISSING`). A spec file is allowed for a new target and for an in-place restore. A new target is added to `clusters/fleet.yaml` (`pushMode`; `GIT_PUSH_FAILED`) as a copy of the source's entry (without `disableInitialBackup`, `backup.repoPath`, `ferret`, `restorePatch`, `instance.restored` and the postgres patch and overlay files), or, when the source is not there, as a skeleton built from the spec file (`SPEC_FILE_REQUIRED` without one), and adopted by its Argo CD Application after the restore. The shared objects of its namespace (ServiceAccount `tpg-vso`, VaultStaticSecrets `regsecret` and `backup-storage`) are only ever synced by the Application of their one owner (`sharedSecretsOwner`, decided as in tpg-day0; `NAMESPACE_OWNER_CONFLICT` if two end up owning them), never applied by the workflow; a foreign Secret of those names is `NAMESPACE_SECRET_CONFLICT`. A named backup of another instance than the pair's source instance is refused (`BACKUP_OF_OTHER_INSTANCE`: a pair has one source instance).
-   **Restore-patch and the render of a restored instance** (`helm_artifacts/instance/tpg-instance/restore-patch/`, see its README). The Postgres that a restore leaves must be what Argo CD renders, with no chart default and no entry value filled in. So the spec of the restored Postgres is stored as `restore-patch/<instance>-restore-<uid>.yaml` (one `kind: Postgres` document: `apiVersion`, `kind` and the spec, no `metadata`) and recorded in the instance's entry as `restorePatch.current` (with `mode`, and `previous: {path, commit}` when it replaces an earlier one; the file that was `previous` is deleted), and the entry gets `instance.restored: true` (workflow-owned) and the fleet-equivalent fields of that spec (`postgresVersion`, `storageClassName`, `storageSize`, `walStorageSize`, `resources`, `highAvailability` (a single node as an explicit `false`/`0`), `exposure`, `readOnlyExposure` and the service annotations); in `mode: base` the ones the spec lacks are removed. Which spec:
-   - **with a spec file**: the spec file's. A new target (one declared in `clusters/fleet.yaml` but not deployed included): `mode: base`, in the same commit as the entry. In place: `mode: over` (the operator merges the file into the existing Postgres, overwriting the fields it sets), in a commit of its own after the restore, with `restorePatch.postgresPatch` recording the postgres patch file that was current;
-   - **without one** (a new target, or in place): after the restore succeeded and the instance runs, the `.spec` of the restored Postgres is **read from the target cluster** and stored the same way, `mode: base`, in a commit of its own. Only `.spec` is taken: `status`, `metadata` (annotations, managed fields, `resourceVersion`, `uid`) are not part of it, `null` fields are dropped, and nothing else is stripped (the live spec is the truth, operator defaults included). It must fit the Postgres schema; when it cannot be read or does not, the pair stays `SUCCEEDED` with the warning `RESTORE_PATCH_NOT_RECORDED`, which names the unknown or invalid fields of the live spec (for example `spec.noSuchField is not a field of the Postgres resource`; nothing unchecked is stored), and the Application of a new or declared instance is not synced by this run (the chart would render the copied entry over the restored Postgres).
-   An in-place instance that is not in `clusters/fleet.yaml` records nothing. A re-restore makes the new file `current` and the old one `previous` (no longer applied); the source's restore-patch is never copied to a new target, and a new target's entry does not take the source's `instance.restored`, `restorePatch`, `ferret`, `backup.repoPath`, `instance.disableInitialBackup` or postgres patch and overlay files.
-   **The render** (`tpg.restoredPostgres`, `templates/_helpers.tpl`). `R` is the restore-patch's spec. *Mode base*: (1) `R` as it is, a field it omits stays unset; (2) the fleet-managed `backupLocation` (`<instance>-backup-location`) and `imagePullSecret` (`regsecret`), each one only where `R` omits it: a `backupLocation` or `imagePullSecret` that `R` sets wins (a `backupLocation` the spec file names must exist in the target namespace, `BACKUP_LOCATION_MISSING`, except the fixed name of the copy of the source backup location, `restore-src-<source cluster>-<source namespace>-<source instance>`, which this run creates before the restore; there is no replacement warning); (3) later changes: every fleet-equivalent field of the entry that **differs** from `R` (compared as JSON; `R` lacking it differs, except `highAvailability` false/0, `serviceType` `ClusterIP` and empty annotations, which equal "unset") replaces `R`'s, an equal one changes nothing; (4) the current postgres patch file of tpg-patch. The overlays of the creation and the `instance:` keys of values patches do not reach a restored Postgres. *Mode over*: the normal render (values, overlay, the patch file current at the restore) with `R` over it (`R`'s own `backupLocation` and `imagePullSecret` win over the render's), then the later changes for the fields `R` sets, then a patch file set after the restore. **Only three workflows change a restored instance afterwards**: tpg-scale-instance (writes `instance.highAvailability`) and tpg-upgrade `component=postgres` (writes `instance.postgresVersion`), which differ from `R` and so win; and tpg-patch (postgres patch files, applied after). tpg-patch never retires the restore-patch, and it refuses a values patch that sets an `instance:` key which reaches the Postgres (`storageSize`, `walStorageSize`, `resources`, `exposure`, `readOnlyExposure`, `serviceAnnotations`, `readOnlyServiceAnnotations`, `allowedSourceRanges`, `internalLoadBalancerSubnet`) for a restored instance (`PATCH_REFUSED`, detail `RESTORED_VALUES_PATCH`, naming tpg-scale-instance, tpg-upgrade and postgres patch files); keys that do not reach it (`backup`, `network`, `ferret`, ...) stay allowed. tpg-network-policy does not touch the Postgres; tpg-day0 and tpg-create-instance block the instance (`INSTANCE_RESTORED`, section 4). A new target records its restore-patch in the same commit as the entry only with a spec file (`GIT_PUSH_FAILED`, `pushMode` applies to every commit; `RESTORE_PATCH_NOT_RECORDED` is the warning for the others).
-6. **Another namespace or cluster.** The source backup location is copied into the target namespace (`backupSync` on, retention so high that no expiry runs through it, label `tpg.fleet/restore-source`); a location there for the same container and `repoPath` with `backupSync` on is reused instead, one with it off is `SOURCE_LOCATION_CONFLICT`; a list of the target namespace's locations that cannot be read fails the pair with `TARGET_UNREADABLE` (it is not taken for an empty list), also in a dry run. Its Secret `backup-storage` is the namespace's own or comes from Vault. Any other Secret is copied from the source cluster into a Secret of the copy's **own name**, `<copy name>-creds` (the copy's `spec.storage.azure.secret.name`, label `tpg.fleet/restore-source`), so the copies of different sources in one namespace never share or overwrite a Secret, whatever the sources call theirs. A reused copy keeps using the Secret it has; when that Secret's contents differ from the source's it is updated only if its `tpg.fleet/restore-source` label is this pair's source (`<cluster>.<instance>`), otherwise the pair fails with `SOURCE_SECRET_CONFLICT` and nothing is overwritten. Values are held in memory only, never written to a file or the log. A named backup then waits for the PostgresBackup of the same name in the target namespace (`BACKUPS_NOT_SYNCED`, `BACKUP_NOT_SUCCEEDED` when it is `Failed`); the wait counts against `restoreTimeoutSeconds`.
-7. **dryRun** (default): nothing changes on a cluster, in Git or in Argo CD; the plan, the PostgresRestore as YAML included, is in the step log and in the run record `plan.restore.<cluster>.<instance>`.
-8. **Restore.** The PostgresRestore (`spec.sourceBackup` or `spec.pitr`, `targetInstance.spec` only with a spec file (new target or in place), the annotation `sql.tanzu.vmware.com/skip-minor-version-check` with `skipMinorVersionCheck`) is rendered through `helm_artifacts/instance/crd-reference` and waited for within `restoreTimeoutSeconds` (`RESTORE_FAILED`, `TIMEOUT`); the instance must then run (`TARGET_<reason>`).
-9. **After.** `postRestoreBackup` takes a full backup of the target; when that backup fails the pair stays `SUCCEEDED` with the warning `POST_RESTORE_BACKUP_FAILED`. `keepSourceLocation=false` removes the copy this run created (and with it the copy's own Secret, no other), never a reused one, and only when no Postgres of the target namespace uses it: the workflow lists every Postgres there and reads `spec.backupLocation.name`; when one names the copy (the restored instance, as the operator or the spec file made it, or any other) the copy is kept and the pair stays `SUCCEEDED` with the warning `SOURCE_LOCATION_IN_USE`, which names the instance(s); when the instances cannot be listed, or the delete fails, the copy is kept with the warning `SOURCE_LOCATION_NOT_REMOVED`. While a copy exists the repository counts as shared for `purgeBackups` of the delete workflows.
-10. **Success** is the PostgresRestore `Succeeded` and the target `Running`. The result is `result.<target cluster>.<target instance>`; every failure records its reason code, a crash `UNEXPECTED_ERROR`. Pairs with the same target cluster and namespace run one after another (an Argo mutex `tpg-restore-ns-<cluster>-<namespace>` on the pair step, besides the one per target instance); pairs of other namespaces stay parallel up to `maxParallel`.
+`spec.sourceBackup` and `spec.pitr` are never sent together. The object is named `<target instance>-restore-<yyyymmddHHMMSS>`, carries the label `tpg.fleet/workflow` and is rendered through `helm_artifacts/instance/crd-reference` like every operator object of the fleet.
+
+The validate step checks everything that needs no cluster, and names the pair and the key path of each error, for example `clusterMap[1].targetClusterConfig.aks-tpg-poc-02.pg-orders-dr.orders-db-dr.bestEffort is required with pitrConfig.type: time`: the list shape, one cluster, namespace and instance per side, registered clusters, namespaces (a DNS label; the reserved namespaces of tpg-day0 are refused for a target), the key rules above, `[repo: x.yaml]` with a space (`repo:<file path> "check for white spaces in between"`), a target that is restored twice or is the source of another pair, and a named-backup restore without `sourceBackupName`. An in-place pair needs `confirm` when `dryRun` is `false`; `confirm` on any other pair is refused. A local spec file must be in `patchFiles`. In place also needs `allowInPlaceRestore` (above): the validate step reads it from the fleet repository, and when any in-place pair is on a cluster without it the whole run is refused before any pair starts (`IN_PLACE_NOT_ALLOWED`, naming the cluster and the setting); `dryRun` does not skip this check, and a fleet repository that cannot be read refuses the run as well.
+
+### The version matrix
+
+Applied to each pair (that pair only is stopped, `BLOCKED`). A PostgresVersion is **lite** when its name ends in `-lite` (the pattern `liteVersion` in `workflows/params/types.yaml`). The version of the backup is, in this order, the named backup's `status.fullPostgresVersion`, the live source's `status.postgresVersion`, or the version of the source's PostgresVersion (its `dbVersion`, else read from the name).
+
+| Source | Target | Result |
+|---|---|---|
+| standard | lite | `BLOCKED` `RESTORE_FLAVOUR_UNSUPPORTED` |
+| lite | lite, or standard | Not stopped by the workflow |
+| any | A lower version: a lower minor version of the same major, or a lower major | `BLOCKED` `RESTORE_VERSION_LOWER` |
+| any | The same or a higher minor version of the same major | Allowed |
+| any | A higher major version | Passed on: the operator refuses a restore across major versions itself |
+| A version that is not known (not live, not in `clusters/fleet.yaml`) | any | Warning `MATRIX_UNVERIFIED`; the matrix is not checked |
+
+`skipMinorVersionCheck` only sets the operator's annotation `sql.tanzu.vmware.com/skip-minor-version-check: "true"` on the PostgresRestore; it relaxes none of these checks. The PostgresVersion of the target must exist on the target cluster (`kubectl get postgresversion`; `VERSION_NOT_AVAILABLE`).
+
+### What the workflow does for each pair
+
+`workflows/scripts/restore-pair.sh` runs one pair; the validate step and `plan-batches.sh` come before it. The pairs are batched by `rolloutMode` and `maxParallel` (`canary`: the first pair alone, then batches). Pairs with the same target instance, and pairs with the same target cluster and namespace, run one after another (Argo mutexes `tpg-instance-<cluster>-<instance>` and `tpg-restore-ns-<cluster>-<namespace>`); pairs of other namespaces run in parallel up to `maxParallel`.
+
+1. **Plan checks** (read-only; they also run in a dry run).
+   - **Source.** The instance on its cluster (live or gone), its entry in `clusters/fleet.yaml` (its namespace must be the pair's: `SOURCE_NAMESPACE_MISMATCH`), its PostgresVersion and flavour, its backup location (container, `repoPath`, Secret) and stanza.
+   - **Named backup.** Inside the source namespace the PostgresBackup must exist and be `Succeeded` now (`BACKUP_NOT_FOUND`, `BACKUP_NOT_SUCCEEDED`). Into another namespace or cluster the source PostgresBackup is read first and must be `Succeeded` (`SOURCE_BACKUP_UNVERIFIED` when it is missing or the cluster cannot be read, `BACKUP_NOT_SUCCEEDED`). A backup of another instance than the pair's source instance is refused (`BACKUP_OF_OTHER_INSTANCE`: a pair has one source instance).
+   - **PITR.** The location and stanza are resolved (above); the recovery time is checked against the `Succeeded` full backups (`NO_FULL_BACKUP`, `INVALID_TIMESTAMP`, `OUTSIDE_RECOVERY_WINDOW`).
+   - **Target.** A live Postgres of the target's name is accepted only in place (`TARGET_EXISTS`, `INSTANCE_NAME_IN_USE`). A target that is only declared in `clusters/fleet.yaml` and not deployed is a new target: its entry is replaced as a whole by the one below (the declared namespace is kept, `NAMESPACE_IMMUTABLE` otherwise; nothing else of the declared entry survives, neither `ferret`, patch files, `disableInitialBackup` nor a `sharedSecretsOwner`). A new target is a copy of the source's entry (without `disableInitialBackup`, `backup.repoPath`, `ferret`, `restorePatch`, `instance.restored` and the postgres patch and overlay files), or, when the source is not there, a skeleton built from the spec file. A new namespace must not hold a Secret `regsecret` or `backup-storage` that the fleet does not manage (`NAMESPACE_SECRET_CONFLICT`: the owner's VaultStaticSecrets would overwrite it). Who owns the shared objects of the namespace (ServiceAccount `tpg-vso`, VaultStaticSecrets `regsecret` and `backup-storage`) is decided as in tpg-day0: exactly one instance per namespace (`sharedSecretsOwner`).
+   - **Matrix**, then the restore-patch plan and the PostgresRestore as YAML.
+2. **Location copy and per-copy Secret** (another namespace or cluster; real run). The source backup location is copied into the target namespace as `restore-src-<source cluster>-<source namespace>-<source instance>` (`backupSync` on, retention so high that no expiry runs through it, label `tpg.fleet/restore-source`). A location there for the same container and `repoPath` with `backupSync` on is reused instead, never removed by this run; one with `backupSync` off is `SOURCE_LOCATION_CONFLICT`; a list of the target namespace's locations that cannot be read fails the pair (`TARGET_UNREADABLE`, also in a dry run: it is not taken for an empty list). The Secret `backup-storage` is the namespace's own (Vault Secrets Operator) or comes from Vault. Any other Secret is copied from the source cluster into a Secret of the copy's **own name**, `<copy name>-creds` (the copy's `spec.storage.azure.secret.name`, label `tpg.fleet/restore-source`), so the copies of different sources in one namespace never share or overwrite a Secret. A reused copy keeps the Secret it has; when its contents differ from the source's it is updated only if its label names this pair's source (`<cluster>.<instance>`), otherwise the pair fails with `SOURCE_SECRET_CONFLICT` and nothing is overwritten. The values are held in memory only, never in a file, an argument or the log.
+3. **backupSync wait** (named backup into another namespace or cluster). The step waits for the PostgresBackup of the same name in the target namespace to appear `Succeeded` (`BACKUPS_NOT_SYNCED` at the timeout; `Failed` stops at once with `BACKUP_NOT_SUCCEEDED`). The wait counts against `restoreTimeoutSeconds`.
+4. **Render.** The PostgresRestore is rendered through the reference chart. `dryRun` stops here (below).
+5. **Apply and wait.** For a new target the entry is first pushed to `clusters/fleet.yaml` (`pushMode`; `GIT_PUSH_FAILED`; with a spec file the restore-patch is in the same commit), the namespace is created, and the Application `tpg-<cluster>-<instance>` syncs only the shared objects and the backup location of the new instance (`APP_NOT_GENERATED`, `SHARED_SECRETS_MISSING`, `SECRET_NOT_SYNCED`, `TARGET_PREPARE_FAILED`). Then the PostgresRestore is applied and waited for within `restoreTimeoutSeconds` (`RESTORE_FAILED`, `TIMEOUT`). An unfinished restore of the same target is waited for 2 minutes, then the pair is left alone (`SKIPPED_IN_PROGRESS`); an unfinished backup, restore or upgrade of an in-place target refuses the pair (`OPERATION_IN_PROGRESS`).
+6. **Running.** The target must be `Running` with its pods ready (its own timeout of 1800 seconds; `TARGET_POD_<REASON>` names a pod that cannot start). Success is the PostgresRestore `Succeeded` and the target `Running`.
+7. **Restore-patch record.** The spec of the restored Postgres is recorded in `clusters/fleet.yaml` and the chart (below): the spec file's, or, without one, the live spec read from the cluster now.
+8. **Adoption sync.** A new instance is adopted by syncing its Application (`ADOPTION_NOT_SYNCED` is a warning). The Application of a new instance whose restore-patch could not be recorded is not synced (the chart would render the copied entry over the restored Postgres).
+9. **Post-restore backup** (`postRestoreBackup`). A full backup of the target as tpg-backup takes it. When it fails, the pair stays `SUCCEEDED` with the warning `POST_RESTORE_BACKUP_FAILED`.
+10. **`keepSourceLocation`.** With `false`, the copy of the source backup location that this run created is removed, with the copy's own Secret and no other, and never a reused one. It is kept (the pair stays `SUCCEEDED`) when any Postgres of the target namespace names it as its `spec.backupLocation` (`SOURCE_LOCATION_IN_USE`, naming the instance, which can be the restored instance itself), when those instances cannot be listed or the delete fails (`SOURCE_LOCATION_NOT_REMOVED`), or while another restore of the namespace is unfinished. While a copy exists, the repository counts as shared for `purgeBackups` of the delete workflows (section 10, section 11).
+
+The result is `result.<target cluster>.<target instance>`; every failure records its reason code, a crash `UNEXPECTED_ERROR`. The plan of every pair, the PostgresRestore as YAML included, is in the step log and in the run record `plan.restore.<target cluster>.<target instance>`.
+
+### Reasons the restore records
+
+`FAILED` and `BLOCKED` stop that pair and nothing further is attempted for it; the other pairs go on, and the run ends `Failed` at the last step (`gate`) when a pair is `FAILED`, `TIMEOUT` or `BLOCKED`. A warning is shown in the Warnings part of the report and does not change the result. "Plan" means the reason also appears in a dry run; "run" only in a real run. The `validate` step (before any pair) answers with the key path of the key to fix instead of a code, except `IN_PLACE_NOT_ALLOWED`.
+
+| Code | Result, when | Cause | Fix |
+|---|---|---|---|
+| `IN_PLACE_NOT_ALLOWED` | The whole run is refused, validate | An in-place pair on a cluster without `clusters.<cluster>.cluster.allowInPlaceRestore: true`, or `clusters/fleet.yaml` could not be read | Set it in `clusters/fleet.yaml`, merge, submit again; or restore into another instance |
+| `INVALID_PAIR` | `FAILED`, plan | The step did not get a normalized pair (cannot happen after a passed validate step) | Submit again |
+| `NOT_REGISTERED` | `FAILED`, plan | The kubeconfig Secret `kubeconfig-<cluster>` of a cluster of the pair is missing on the hub | Register the cluster (`tpg-aks-infra` `run.sh --only register`) |
+| `FLEET_UNREADABLE` | `FAILED`, plan; also run (the second clone before the push) | The fleet repository could not be cloned | The Git credentials in Vault (`tpg/shared/github-push`), GitHub reachability; submit again |
+| `SOURCE_NAMESPACE_MISMATCH` | `FAILED`, plan | `clusters/fleet.yaml` declares the source in another namespace than the pair says | Correct the source namespace (an instance's namespace cannot change) |
+| `SOURCE_UNREADABLE` | `FAILED`, plan | The source Postgres could not be read (an API error other than NotFound) | The detail has the API message; check the source cluster |
+| `BACKUP_OF_OTHER_INSTANCE` | `FAILED`, plan | The named PostgresBackup belongs to another instance than the pair's source | Name the instance the backup belongs to as the source, or give a backup of the source |
+| `BACKUP_NOT_FOUND` | `FAILED`, plan | Same namespace: the named PostgresBackup does not exist or cannot be read | `kubectl -n <namespace> get postgresbackup` |
+| `SOURCE_BACKUP_UNVERIFIED` | `FAILED`, plan | Another namespace or cluster: the source PostgresBackup is missing or the source cluster cannot be read, so the source check cannot pass | As above, on the source cluster |
+| `BACKUP_NOT_SUCCEEDED` | `FAILED`, plan; also run | The PostgresBackup is not `Succeeded` (plan), or the synced copy in the target namespace is `Failed` (run) | Choose a `Succeeded` backup |
+| `PITR_SOURCE_UNKNOWN` | `FAILED`, plan | PITR, but the source is gone and no readable `sourceBackupName` gives the location and stanza | Set `srcBackupLocationName` and `srcStanzaName` (the stanza is shown by `pgbackrest info`), or name a PostgresBackup of the source |
+| `BACKUP_LOCATION_NOT_INITIALIZED` | `FAILED`, plan | The live source has no backup location or stanza yet (it never backed up) | Give `srcBackupLocationName` and `srcStanzaName` if the repository is known |
+| `SOURCE_LOCATION_UNKNOWN` | `FAILED`, plan | A named backup into another namespace or cluster: the PostgresBackup reports no location and the source is not live | Start the source, or restore from a backup that reports its location |
+| `SOURCE_LOCATION_UNREADABLE` | `FAILED`, plan | The source PostgresBackupLocation cannot be read, does not exist, or is not an Azure location | Only Azure Blob locations are copied; check `kubectl -n <namespace> get postgresbackuplocation` |
+| `NO_FULL_BACKUP` | `FAILED`, plan | PITR from a live source that has no `Succeeded` full backup | Take a full backup first (tpg-backup) |
+| `INVALID_TIMESTAMP` | `FAILED`, plan | `pitrConfig.timestamp` is in the future | A time in the past |
+| `OUTSIDE_RECOVERY_WINDOW` | `FAILED`, plan | `pitrConfig.timestamp` is older than the oldest full backup | A time after the oldest full backup, or the detail's time |
+| `NAMESPACE_IMMUTABLE` | `FAILED`, plan | The target is declared in `clusters/fleet.yaml` in another namespace than the pair says | Use the declared namespace, or another instance name |
+| `TARGET_UNREADABLE` | `FAILED`, plan | The target Postgres, a Secret of the target namespace, or the list of its backup locations cannot be read (not NotFound) | The detail has the API message |
+| `TARGET_EXISTS` | `FAILED`, plan | A live Postgres of the target's name exists and is not the source (not in place) | Restore in place, or choose a new instance name |
+| `INSTANCE_NAME_IN_USE` | `FAILED`, plan | A Postgres of that name runs in another namespace of the target cluster; instance names are unique per cluster | Choose another target instance name |
+| `UNKNOWN_TARGET_CLUSTER` | `FAILED`, plan | New target: `clusters/fleet.yaml` has no `clusters.<cluster>` | tpg-day0 for the cluster first |
+| `SPEC_FILE_REQUIRED` | `FAILED`, plan | New target, the source is not in `clusters/fleet.yaml` and there is no spec file | Give `targetInstanceSpecFilePath` with at least `spec.postgresVersion.name` |
+| `SPEC_FILE_NOT_FOUND` | `FAILED`, plan | A `repo:` spec file is not on the fleet branch | Commit it under `helm_artifacts/instance/tpg-instance/restore-specs/` |
+| `SPEC_FILE_NOT_RECEIVED` | `FAILED`, plan | A local spec file is not in `patchFiles` | `pack-patch-files.sh -o <parameter file>` |
+| `SPEC_FILE_INVALID` | `FAILED`, plan | Not valid YAML, not one `kind: Postgres` document, an empty spec, a field the Postgres CRD does not have, a symbolic link or a path outside `restore-specs/`, or no `spec.postgresVersion.name` for a new target | The detail names the file and the field |
+| `FLEET_EDIT_FAILED` | `FAILED`, plan | The entry or the restore-patch could not be written into the clone of the fleet repository | The detail names the step |
+| `CHART_RENDER_FAILED` | `FAILED`, plan | The chart cannot render the entry, or the PostgresRestore | The detail has the helm message |
+| `VERSION_NOT_AVAILABLE` | `FAILED`, plan | The target's PostgresVersion does not exist on the target cluster | `kubectl get postgresversion` there; choose one it offers |
+| `RESTORE_FLAVOUR_UNSUPPORTED` | `BLOCKED`, plan | A standard backup into a lite target (the matrix) | A standard PostgresVersion for the target |
+| `RESTORE_VERSION_LOWER` | `BLOCKED`, plan | The target version is lower than the version of the backup (the matrix) | The version of the backup or newer |
+| `NAMESPACE_SECRET_CONFLICT` | `FAILED`, plan; also run | The namespace of a new target already has a Secret `regsecret` or `backup-storage` that the fleet does not manage, or a `backup-storage` that does not hold the fleet's key and that the copied location reads | Rename that Secret or choose another target namespace |
+| `BACKUP_LOCATION_MISSING` | `FAILED`, plan | The spec file names a `backupLocation` that does not exist in the target namespace, or names the copy while another location for that repository is reused | Create it, name the location the detail gives, or leave `backupLocation` out of the spec file |
+| `SOURCE_LOCATION_CONFLICT` | `FAILED`, plan | A location in the target namespace for the same repository has `backupSync` off, or the name of the copy is taken by a location of another repository | Enable `backupSync` on it, delete it, or choose another target namespace |
+| `SOURCE_SECRET_UNREADABLE` | `FAILED`, plan; also run | The Secret of the source backup location cannot be read on the source cluster (the contents are not read in a dry run) | Restore the Secret |
+| `CONFIRMATION_MISMATCH` | `FAILED`, run | A real in-place restore without `confirm: <instance>` (the validate step refuses it first) | Set `confirm` in the target |
+| `OPERATION_IN_PROGRESS` | `FAILED`, run; warning in a dry run | An in-place target has an unfinished backup, restore or upgrade | Wait for it (`kubectl -n <namespace> get postgresbackup,postgresrestore,postgresversionupgrade`) |
+| `SKIPPED_IN_PROGRESS` | Left alone, run | A restore of the same target is still unfinished after 2 minutes; the run does not fail on it | Run again when it has finished |
+| `GIT_PUSH_FAILED` | `FAILED`, run | The entry or the restore-patch of a new target could not be pushed or merged (`pushMode`) | The push token (`tpg/shared/github-push`), branch protection, the pull request |
+| `NAMESPACE_OWNER_CONFLICT` | `FAILED`, run | After the push, two instances of the namespace own the shared Secrets (concurrent pull requests) | `instance.sharedSecretsOwner: false` on all but one |
+| `TARGET_PREPARE_FAILED` | `FAILED`, run | The namespace, a Secret or the backup location of the new instance could not be created or synced | The detail names the object |
+| `APP_NOT_GENERATED` | `FAILED`, run | The ApplicationSet did not generate `tpg-<cluster>-<instance>` after the push | `argocd appset get tpg-instances` |
+| `SHARED_SECRETS_MISSING`, `SECRET_NOT_SYNCED` | `FAILED`, run | The shared objects of the namespace were not synced, or Vault Secrets Operator did not create `regsecret` and `backup-storage` | The detail names the owner and the Vault state |
+| `NO_VAULT_SECRET` | `FAILED`, run | The copy needs the fleet's storage account from Vault (`tpg/shared/backup-storage`, keys `accountName` and `accountKey`) and Vault Agent did not render it: Vault sealed or unreachable, `vault-agent-injector` down, or the keys missing | Unseal Vault; write the Secret with tpg-rotate-credential `secretType=backup-storage` (section 17) |
+| `SOURCE_SECRET_CONFLICT` | `FAILED`, run | A reused copy's Secret has other contents and was not made for this source | Restore from that source, or delete the Secret and the copy if they are not needed |
+| `SOURCE_LOCATION_FAILED` | `FAILED`, run | The copy of the source backup location could not be applied | The detail names the object |
+| `BACKUPS_NOT_SYNCED` | `FAILED`, run | The PostgresBackup of the same name did not appear `Succeeded` in the target namespace within `restoreTimeoutSeconds` | `backupSync` of the copy has not listed it: check the copy and its Secret |
+| `CREATE_FAILED`, `RESTORE_FAILED` | `FAILED`, run | The PostgresRestore could not be created, or ended `Failed` (the detail has the operator's message) | The operator's message |
+| `TIMEOUT` | `TIMEOUT`, run | The PostgresRestore did not finish within `restoreTimeoutSeconds` | Raise `restoreTimeoutSeconds`; the detail has the phase |
+| `TARGET_POD_<REASON>` | `FAILED`, run | The restore succeeded, but a pod of the target cannot start or the instance is not `Running` in time (for example `TARGET_POD_CRASHLOOPBACKOFF`, `TARGET_POD_TIMEOUT`) | The pod status, events and logs below the pod table of the step log |
+| `UNEXPECTED_ERROR` | `FAILED` | The step crashed (the detail has the script and line) | The step log |
+| `SRC_LOCATION_DIFFERS`, `SRC_STANZA_DIFFERS` | Warning, plan | A given `srcBackupLocationName` or `srcStanzaName` differs from what the source reports; the given value is used | Check the value |
+| `RECOVERY_WINDOW_UNVERIFIED`, `BACKUP_LABEL_UNVERIFIED` | Warning, plan | The PostgresBackups of the source cannot be read (or none is listed for a gone source), so the recovery time is not checked; no PostgresBackup carries the `srcBackupLabel` | Check the repository with `pgbackrest info` |
+| `MATRIX_UNVERIFIED` | Warning, plan | The version of the source or the target is not known: the matrix was not checked | The detail |
+| `CONFIRMATION_MISSING` | Warning, plan | A dry run of an in-place pair without `confirm`; a real run is refused | Set `confirm` |
+| `RESTORE_PATCH_NOT_RECORDED` | Warning, run | The restore succeeded, but the spec could not be read or recorded as the restore-patch (the detail names the unknown or invalid fields of the live spec, for example `spec.noSuchField is not a field of the Postgres resource`, or the push failure) | The next sync of the Application renders the entry without it; a new instance's Application is not synced by this run. Record it with a spec file and a new restore |
+| `ADOPTION_NOT_SYNCED` | Warning, run | The Application of the new instance did not sync after the restore | Check the Application in Argo CD |
+| `POST_RESTORE_BACKUP_FAILED` | Warning, run | The full backup after the restore failed; the pair stays `SUCCEEDED` | tpg-backup |
+| `SOURCE_LOCATION_IN_USE`, `SOURCE_LOCATION_NOT_REMOVED` | Warning, run | `keepSourceLocation=false`, but the copy was kept (an instance uses it as its backup location, or the instances could not be listed, or the delete failed) | Delete it by hand when nothing uses it |
+
+### The restore-patch, and what may change a restored instance later
+
+The Postgres that a restore leaves must be what Argo CD renders from then on, with no chart default and no entry value filled in. So the spec of the restored Postgres is stored in the chart as `helm_artifacts/instance/tpg-instance/restore-patch/<instance>-restore-<uid>.yaml` (one `kind: Postgres` document: `apiVersion`, `kind` and the spec, no `metadata`; see the README of the folder) and recorded in the instance's entry of `clusters/fleet.yaml` as `restorePatch.current` (with `mode`, and `previous: {path, commit}` when it replaces an earlier one; the file that was `previous` is deleted). The entry also gets `instance.restored: true` (workflow-owned: a values patch or an overlay cannot set it) and the fleet-equivalent fields of that spec (`postgresVersion`, `storageClassName`, `storageSize`, `walStorageSize`, `resources`, `highAvailability` (a single node as an explicit `false`/`0`), `exposure`, `readOnlyExposure` and the service annotations); in `mode: base` the ones the spec lacks are removed. Which spec, and which mode:
+
+- **With a spec file**: the spec file's. A new target (one declared but not deployed included): `mode: base`, in the same commit as the entry. In place: `mode: over` (the operator merges the file into the existing Postgres, overwriting the fields it sets), in a commit of its own after the restore, with `restorePatch.postgresPatch` recording the postgres patch file that was current.
+- **Without one**: after the restore succeeded and the instance runs, the `.spec` of the restored Postgres is **read from the target cluster** and stored the same way, `mode: base`, in a commit of its own. Only `.spec` is taken (`status`, `metadata`, annotations and managed fields are not part of it), `null` fields are dropped, and nothing else is stripped: the live spec is the truth, operator defaults included. It must fit the closed Postgres schema; when it cannot be read or does not fit, nothing is stored and the pair stays `SUCCEEDED` with the warning `RESTORE_PATCH_NOT_RECORDED`.
+
+An in-place instance that is not in `clusters/fleet.yaml` records nothing. A re-restore makes the new file `current` and the old one `previous` (no longer applied); the source's restore-patch is never copied to a new target.
+
+**The render** (`tpg.restoredPostgres` in `templates/_helpers.tpl`). `R` is the restore-patch's spec.
+
+- *Mode base*: (1) `R` as it is; a field it omits stays unset. (2) The fleet-managed `backupLocation` (`<instance>-backup-location`) and `imagePullSecret` (`regsecret`), each one only where `R` omits it: a `backupLocation` or `imagePullSecret` that `R` sets wins, and a `backupLocation` that a spec file names must exist in the target namespace (`BACKUP_LOCATION_MISSING`), except the fixed name of the copy of the source backup location, which this run creates before the restore. (3) Later changes: every fleet-equivalent field of the entry that differs from `R` (compared as JSON; `R` lacking it differs, except `highAvailability` false/0, `serviceType` `ClusterIP` and empty annotations, which equal "unset") replaces `R`'s, an equal one changes nothing. (4) The current postgres patch file of tpg-patch. The overlays of the creation and the `instance:` keys of values patches do not reach a restored Postgres.
+- *Mode over*: the normal render (values, overlay, the patch file current at the restore) with `R` over it (`R`'s own `backupLocation` and `imagePullSecret` win), then the later changes for the fields `R` sets, then a patch file set after the restore.
+
+**Only three workflows change a restored instance afterwards**, and the entry records what they write:
+
+| Workflow | Change | How it reaches the Postgres |
+|---|---|---|
+| tpg-scale-instance (section 8) | Read replicas (`instance.highAvailability`) | The entry now differs from `R`, so the render follows the entry |
+| tpg-upgrade `component=postgres` (section 6) | The Postgres version (`instance.postgresVersion`) | Same |
+| tpg-patch postgres patch files (section 7) | Any field of the Postgres, PostgresBackupLocation, schedule or FerretDB documents | Applied last, over `R` and the later changes; tpg-patch never retires or changes the restore-patch |
+
+Everything else is refused for that instance, and only for that instance: a tpg-patch values patch that sets an `instance:` key that reaches the Postgres (`storageSize`, `walStorageSize`, `resources`, `exposure`, `readOnlyExposure`, `serviceAnnotations`, `readOnlyServiceAnnotations`, `allowedSourceRanges`, `internalLoadBalancerSubnet`) is `BLOCKED` `PATCH_REFUSED` with `RESTORED_VALUES_PATCH` in the detail, in both modes, naming the three ways above (keys that do not reach the Postgres, `backup`, `network`, `ferret`, ..., stay allowed; a values patch cannot set `restorePatch` or `instance.restored`); tpg-day0 and tpg-create-instance block it `BLOCKED` `INSTANCE_RESTORED` (the other instances and the cluster go ahead; its entry is not written, synced or verified, and the discover step leaves it out); tpg-network-policy does not touch the Postgres and stays allowed. Deleting the instance keeps its restore-patch files, like the audit copy of the entry in `clusters/deleted/` that records them.
+
+### dryRun
+
+`dryRun` is `true` by default and is read-only for every pair: nothing changes on a cluster, in Git or in Argo CD. Each pair runs all the plan checks (the source, the named backup or the recovery time, the matrix, the target, `TARGET_EXISTS`, the spec file, the namespace Secrets, the copy and the Secret it would use) and records the whole plan: what it would copy, the entry it would write, the restore-patch it would record, the PostgresRestore (and the copy of the backup location) as YAML, and the warnings. The pair ends `SUCCEEDED` with the reason `DRY_RUN`. Read it in the step log, or with `kubectl -n argo get configmap tpg-run-<workflow> -o json | jq -r '.data["plan.restore.<cluster>.<instance>"] | fromjson | .detail'`. A dry run does not read the Secret values of the source and does not wait for anything; what only a real run can show (the backupSync wait, the restore, the instance coming up, the live spec) is not in it. Run the plan, read it, then submit the same file with `dryRun` set to `false`.
+
+### Submit script
+
+`scripts/submit/tpg-restore.sh` (section 18) is a guided pair builder, with load-from-file and paste. `clusterMap` is built pair by pair: the source cluster (the registered clusters of the hub), the source instance (the instances declared for that cluster in your `clusters/fleet.yaml` with their namespaces, or a namespace and instance typed), the recovery point (a named backup, `sourceBackupName`; or point-in-time recovery with `pitrConfig.type` and its `timestamp` or `target`, `bestEffort` where it is mandatory, optionally `srcBackupLocationName`, `srcStanzaName` and `srcBackupLabel`), the target cluster, namespace and instance (the source's own cluster, namespace and instance is an in-place restore: the script says so, asks for `confirm` and warns when your clone's `clusters/fleet.yaml` does not set `allowInPlaceRestore` for the cluster), an optional `targetInstanceSpecFilePath` (a file of `helm_artifacts/instance/tpg-instance/restore-specs/` in your clone, or a file of your machine, which is sent with the run; mandatory when the source is not declared in `clusters/fleet.yaml` and the target is a new instance), `skipMinorVersionCheck` and `postRestoreBackup`. Every pair is checked with `clustermap.py restore` as it is added (an invalid pair is explained and can be entered again), then "Add another pair" or "Done". The pairs can also be loaded from a YAML or JSON file or pasted. Before anything is submitted the script prints the normalized plan of each pair (index, source and target, method, in place or not, the recovery point and repository, the spec file, the flags), again just before the submit menu, and re-checks the list with `--confirm-required` when `dryRun` is set to `false`. It reads only the hub and your clone, never a member cluster: whether the source backup exists and is `Succeeded`, whether the target exists and the version matrix are checked by the workflow, which `dryRun=true` (the default) runs without changing anything.
+
+### Worked examples
+
+Example 1 is the generated file above: a dry run of one pair with a named backup, restored into a new instance (`orders-db-restored`) of the namespace of the source (method 2). The plan checks that the backup exists and is `Succeeded`, the matrix and that the target does not exist, and prints the PostgresRestore; nothing changes. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-restore \
+  --parameter-file workflows/params/schemas/params-restore.example.yaml --watch
+```
+
+For a real run, copy the file and change `dryRun: "true"` to `dryRun: "false"`. An input that the file sets cannot be changed with `-p` (section 2, Parameter files).
+
+Example 2 restores two instances in one run, both with point-in-time recovery: the first onto another cluster (method 1) to a time, with `bestEffort`; the second into another namespace of its own cluster (method 2) to a log sequence number, starting from the backup set the label names. `canary` runs the first pair alone and stops the run if it fails. The file sets no `dryRun`, so the first command plans; the second restores:
+
+```yaml
+# restore-pitr.yaml
+rolloutMode: canary
+clusterMap: |
+  - sourceClusterConfig:
+      aks-tpg-poc-01:
+        pg-orders-db:
+          orders-db: {}
+    targetClusterConfig:
+      aks-tpg-poc-02:
+        pg-orders-dr:
+          orders-db-dr:
+            pitrEnabled: true
+            bestEffort: true
+            pitrConfig:
+              type: time
+              timestamp: "2026-09-15T08:30:00Z"
+  - sourceClusterConfig:
+      aks-tpg-poc-01:
+        pg-billing-db:
+          billing-db: {}
+    targetClusterConfig:
+      aks-tpg-poc-01:
+        pg-billing-check:
+          billing-db-check:
+            pitrEnabled: true
+            bestEffort: false
+            pitrConfig:
+              type: lsn
+              target: "0/3000060"
+              sourceBackupConfig: {srcBackupLabel: 20260915-020000F}
+```
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file restore-pitr.yaml --watch
+argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file restore-pitr.yaml -p dryRun=false --watch
+```
+
+**More commands.** An in-place restore of a named backup (the cluster needs `allowInPlaceRestore: true`; `confirm` repeats the instance name and is needed for the real run only):
 
 ```bash
 # 1. Plan an in-place restore of a named backup (dryRun is true by default: nothing changes)
@@ -2012,15 +2511,13 @@ argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file restore
 argo submit -n argo --from workflowtemplate/tpg-restore --parameter-file restore.yaml -p dryRun=false --watch
 ```
 
-**Interactive submit** (`scripts/submit/tpg-restore.sh`, section 17). `clusterMap` is built pair by pair: the source cluster (the registered clusters of the hub), the source instance (the instances declared for that cluster in your `clusters/fleet.yaml` with their namespaces, or a namespace and instance typed), the recovery point (a named backup, `sourceBackupName`; or point-in-time recovery with `pitrConfig.type` and its `timestamp` or `target`, `bestEffort` where it is mandatory, optionally `srcBackupLocationName`, `srcStanzaName` and `srcBackupLabel`), the target cluster, namespace and instance (the source's own cluster, namespace and instance is an in-place restore: the script says so, asks for `confirm` and warns when your clone's `clusters/fleet.yaml` does not set `allowInPlaceRestore` for the cluster), an optional `targetInstanceSpecFilePath` (a file of `helm_artifacts/instance/tpg-instance/restore-specs/` in your clone, or a file of your machine, which is sent with the run; mandatory when the source is not declared in `clusters/fleet.yaml` and the target is a new instance), `skipMinorVersionCheck` and `postRestoreBackup`. Every pair is checked with `clustermap.py restore` as it is added (an invalid pair is explained and can be entered again), then "Add another pair" or "Done". The pairs can also be loaded from a YAML or JSON file or pasted. Before anything is submitted the script prints the normalized plan of each pair (index, source and target, method, in place or not, the recovery point and repository, the spec file, the flags), again just before the submit menu, and re-checks the list with `--confirm-required` when `dryRun` is set to `false`. It reads only the hub and your clone, never a member cluster: whether the source backup exists and is `Succeeded`, whether the target exists and the version matrix are checked by the workflow, which `dryRun=true` (the default) runs without changing anything.
-
 ---
 
-## 16. tpg-rotate-credential
+## 17. tpg-rotate-credential
 
 Creates or rotates a secret in Vault and verifies that the new value reached everything that uses it (Round 15, design decision D87). Nothing is edited in a Kubernetes Secret by hand.
 
-The new value comes from a wrapping token (section 14), or for a CA bundle from a PEM file. The write step unwraps the token, checks the value before writing it (the registry login, a `git ls-remote` and for `git-push` a `git push --dry-run` to the fleet branch, every backup container with the storage key, the password length, the PEM certificates), and writes it as a new version of its KV v2 path. It runs as the ServiceAccount `argo/tpg-credential-writer`, the only identity with the Vault role and policy `tpg-credential-writer` (create, update and read back on the five shared credential paths, `tpg/ca-bundles/*` and `tpg/custom/*`; no delete). The admission policy `tpg-credential-writer` keeps that ServiceAccount to this WorkflowTemplate. In namespace `argo` it refuses a Workflow, WorkflowTemplate, CronWorkflow or ClusterWorkflowTemplate that names the ServiceAccount (in `spec`, `templateDefaults`, a template or an inline template, as `serviceAccountName` or the executor's); a `podSpecPatch` that mentions any ServiceAccount or holds a backslash or `!!` (an escape or a YAML tag could spell the name another way); a `templateRef` to `tpg-rotate-credential` from anything but the template itself; and a run of `tpg-rotate-credential` that brings more than `workflowTemplateRef` and `arguments` (a `podSpecPatch`, `templateDefaults`, `volumes` or its own `entrypoint` would reach the write step). Only Argo CD may change the WorkflowTemplate, and the write step's image is fixed in it, not the `toolsImage` parameter. The same policy keeps the write step's inputs out of reach of the workflow ServiceAccounts `tpg-workflow` and `tpg-credential-writer` (they share one Role): they may write only the run records `tpg-run-*` among the ConfigMaps of `argo` (the step runs its script from `tpg-scripts` and reads the registry host and the fleet repository URL from `tpg-settings`), and may change only the metadata of a pod, not its spec (a new image of a running write step would run as the writer). The policy checks these objects only: keep the right to create pods in `argo` to the Argo Workflows controller and the hub administrators. Without `wrappingToken` or `caBundleFile`, the value was written in Vault by hand, and the run only verifies it.
+The new value comes from a wrapping token (section 15), or for a CA bundle from a PEM file. The write step unwraps the token, checks the value before writing it (the registry login, a `git ls-remote` and for `git-push` a `git push --dry-run` to the fleet branch, every backup container with the storage key, the password length, the PEM certificates), and writes it as a new version of its KV v2 path. It runs as the ServiceAccount `argo/tpg-credential-writer`, the only identity with the Vault role and policy `tpg-credential-writer` (create, update and read back on the five shared credential paths, `tpg/ca-bundles/*` and `tpg/custom/*`; no delete). The admission policy `tpg-credential-writer` keeps that ServiceAccount to this WorkflowTemplate. In namespace `argo` it refuses a Workflow, WorkflowTemplate, CronWorkflow or ClusterWorkflowTemplate that names the ServiceAccount (in `spec`, `templateDefaults`, a template or an inline template, as `serviceAccountName` or the executor's); a `podSpecPatch` that mentions any ServiceAccount or holds a backslash or `!!` (an escape or a YAML tag could spell the name another way); a `templateRef` to `tpg-rotate-credential` from anything but the template itself; and a run of `tpg-rotate-credential` that brings more than `workflowTemplateRef` and `arguments` (a `podSpecPatch`, `templateDefaults`, `volumes` or its own `entrypoint` would reach the write step). Only Argo CD may change the WorkflowTemplate, and the write step's image is fixed in it, not the `toolsImage` parameter. The same policy keeps the write step's inputs out of reach of the workflow ServiceAccounts `tpg-workflow` and `tpg-credential-writer` (they share one Role): they may write only the run records `tpg-run-*` among the ConfigMaps of `argo` (the step runs its script from `tpg-scripts` and reads the registry host and the fleet repository URL from `tpg-settings`), and may change only the metadata of a pod, not its spec (a new image of a running write step would run as the writer). The policy checks these objects only: keep the right to create pods in `argo` to the Argo Workflows controller and the hub administrators. Without `wrappingToken` or `caBundleFile`, the value was written in Vault by hand, and the run only verifies it.
 
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
@@ -2065,6 +2562,30 @@ clusters: [aks-tpg-poc-01]
 
 Only the first 8 characters of the two checksums are logged, never a value. The operator namespace is checked first, then the namespaces of the instances declared for the cluster in `clusters/fleet.yaml`; each gets up to 5 minutes and ends as soon as the live Secret holds the Vault value, and the step fails `SECRET_NOT_SYNCED` only after checking all of them, naming every namespace that did not match. The hub part also logs the Argo CD repository poll and fails `RBAC_MISSING` when `workflow-bot` may read no repositories (it needs `p, role:tpg-sync, repositories, get, *, allow`). Up to Round 20 the live checksum was taken with a trailing newline that the Vault one lacked, so this step always failed `SECRET_NOT_SYNCED`. The Day 0 and restore waits for the `regsecret` and `backup-storage` Secrets log the same way.
 
+**Worked examples** (Round 23). This workflow has no `dryRun` and no `clusterMap`. Example 1 is the generated file above, the least-impact run: it writes nothing and verifies a value that was put in Vault by hand, on one cluster. From your tpg-fleet clone:
+
+```bash
+argo submit -n argo --from workflowtemplate/tpg-rotate-credential \
+  --parameter-file workflows/params/schemas/params-rotate-credential.example.yaml --watch
+```
+
+Example 2 writes a named CA bundle from a PEM file of your machine and verifies it on two clusters (`clusters` is a list; the file travels in `patchFiles`, packed into the parameter file first):
+
+```yaml
+# ca.yaml
+secretType: ca-bundle
+secretName: azure-storage-2027
+caBundleFile: [~/certs/azure-storage-2027.pem]
+clusters: [aks-tpg-poc-01, aks-tpg-poc-02]
+```
+
+```bash
+~/src/tpg-fleet/scripts/submit/pack-patch-files.sh -o ca.yaml
+argo submit -n argo --from workflowtemplate/tpg-rotate-credential --parameter-file ca.yaml --watch
+```
+
+**More commands.** A new value comes through a wrapping token (section 15), never as an input:
+
 ```bash
 cd ~/src/tpg-aks-infra
 # 1. A new Broadcom registry token: wrapped, written, verified on every cluster
@@ -2080,16 +2601,7 @@ T="$(scripts/vault-secret.sh wrap backup-storage)"
 argo submit -n argo --from workflowtemplate/tpg-rotate-credential -p secretType=backup-storage -p wrappingToken="$T" --watch
 unset BACKUP_STORAGE_KEY T
 
-# 3. A named CA bundle from a PEM file of this machine
-cat > ca.yaml <<'YAML'
-secretType: ca-bundle
-secretName: azure-storage-2027
-caBundleFile: '[~/certs/azure-storage-2027.pem]'
-YAML
-~/src/tpg-fleet/scripts/submit/pack-patch-files.sh -o ca.yaml
-argo submit -n argo --from workflowtemplate/tpg-rotate-credential --parameter-file ca.yaml --watch
-
-# 4. Only verify a value written in Vault by hand
+# 3. Only verify a value written in Vault by hand, on every cluster
 argo submit -n argo --from workflowtemplate/tpg-rotate-credential -p secretType=git-read --watch
 ```
 
@@ -2100,7 +2612,7 @@ argo submit -n argo --from workflowtemplate/tpg-rotate-credential -p secretType=
 | `git-push` | `tpg/shared/github-push` | The workflow's own Git credential: a clone and a `git push --dry-run` to the fleet branch |
 | `git-read` | `tpg/shared/github-read` | The Argo CD repository credential: `repo-tpg-fleet` matches Vault (Vault Secrets Operator) and the Argo CD connection to the fleet repository is Successful |
 | `monitoring-remote-write` | `tpg/shared/monitoring-remote-write` | The value is in Vault; the targets receive it through the Vault Secrets Operator (`monitoring/tpg-remote-write`). The hub gateway still accepts the previous password until `tpg-aks-infra/scripts/run.sh --only addons` rebuilds its htpasswd from Vault, restarts it and checks that every target's metrics arrive: the run records the warning `GATEWAY_NOT_UPDATED` as that reminder. Run it right after the workflow (docs/monitoring.md) |
-| `ca-bundle` | `tpg/ca-bundles/<secretName>` | The bundle reads back from Vault with certificates that have not expired. Runs use it with `backupCaBundleVaultSecret=<secretName>` (section 14); running instances keep their bundle until tpg-patch writes the new one |
+| `ca-bundle` | `tpg/ca-bundles/<secretName>` | The bundle reads back from Vault with certificates that have not expired. Runs use it with `backupCaBundleVaultSecret=<secretName>` (section 15); running instances keep their bundle until tpg-patch writes the new one |
 | `custom` | `tpg/custom/<secretName>` | Nothing in the fleet reads it; the write step checks that every value is a non-empty string |
 
 | Result | Meaning |
@@ -2112,7 +2624,7 @@ argo submit -n argo --from workflowtemplate/tpg-rotate-credential -p secretType=
 
 ---
 
-## 17. Interactive submit scripts
+## 18. Interactive submit scripts
 
 `scripts/submit/tpg-<workflow>.sh` starts a workflow without composing the `argo submit` line by hand: one script per WorkflowTemplate (12). Each script reads the inputs, defaults, allowed values and descriptions from `workflows/templates/<template>.yaml` and the types from `workflows/params/types.yaml`, so it stays in step with the template.
 
@@ -2144,7 +2656,7 @@ ln -s ~/src/tpg-fleet/scripts/submit/tpg-patch.sh ~/bin/tpg-patch && tpg-patch
 TPG_FLEET_DIR=~/src/tpg-fleet bash /opt/tools/tpg-patch.sh
 ```
 
-Some inputs depend on an earlier answer: `tpg-restore.sh` builds the list of pairs for `clusterMap` (section 15), `tpg-upgrade.sh` asks `instances` for `component=postgres`, `tpg-scale-instance.sh` asks whether the run scales instances (`instances` and `replicas`), changes only the cap (`maxReadReplicas`), or both, and `tpg-patch.sh` does not submit before a patch file input is set (and `instances` for instance patch files).
+Some inputs depend on an earlier answer: `tpg-restore.sh` builds the list of pairs for `clusterMap` (section 16), `tpg-upgrade.sh` asks `instances` for `component=postgres`, `tpg-scale-instance.sh` asks whether the run scales instances (`instances` and `replicas`), changes only the cap (`maxReadReplicas`), or both, and `tpg-patch.sh` does not submit before a patch file input is set (and `instances` for instance patch files).
 
 **Local files (Round 14, Round 15).** `tpg-patch.sh`, `tpg-create-instance.sh`, `tpg-day0.sh`, `tpg-restore.sh` (the `targetInstanceSpecFilePath` of a pair) and `tpg-rotate-credential.sh` read every local file the path inputs and `clusterMap` name (absolute, `~/` or relative to the current directory; `repo:` files are left to the workflow; nothing with `patchMode=clear`) through `pack-patch-files.sh -o`; the prompts take plain names or one path and send the bracketed form (`[orders-db, billing-db]`, `[./ca.pem]`), so a file that is missing or does not fit its input is refused before anything is submitted, and send their contents as `patchFiles`; you never type that input. The equivalent commands they print are the parameter-file form of section 7:
 
@@ -2157,11 +2669,11 @@ The scripts submit `patchFiles` through a parameter file, so the Linux limit of 
 
 ---
 
-## 18. Test data: pgdata
+## 19. Test data: pgdata
 
 `tools/pgdata/pgdata.py` creates a database and tables on an instance, inserts random rows and reads them back, to try a deployment, a backup and restore, or a network policy with real data. It needs Python 3.9 or later and psycopg 3 (`pip install "psycopg[binary]"`).
 
-The connection is given by hand; nothing is read from the cluster. Reach the instance through its load balancer address (`exposure`), or port-forward its Service first. The credentials are in the Secret `pg-<instance>/<instance>-db-secret`, keys `username` and `password`:
+The connection is given by hand; nothing is read from the cluster. Reach the instance through its load balancer address (`exposure`), or port-forward its Service first. The credentials are in the Secret `<namespace>/<instance>-db-secret`, keys `username` and `password` (the namespace is `pg-<instance>` unless the instance has a `namespace` of its own, section 3; the commands below use the default):
 
 ```bash
 kubectl --context aks-tpg-poc-01 -n pg-orders-db port-forward svc/orders-db 5432 &
@@ -2194,7 +2706,7 @@ python3 tools/pgdata/pgdata.py "${C[@]}" read --database shop --sql "select tag,
 
 ---
 
-## 19. Follow, approve, stop and clean up runs
+## 20. Follow, approve, stop and clean up runs
 
 ```bash
 argo list                                   # runs with status and duration
@@ -2243,14 +2755,14 @@ argo logs @latest -c main | grep RESULT
 kubectl -n argo get configmap tpg-run-<workflow> -o json | jq '.data | map_values(fromjson)'
 ```
 
-Reasons written by the sync engine, the pod watch and the checks before a change:
+Reasons written by the sync engine, the pod watch and the checks before a change. `<namespace>` in the commands is the namespace of the instance: `pg-<instance>` unless its `clusters/fleet.yaml` entry says otherwise (section 3, `namespace`). Round 23 added these reasons: the namespace and shared Secrets (`SHARED_SECRETS_MISSING`, `HANDOVER_FAILED`, `NAMESPACE_SHARED`, `NAMESPACE_MISMATCH`, `NAMESPACE_AMBIGUOUS`, `FLEET_UNREADABLE`, `POSTGRES_SKIPPED`), purge and expire (`PURGE_LOCATION_UNKNOWN`, `PURGE_REPOPATH_REFUSED`, `PURGE_ACCOUNT_MISMATCH`, `PURGE_ACCOUNT_UNKNOWN`, `BACKUP_EXPIRE_IMPOSSIBLE`, `BACKUP_EXPIRE_TIMEOUT`, `BACKUP_EXPIRE_ERROR`, `BLOB_PURGE_FAILED`, `BACKUPS_UNREADABLE`, `EXPIRE_FAILED`, `BACKUP_REPO_SHARED`) and the restore (every reason it records is in the table of section 16).
 
 | Reason | Meaning | Look at |
 |---|---|---|
 | `SYNC_REJECTED` | The API server or an admission webhook refused the manifests (invalid or immutable field). Not retried | The detail holds Argo CD's message; fix the spec in Git |
 | `SYNC_FAILED` | The sync operation failed for another reason, after the retries | `argocd app get <app> --show-operation` |
 | `SYNC_TIMEOUT` | The sync operation did not finish in time | `argocd app get <app>`, the pod table in the step log |
-| `SYNC_BUSY` | Another operation on the Application did not end in time | `argocd app get <app> --show-operation`; ask the platform team if it is stuck (section 20) |
+| `SYNC_BUSY` | Another operation on the Application did not end in time | `argocd app get <app> --show-operation`; ask the platform team if it is stuck (section 21) |
 | `SYNC_DRIFT` | Synced, but resources stay OutOfSync (listed in the detail) | `argocd app diff <app>` |
 | `HEALTH_TIMEOUT` | Synced, but not Healthy in time | The Postgres resource `status.currentState`, the pod table |
 | `POD_<REASON>` | A pod could not start (`POD_CRASHLOOPBACKOFF`, `POD_IMAGEPULLBACKOFF`, `POD_UNSCHEDULABLE`, ...) | The status, events and logs printed below the pod table |
@@ -2280,12 +2792,12 @@ Reasons written by the sync engine, the pod watch and the checks before a change
 | `PATCH_REFUSED` | tpg-patch: a file holds a refused field or a second document for one object, a `repo:` file is not on the fleet branch, a CA bundle source names an instance without `backup.enableSSL: true`, or the render or the server-side dry run failed on the target | The pre-check detail names the file, the field and the owning workflow; the step log holds the render error |
 | `NO_CHANGE` | tpg-patch: the patch renders the objects that already run (no difference); nothing was committed or synced | The diff in the plan step log is empty |
 | `PR_NOT_MERGED` | tpg-patch `pushMode=pr`: the pull request of the cluster was closed without merging, or not merged within `prTimeoutSeconds`; the cluster was synced back and the branch deleted | Run tpg-patch again and merge the pull request while the workflow waits |
-| `OPERATION_IN_PROGRESS` | tpg-patch, tpg-scale-instance: an upgrade or a restore of the instance is still running; tpg-patch reverts the cluster | Run the workflow again when it has finished (`kubectl -n pg-<instance> get postgresversionupgrade,postgresrestore`) |
+| `OPERATION_IN_PROGRESS` | tpg-patch, tpg-scale-instance: an upgrade or a restore of the instance is still running; tpg-patch reverts the cluster | Run the workflow again when it has finished (`kubectl -n <namespace> get postgresversionupgrade,postgresrestore`) |
 | `SKIPPED_NOT_PLANNED` | tpg-patch: the cluster was blocked in the plan, or none of its targets has a change | The pre-check of the cluster |
 | `FLEET_ENTRY_INVALID` | tpg-upgrade: `clusters.<cluster>.operator.patches.values` is not `{current, previous}` (a fleet repository written before Round 15) | Start a Round 15 fleet from a new repository |
 | `OVERLAY_USE_TPG_PATCH` | tpg-day0 (`PATCH_USE_TPG_PATCH` before Round 22): a running operator or instance would get other overlay files; an identical overlay is left alone | Change running objects with tpg-patch |
-| `CA_BUNDLE_MISSING` | tpg-day0, tpg-create-instance: `backupEnableSSL=true` with no CA bundle source, or the commit found a bundle neither in the run record nor in `tpg-settings` | Section 14 |
-| `WRAPPING_TOKEN_INVALID`, `VALUE_INVALID`, `VALUE_REJECTED` | tpg-rotate-credential: the new value could not be read or failed its check; nothing was written | Section 16 |
+| `CA_BUNDLE_MISSING` | tpg-day0, tpg-create-instance: `backupEnableSSL=true` with no CA bundle source, or the commit found a bundle neither in the run record nor in `tpg-settings` | Section 15 |
+| `WRAPPING_TOKEN_INVALID`, `VALUE_INVALID`, `VALUE_REJECTED` | tpg-rotate-credential: the new value could not be read or failed its check; nothing was written | Section 17 |
 | `MERGED_CONTENT_DIFFERS` | tpg-patch `pushMode=pr`: after the merge the Application stays OutOfSync, so the fleet branch renders other objects than the ones synced from the pull request (changes made in the pull request, or merged with other commits); nothing was synced or reverted | Compare the pull request with the fleet branch; `argocd app diff <app>` |
 | `GIT_PUSH_FAILED` | The commit or the branch could not be pushed, or the pull request not opened | The push token (`tpg/shared/github-push`), branch protection |
 | `OPERATOR_IMAGE_PINNED` | tpg-upgrade: the current operator values patch sets `operatorImage` with a tag that is not the running version | Fix the file with tpg-patch first |
@@ -2294,19 +2806,19 @@ Reasons written by the sync engine, the pod watch and the checks before a change
 | `OPERATOR_NOT_INSTALLED`, `NOT_IN_FLEET` | tpg-create-instance: the cluster has no operator of the fleet, or `fleet.yaml` does not declare it | Run tpg-day0 for the cluster first |
 | `INSTANCE_EXISTS` | tpg-create-instance: the instance runs with other values (section 5) | tpg-patch, tpg-scale-instance or tpg-upgrade |
 | `RENDER_FAILED`, `DRY_RUN_REJECTED` | tpg-create-instance, tpg-network-policy: the chart cannot render the objects, or the API server refuses them in a server-side dry run | The detail holds the message |
-| `SPEC_NOT_APPLIED` | tpg-scale-instance: the live `spec.highAvailability` does not match the request after the sync (and, for `replicas=0`, after the `tpg-scale` apply) | `kubectl -n pg-<instance> get postgres <instance> -o yaml --show-managed-fields` |
-| `CA_BUNDLE_MISSING` | `backupEnableSSL=true` (or `backup.enableSSL: true`) and no CA bundle: no `backupCaBundleFile` or `backupCaBundleVaultSecret`, and `tpg-settings` has no `backupCaBundle` (at the plan), or at the commit a bundle in neither the run record nor `tpg-settings` | Section 14; `tpg-aks-infra/scripts/run.sh --only hub-secrets` writes the `tpg-settings` bundle |
+| `SPEC_NOT_APPLIED` | tpg-scale-instance: the live `spec.highAvailability` does not match the request after the sync (and, for `replicas=0`, after the `tpg-scale` apply) | `kubectl -n <namespace> get postgres <instance> -o yaml --show-managed-fields` |
+| `CA_BUNDLE_MISSING` | `backupEnableSSL=true` (or `backup.enableSSL: true`) and no CA bundle: no `backupCaBundleFile` or `backupCaBundleVaultSecret`, and `tpg-settings` has no `backupCaBundle` (at the plan), or at the commit a bundle in neither the run record nor `tpg-settings` | Section 15; `tpg-aks-infra/scripts/run.sh --only hub-secrets` writes the `tpg-settings` bundle |
 | `CLUSTER_API_ERROR` | tpg-upgrade: a declared instance could not be read on the target (an error other than NotFound); tpg-day0 and tpg-create-instance pre-check: the Secret `regsecret` or `backup-storage` (or the VaultStaticSecret that owns it) could not be read in the namespace of an instance (an error other than NotFound) | The detail holds the API error; check the cluster's API server and its kubeconfig Secret |
 | `AZURE_BACKUP_UNSUPPORTED` | The PostgresBackupLocation CRD on the target has no `spec.storage.azure` (or `caBundle`) | `kubectl explain postgresbackuplocation.spec.storage` on the target |
 | `CILIUM_NOT_AVAILABLE`, `ACNS_NOT_ENABLED` | A network policy needs Cilium, or `egressToFqdns` needs ACNS | Terraform `acns_enabled = true`, then `run.sh --only hub-secrets` |
-| `EXPOSURE_NOT_APPLIED` | The instance's Services did not reach the requested exposure (load balancer addresses) within 5 minutes | `kubectl -n pg-<instance> get svc`, the Service events (subnet, quota, annotations) |
+| `EXPOSURE_NOT_APPLIED` | The instance's Services did not reach the requested exposure (load balancer addresses) within 5 minutes | `kubectl -n <namespace> get svc`, the Service events (subnet, quota, annotations) |
 | `FLEET_CHANGED_DURING_RUN` | tpg-day0, tpg-create-instance: `clusters/fleet.yaml` changed for that cluster between the plan and the commit; the plan was not written for it | Run again |
-| `POLICY_NOT_APPLIED`, `POLICY_NOT_REMOVED`, `BACKUP_EGRESS_BLOCKED`, `CLIENT_BLOCKED`, `NOT_ISOLATED` | tpg-network-policy checks after the sync (section 9) | The detail; `kubectl -n pg-<instance> get networkpolicy,ciliumnetworkpolicy` |
+| `POLICY_NOT_APPLIED`, `POLICY_NOT_REMOVED`, `BACKUP_EGRESS_BLOCKED`, `CLIENT_BLOCKED`, `NOT_ISOLATED` | tpg-network-policy checks after the sync (section 9) | The detail; `kubectl -n <namespace> get networkpolicy,ciliumnetworkpolicy` |
 | `INVALID_INPUT` (`highAvailability=true needs readReplicas 1 or more`) | tpg-day0, tpg-create-instance: an HA instance with 0 read replicas (D69) | Set `readReplicas`, or `highAvailability=false` for a single node |
 | `INVALID_INPUT` (`readReplicas N needs highAvailability=true`) | tpg-day0, tpg-create-instance: read replicas for a single node, in the inputs or on one `clusterMap` entry | Set `highAvailability=true`, or remove `readReplicas` |
 | `FERRET_VERSION_UNSUPPORTED`, `FERRET_CRD_MISSING` | FerretDB below Postgres 17.5, or an operator without the PostgresFerretDocumentDB CRD (section 4) | `postgresVersion`; `kubectl get crd postgresferretdocumentdbs.sql.tanzu.vmware.com` |
-| `FERRET_SECRET_MISSING` | The connection Secret a FerretDB names does not exist 2 minutes after the instance runs | The detail lists the db Secrets of `pg-<instance>`; set `ferretSecretName` or `ferretReadOnlySecretName` |
-| `FERRET_NOT_READY` | The FerretDB Deployments did not become available | `kubectl -n pg-<instance> get pods -l 'app in (ferretdb-rw-<instance>,ferretdb-ro-<instance>)'`; the documentdb extension |
+| `FERRET_SECRET_MISSING` | The connection Secret a FerretDB names does not exist 2 minutes after the instance runs | The detail lists the db Secrets of the instance's namespace; set `ferretSecretName` or `ferretReadOnlySecretName` |
+| `FERRET_NOT_READY` | The FerretDB Deployments did not become available | `kubectl -n <namespace> get pods -l 'app in (ferretdb-rw-<instance>,ferretdb-ro-<instance>)'`; the documentdb extension |
 | `FERRET_READONLY_NEEDS_HA` | tpg-scale-instance `replicas=0` while FerretDB runs read-only proxies | Set `ferret.readOnlyReplicas: 0` with a tpg-patch values file first |
 
 A `BLOCKED` cluster or instance fails a tpg-day0, tpg-create-instance or tpg-network-policy run in its last step (`gate`), after the other targets were deployed, so a partial run never ends `Succeeded`.
@@ -2315,7 +2827,7 @@ Warnings do not fail a run. They are listed in the Warnings part of the report:
 
 | Warning | Meaning |
 |---|---|
-| `MANUAL_SYNC_DETECTED` | The last operation on a tpg target Application was started by a named user other than `workflow-bot`, or was an automated sync. Section 20 explains why that is refused. The workflow syncs the Application itself at its commit and carries on |
+| `MANUAL_SYNC_DETECTED` | The last operation on a tpg target Application was started by a named user other than `workflow-bot`, or was an automated sync. Section 21 explains why that is refused. The workflow syncs the Application itself at its commit and carries on |
 | `BACKUP_REPO_SHARED` | tpg-delete-instance, tpg-delete-apps with `purgeBackups=true`: the blobs of the repository were kept because another backup location (or a cluster that could not be scanned) shares it |
 | `BACKUP_EXPIRE_DECLINED` | `purgeBackups=true`, tpg-backup-expire with `purgeBackups`: pgBackRest declined to expire a backup (the operator's message is in the warning); the run goes on |
 | `ORPHAN_CRD` | tpg-day0: Postgres CRDs exist without any operator; the operator sync adopts them |
@@ -2329,7 +2841,7 @@ Warnings do not fail a run. They are listed in the Warnings part of the report:
 | `PATCH_OVERRIDES_VALUE` | tpg-patch: a postgres patch document sets a field that a chart value also sets, with another value; the document wins while it is current (section 7) |
 | `OVERLAY_TARGET_NOT_RENDERED` | tpg-create-instance, tpg-day0: an overlay document targets an object the instance does not render now; it is kept and applies when the object is rendered |
 | `PATCH_TARGET_NOT_RENDERED` | tpg-patch: a document patches an object the instance does not render now (a schedule without `backupSchedule=operator`, FerretDB off); it is kept and applies when the object is rendered |
-| `GATEWAY_NOT_UPDATED` | tpg-rotate-credential `monitoring-remote-write`: run `tpg-aks-infra/scripts/run.sh --only addons` so the hub gateway accepts the new password (section 16) |
+| `GATEWAY_NOT_UPDATED` | tpg-rotate-credential `monitoring-remote-write`: run `tpg-aks-infra/scripts/run.sh --only addons` so the hub gateway accepts the new password (section 17) |
 
 One line in the executor log is **not** an error, however it reads:
 
@@ -2345,7 +2857,7 @@ failure in such a log is the line above it (`sub-process exited ... exit status
 
 ---
 
-## 20. argocd CLI: inspect the sync steps behind the workflows
+## 21. argocd CLI: inspect the sync steps behind the workflows
 
 The workflows call the Argo CD API as the local account `workflow-bot`. Applications: `tpg-<cluster>-platform`, `tpg-<cluster>-operator`, `tpg-<cluster>-<instance>` (project `tpg`, the target Applications), and `tpg-hub-workflows` and `tpg-hub-monitoring` (project `tpg-hub`).
 
@@ -2353,7 +2865,7 @@ The workflows call the Argo CD API as the local account `workflow-bot`. Applicat
 
 1. **Argo CD RBAC.** People are denied `sync` (which also covers rollback and terminating an operation), `override`, `update` and `delete` on `tpg/*`. `workflow-bot` (`role:tpg-sync`) may get and sync them, and read the Argo CD repositories (`repositories, get`; `tpg-rotate-credential` checks the connection state of `repo-tanzu-postgres-oci` and `repo-tpg-fleet`; without the line the step fails `RBAC_MISSING`). The deny lines are a marked block in `policy.csv` (`tpg-aks-infra argo/argocd-values.yaml`; on an existing hub, `scripts/hub/existing/check-argo.sh --yes` adds a line for every subject that could act on project `tpg`).
 2. **Admission policy `tpg-application-sync`** on the hub. It refuses a new operation on a target Application unless argocd-server writes it for `workflow-bot`, and refuses switching on automated sync. It also covers a `kubectl edit` of the Application object, which Argo CD RBAC does not see. The Argo CD UI then shows `only the tpg workflows (Argo CD account workflow-bot) may sync tpg-...`.
-3. **Detection.** Each workflow sync first checks who started the last operation on the Application, and reports `MANUAL_SYNC_DETECTED` (section 19) when a named user other than `workflow-bot` started it, or when it was an automated sync.
+3. **Detection.** Each workflow sync first checks who started the last operation on the Application, and reports `MANUAL_SYNC_DETECTED` (section 20) when a named user other than `workflow-bot` started it, or when it was an automated sync.
 
 The hub Applications in project `tpg-hub` stay manageable. There is no break-glass role: fix the cause in Git and rerun the workflow.
 
@@ -2405,61 +2917,3 @@ argocd repo list
 ```
 
 The delete workflows remove target Applications by removing their `clusters/fleet.yaml` entries (the ApplicationSet deletes the Application without cascade) and delete database objects in order; `argocd app delete` is refused for people.
-
----
-
-## 21. tpg-backup-expire
-
-Expires PostgresBackups (Round 23). `clusterMap` is the only way to name the targets. Per instance, one of:
-
-- `backups: [orders-db-full-202609010100, ...]`: the PostgresBackup names to expire (a list in brackets, also with one name).
-- `purgeBackups: true`: every backup of the instance. The blobs of the repository are never deleted here (that is `purgeBackups` of `tpg-delete-instance` and `tpg-delete-apps`).
-
-Not both. `includeDependents: true` (with `backups`) is required to expire a backup that has dependents: a full backup takes the differential and incremental backups of its chain with it, a differential the incrementals after it. Without it the instance is `BLOCKED` (`HAS_DEPENDENTS`) with the list of dependents, nothing is expired, and the run ends `Failed` after the other instances ran; naming every dependent in `backups` is the other way. Dependents go first, newest first. A backup is expired by `spec.expire=true` on its PostgresBackup; the operator runs pgBackRest expire and the step waits for its answer (`timeoutSeconds` per backup, every poll logged).
-
-| Input | Type | Mandatory | Default | Description |
-|---|---|---|---|---|
-| `clusterMap` | `Map` | yes | | Cluster to instances to `backups` or `purgeBackups`, `includeDependents` (section 3) |
-| `dryRun` | `Boolean` | no | `true` | `true` records the plan (what would be expired, dependents included, what is `BLOCKED`) and changes nothing; `false` expires |
-| `confirm` | `List` | with `dryRun=false` | | The cluster names of `clusterMap`, for example `[aks-tpg-poc-01]` |
-| `timeoutSeconds` | `Integer` | no | `600` | How long to wait for the operator's answer to the expire of one backup |
-
-<!-- BEGIN GENERATED: params-backup-expire -->
-<!-- written by workflows/params/params_schema.py; do not edit by hand -->
-
-Parameter file schema: `workflows/params/schemas/params-backup-expire.schema.json` (also `params-backup-expire.schema.yaml`). Check a parameter file with it:
-
-```bash
-check-jsonschema --schemafile workflows/params/schemas/params-backup-expire.schema.json <parameter file>
-```
-
-Worked example 1, `workflows/params/schemas/params-backup-expire.example.yaml`:
-
-```yaml
-# yaml-language-server: $schema=params-backup-expire.schema.json
-# tpg-backup-expire: A dry run: the plan to expire one backup with its dependents (dryRun is true by default).
-# A parameter file of the argo CLI (generated by workflows/params/params_schema.py; see
-# params-backup-expire.schema.json). Submit it with:
-#   argo submit -n argo --from workflowtemplate/tpg-backup-expire --parameter-file params-backup-expire.example.yaml --watch
-clusterMap: |
-  aks-tpg-poc-01:
-    instances:
-      orders-db:
-        backups: [orders-db-full-202609010100]
-        includeDependents: true
-dryRun: "true"
-```
-
-<!-- END GENERATED: params-backup-expire -->
-
-Results per instance: `SUCCEEDED` (`DRY_RUN` for the plan; `DECLINED_SOME` when `purgeBackups` ran and pgBackRest declined some), `BLOCKED` (`HAS_DEPENDENTS`), `FAILED` (`UNKNOWN_BACKUP`, `NOT_EXPIRABLE`, `INSTANCE_NOT_RUNNING`, `OPERATION_IN_PROGRESS`, `BACKUP_EXPIRE_DECLINED`: a backup you named, or a dependent of it, was declined; the detail is the operator's message and the later backups are not attempted), `TIMEOUT`. Lab item: how the operator reports an expire, and what it does when pgBackRest refuses (for example the last full backup), is a lab item of Round 23 (verify it on the lab cluster). Two points of the guess: (1) an object the operator keeps after an expire (phase `Expired` or `Expiring`, or any PostgresBackup with `spec.expire=true`) is not an unfinished operation, so it never makes a later backup, restore, scale or delete fail with `OPERATION_IN_PROGRESS`; (2) only conditions written after this run's patch count as the answer: with `observedGeneration`, it must be at least `metadata.generation`; without it, `lastTransitionTime` must not be older than the patch (less 2 minutes for clock skew), and with neither field the condition counts only when this run set `spec.expire`. So on a re-run where `spec.expire` is already `true` an old `Expired=False` is not read as a refusal; without a fresh signal the step waits and times out like for any expire (`TIMEOUT`). Both depend on how the operator really writes status; confirm them together with the rest of this item.
-
-```bash
-# 1. Plan: the full backup with its chain
-argo submit --from workflowtemplate/tpg-backup-expire \
-  -p clusterMap='{"aks-tpg-poc-01":{"instances":{"orders-db":{"backups":["orders-db-full-202609010100"],"includeDependents":true}}}}' --watch
-
-# 2. Run it
-argo submit --from workflowtemplate/tpg-backup-expire -p dryRun=false -p 'confirm=[aks-tpg-poc-01]' \
-  -p clusterMap='{"aks-tpg-poc-01":{"instances":{"orders-db":{"backups":["orders-db-full-202609010100"],"includeDependents":true}}}}' --watch
-```

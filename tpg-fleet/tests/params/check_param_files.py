@@ -28,7 +28,11 @@ Files checked:
     (the nearest definition of NAME.yaml before the command, else the first one after it). Blocks whose first line
     is `# ./path`, or that are not named this way (fleet.yaml excerpts, patch files), are not parameter files. A
     definition that no command submits, and a command whose file nothing defines (except the generic inputs.yaml
-    and <placeholders>), are problems: the rule has to hold for the document to be checked.
+    and <placeholders>), are problems: the rule has to hold for the document to be checked. One more form: a
+    command whose --parameter-file is workflows/params/schemas/params-W.example.yaml (worked example 1, run from the
+    tpg-fleet clone) is bound to that generated file and must name tpg-W. Every workflow has such a command (example
+    1) and at least one defined example that names two clusters or more (and, where the workflow takes a
+    clusterMap, uses it): worked example 2
   3 negative cases: an unknown key, a wrong type, a comma-separated list, an empty or malformed list element, a
     missing mandatory input; both list forms (the bracketed string and the YAML sequence) are accepted everywhere
   4 a table of values per type: the schema and the admission policy accept and refuse the same strings
@@ -255,6 +259,9 @@ def check_file(label, t, path, overrides=()):
     merged = dict(params)
     for o in overrides:
         k, _, v = o.partition("=")
+        if k in params:   # argo 4.1.3 lists the input twice (the -p value first) and the run takes the file's value
+            bad(f"{label}: -p {k} repeats an input the parameter file sets; a -p does not override the file (set it in one place)")
+            return
         merged[k] = v
     errs = schema_errors(t, merged)
     inputs = {k: python_str(v) for k, v in merged.items()}
@@ -364,6 +371,36 @@ def doc_examples(text):
     return defs, uses, problems
 
 
+GENERATED_EXAMPLE = re.compile(r"^(?:\./)?workflows/params/schemas/params-([a-z0-9-]+)\.example\.yaml$")
+
+
+def example_clusters(params):
+    """The cluster names a parameter file mentions: the clusters list and the clusters of clusterMap (the pairs of tpg-restore)."""
+    out = set()
+    v = params.get("clusters")
+    if isinstance(v, str) and v.strip().startswith("["):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            v = [x.strip(" '\"") for x in v.strip()[1:-1].split(",")]
+    if isinstance(v, list):
+        out |= {str(x) for x in v}
+    m = params.get("clusterMap")
+    if isinstance(m, str):
+        try:
+            m = yaml.safe_load(m)
+        except yaml.YAMLError:
+            m = None
+    if isinstance(m, dict):
+        out |= {str(k) for k in m}
+    elif isinstance(m, list):
+        for pair in m:
+            for side in (pair.values() if isinstance(pair, dict) else []):
+                if isinstance(side, dict):
+                    out |= {str(k) for k in side}
+    return out
+
+
 def doc_cases():
     defs, uses, problems = doc_examples(open(DOC).read())
     for p in problems:
@@ -372,9 +409,21 @@ def doc_cases():
     for name, body, line in defs:
         by_name.setdefault(name, []).append((line, body))
     used = set()
+    bound = {}          # template -> [parameters of the defined examples a command submits]
+    example1 = {}       # template -> [line of a command that submits its generated example]
     n = 0
     for name, tpl, ov, line in uses:
         if name in ("inputs.yaml",) or "<" in name:
+            continue
+        g = GENERATED_EXAMPLE.match(name)
+        if g:
+            if tpl != "tpg-" + g.group(1):
+                task(bad, f"docs/workflow-commands.md line {line}: {name} is the example of tpg-{g.group(1)} and is submitted to {tpl}")
+                continue
+            example1.setdefault(tpl, []).append(line)
+            if ov:   # an override (-p dryRun=false, confirm): the example with it must pass as well
+                n += 1
+                task(check_file, f"docs/workflow-commands.md line {line}: {name} ({tpl}, {' '.join('-p ' + o for o in ov)})", tpl, EXAMPLES[tpl], ov)
             continue
         defined = by_name.get(name, [])
         # the nearest definition before the command; a command that comes first (in the text that introduces
@@ -389,6 +438,10 @@ def doc_cases():
         if tpl not in TEMPLATES:
             task(bad, f"docs/workflow-commands.md line {line}: workflowtemplate/{tpl} is not a tpg workflow")
             continue
+        try:
+            bound.setdefault(tpl, []).append(yaml.safe_load(pick[1]) or {})
+        except yaml.YAMLError:
+            pass   # check_file reports it
         path = os.path.join(tmpdir, f"doc-{pick[0]}-{name}")
         open(path, "w").write(pick[1])
         n += 1
@@ -399,6 +452,26 @@ def doc_cases():
             task(bad, f"docs/workflow-commands.md line {line}: the parameter file {name} is never submitted with --parameter-file")
     if n == 0:
         task(bad, "docs/workflow-commands.md: no parameter-file example found")
+    for t in sorted(TEMPLATES):
+        task(example_coverage, t, example1.get(t, []), bound.get(t, []))
+
+
+def example_coverage(t, ex1, others):
+    """Every workflow section has worked example 1 (a command that submits the generated example) and worked example 2
+    (a defined example that names two clusters or more, with a clusterMap where the workflow takes one)."""
+    w = w_of(t)
+    if not ex1:
+        bad(f"docs/workflow-commands.md {t}: no command submits worked example 1 "
+            f"(`argo submit ... --from workflowtemplate/{t} --parameter-file workflows/params/schemas/params-{w}.example.yaml`)")
+        return
+    multi = [p for p in others if len(example_clusters(p)) >= 2]
+    if not multi:
+        bad(f"docs/workflow-commands.md {t}: no parameter-file example that names two clusters or more (worked example 2)")
+        return
+    if "clusterMap" in TEMPLATES[t]["params"] and not any("clusterMap" in p for p in multi):
+        bad(f"docs/workflow-commands.md {t}: worked example 2 has to use a clusterMap")
+        return
+    ok(f"docs/workflow-commands.md {t}: worked example 1 (line {ex1[0]}) and a worked example 2 with {len(example_clusters(multi[0]))} clusters")
 
 
 doc_cases()

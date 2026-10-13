@@ -45,4 +45,4 @@ spec:
     enabled: false
 ```
 
-See `docs/workflow-commands.md`, section 15 (tpg-restore).
+See `docs/workflow-commands.md`, section 16 (tpg-restore).

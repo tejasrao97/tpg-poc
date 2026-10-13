@@ -254,7 +254,7 @@ sl_rs_read_pairs() {  # the pairs from a file, or pasted -> SL_LINE (JSON list)
   SL_LINE="$j"
 }
 sl_clustermap() {  # -> SL_LINE, 1 to ask again
-  sl_menu "clusterMap (a list of pairs, section 15 of docs/workflow-commands.md):" "Build the pairs step by step (source, recovery point, target)" \
+  sl_menu "clusterMap (a list of pairs, section 16 of docs/workflow-commands.md):" "Build the pairs step by step (source, recovery point, target)" \
     "Load them from a YAML or JSON file" "Paste or type them"
   case "$SL_PICK" in
     0) sl_rs_build ;;
