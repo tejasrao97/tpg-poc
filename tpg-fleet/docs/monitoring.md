@@ -56,9 +56,9 @@ targets:
   counters that the WorkflowTemplates declare) and Vault (`/v1/sys/metrics`, for the
   `tpg-vault-sealed` rule). Round 23: `tpg_restore_result` counts one result per pair of
   tpg-restore, labelled with the target cluster and instance (`cluster`, `instance_name`)
-  and, as `mode`, the method of the pair (`backup`, `latest`, `time`, `lsn` or
-  `transaction`); `tpg_backup_expire_result` (per instance, with `dry_run`) is new with
-  tpg-backup-expire.
+  and, as `mode`, the recovery point of the pair (`backup` for a named backup, else
+  the `pitrConfig.type`: `latest`, `time`, `lsn` or `transaction`);
+  `tpg_backup_expire_result` (per instance, with `dry_run`) is new with tpg-backup-expire.
 
 ### 1.2 What runs where
 
