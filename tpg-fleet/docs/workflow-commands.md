@@ -2213,7 +2213,7 @@ Restores Postgres instances from a list of pairs (Round 23; the flat inputs of e
 
 | Input | Type | Mandatory | Default | Description |
 |---|---|---|---|---|
-| `clusterMap` | `List (pairs)` | yes | | The pairs (below). A map of clusters is refused |
+| `clusterMap` | `List (pairs)` | yes | | The pairs (Keys of a pair, below). A map of clusters is refused |
 | `dryRun` | `Boolean` | no | `true` | `true`: each pair records its plan (source resolution, matrix, the PostgresRestore that would be created, preparation of the target) and nothing changes; `false`: restore |
 | `rolloutMode` | `Enum` | no | `all` | `all`: every pair at once; `batches`: `maxParallel` pairs at a time, in list order; `canary`: the first pair alone, a failed canary stops the run, then batches. The pairs are independent: a failed pair does not stop the others, and the run ends Failed when any pair failed |
 | `maxParallel` | `Integer` | no | `2` | Pairs per batch for `canary` and `batches` |
@@ -2297,7 +2297,7 @@ How the keys become the PostgresRestore (checked against the live CRD `helm_arti
 | the target instance, `targetInstanceSpecFilePath` | `spec.targetInstance.name`, `spec.targetInstance.spec` (the file's spec, or absent) |
 | `skipMinorVersionCheck` | the annotation `sql.tanzu.vmware.com/skip-minor-version-check: "true"` |
 
-`spec.sourceBackup` and `spec.pitr` are never sent together. The object is named `<target instance>-restore-<yyyymmddHHMMSS>`, carries the label `tpg.fleet/workflow` and is rendered through `helm_artifacts/instance/crd-reference` like every operator object of the fleet.
+`spec.sourceBackup` and `spec.pitr` are never sent together. The object is named `<target instance>-restore-<yyyymmddHHMMSS>`, carries the label `tpg.fleet/workflow` and is rendered through the reference chart `helm_artifacts/instance/crd-reference`.
 
 The validate step checks everything that needs no cluster, and names the pair and the key path of each error, for example `clusterMap[1].targetClusterConfig.aks-tpg-poc-02.pg-orders-dr.orders-db-dr.bestEffort is required with pitrConfig.type: time`: the list shape, one cluster, namespace and instance per side, registered clusters, namespaces (a DNS label; the reserved namespaces of tpg-day0 are refused for a target), the key rules above, `[repo: x.yaml]` with a space (`repo:<file path> "check for white spaces in between"`), a target that is restored twice or is the source of another pair, and a named-backup restore without `sourceBackupName`. An in-place pair needs `confirm` when `dryRun` is `false`; `confirm` on any other pair is refused. A local spec file must be in `patchFiles`. In place also needs `allowInPlaceRestore` (above): the validate step reads it from the fleet repository, and when any in-place pair is on a cluster without it the whole run is refused before any pair starts (`IN_PLACE_NOT_ALLOWED`, naming the cluster and the setting); `dryRun` does not skip this check, and a fleet repository that cannot be read refuses the run as well.
 
