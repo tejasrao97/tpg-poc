@@ -38,6 +38,8 @@ Files checked:
   4 a table of values per type: the schema and the admission policy accept and refuse the same strings
   5 every input that types.yaml marks mandatory: always is refused by the validate step when it is missing, and
     is exactly what the schemas require
+  6 and none of them accepts "" in the schema (an enum, a list and a string input each), though the policy lets
+    it through (allowEmpty) and the validate step refuses it
 Prints one `ok` or `FAIL` line per check, then the skipped checks; exit 1 on a failure.
 """
 import concurrent.futures
@@ -611,7 +613,7 @@ VALUES = [
     ("tpg-day0", "operatorVersion", "latest", False),
     ("tpg-day0", "postgresVersion", "postgres-17.6", True), ("tpg-day0", "postgresVersion", "17.6", True),
     ("tpg-day0", "postgresVersion", "postgres-17.6-lite", False), ("tpg-day0", "postgresVersion", "pg17", False),
-    ("tpg-day0", "pushMode", "pr", True), ("tpg-day0", "pushMode", "", True), ("tpg-day0", "pushMode", "PR", False),
+    ("tpg-day0", "pushMode", "pr", True), ("tpg-day0", "pushMode", "PR", False),
     ("tpg-day0", "backupSchedule", "operator", True), ("tpg-day0", "backupSchedule", "", False), ("tpg-day0", "backupSchedule", "weekly", False),
     ("tpg-day0", "operatorFullSchedule", "0 1 * * 0", True), ("tpg-day0", "operatorFullSchedule", "0 1 * *", False),
     ("tpg-day0", "operatorFullSchedule", "weekly", False),
@@ -695,6 +697,35 @@ def mandatory(t):
 
 for t in sorted(TEMPLATES):
     task(mandatory, t)
+
+
+# 6 a mandatory: always input is never empty in the schema, though the policy lets "" through (allowEmpty) and the
+# validate step refuses it: the file is checked by the schema before the run, which is what it is for
+def never_empty(t, name):
+    p = base(t)
+    p[name] = ""
+    problems = []
+    if not any(e.startswith(f"{name}:") for e in schema_errors(t, p)):
+        problems.append(f"the schema accepts {name}: \"\"")
+    if ARGO:
+        rc, out = kubectl_create(t, p)
+        if rc != 0:
+            problems.append(f"the admission policy refuses {name}: \"\" (allowEmpty): {out.strip()[-200:]}")
+    else:
+        skip(f"{t} {name}", NO_ADMISSION)
+    rc, out = VALIDATE.run(t, {k: python_str(v) for k, v in p.items()})
+    if rc == 0 or name not in out:
+        problems.append(f"the validate step does not refuse {name}: \"\" (rc={rc})")
+    if problems:
+        bad(f"{t}: {name} empty", "\n".join(problems))
+    else:
+        ok(f"{t}: {name}: \"\" is refused by the schema and the validate step, and passes the policy (allowEmpty)")
+
+
+for t in sorted(TEMPLATES):
+    for name, spec in TYPED[t].items():
+        if spec.get("mandatory") == "always":
+            task(never_empty, t, name)
 
 # ---- report, in the order the checks were queued
 n_ok = n_bad = 0

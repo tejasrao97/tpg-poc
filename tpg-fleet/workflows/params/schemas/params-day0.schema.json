@@ -111,8 +111,7 @@
     "pushMode": {
       "enum": [
         "direct",
-        "pr",
-        ""
+        "pr"
       ],
       "description": "direct: push to the fleet branch; pr: open a pull request and continue after it is merged [Enum; mandatory]"
     },

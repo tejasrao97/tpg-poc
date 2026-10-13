@@ -74,16 +74,14 @@
       "enum": [
         "apply",
         "update",
-        "remove",
-        ""
+        "remove"
       ],
       "description": "apply: baseline policy with exactly these rules; update: change only the rules given; remove: delete both policies [Enum; mandatory]"
     },
     "pushMode": {
       "enum": [
         "direct",
-        "pr",
-        ""
+        "pr"
       ],
       "description": "direct: push to the fleet branch; pr: open a pull request and continue after it is merged [Enum; mandatory]"
     },

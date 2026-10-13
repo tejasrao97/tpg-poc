@@ -223,8 +223,7 @@
     "pushMode": {
       "enum": [
         "direct",
-        "pr",
-        ""
+        "pr"
       ],
       "description": "pr: per cluster a branch and pull request, synced before the merge; the workflow waits for a person to merge it (closed or not merged within prTimeoutSeconds: the cluster is synced back and the branch deleted). direct: per cluster a commit on the fleet branch (reverted by a revert commit when the sync or the checks fail) [Enum; mandatory]"
     },

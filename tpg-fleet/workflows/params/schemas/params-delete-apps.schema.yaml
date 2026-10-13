@@ -41,7 +41,6 @@ properties:
     description: 'Map (YAML or JSON): cluster -> {deleteOperator, force, instances: {instance -> {purgePvcs, purgeNamespace, purgeBackups, finalBackup}}}; the inputs below are the defaults [Map]'
   confirm:
     anyOf:
-    - const: ''
     - type: string
       pattern: ^\s*\[\s*["\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?["\x27]?(\s*,\s*["\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?["\x27]?)*\s*\]\s*$
       not:
@@ -90,7 +89,6 @@ properties:
     enum:
     - direct
     - pr
-    - ''
     description: 'direct: push to the fleet branch; pr: open a pull request and continue after it is merged [Enum; mandatory]'
   force:
     enum:

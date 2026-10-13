@@ -7,15 +7,8 @@
   "additionalProperties": false,
   "properties": {
     "clusterMap": {
-      "anyOf": [
-        {
-          "const": ""
-        },
-        {
-          "type": "string",
-          "pattern": "^\\s*(\\[|-\\s)"
-        }
-      ],
+      "type": "string",
+      "pattern": "^\\s*(\\[|-\\s)",
       "description": "List of pairs (YAML or JSON), mandatory: - {sourceClusterConfig: {<cluster>: {<namespace>: {<instance>: {sourceBackupName}}}}, targetClusterConfig: {<cluster>: {<namespace>: {<instance>: {pitrEnabled, pitrConfig, bestEffort, targetInstanceSpecFilePath, confirm, skipMinorVersionCheck, postRestoreBackup}}}}}. Example, in place from a named backup: [{sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {sourceBackupName: orders-db-full-20260914000000}}}}, targetClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {pitrEnabled: false, confirm: orders-db}}}}}] [List (pairs); mandatory]"
     },
     "dryRun": {

@@ -29,7 +29,8 @@ The schema describes it as the run accepts it, which was verified against argo 4
   - clusterMap, and every other Map input, is a string (a block, clusterMap: |); patchFiles and apps,
     the JSON inputs, are the JSON text or a mapping;
   - patterns are the ones of the admission policy (types.yaml), so both accept the same strings.
-`required` lists the inputs that are mandatory in every case (types.yaml mandatory: always); inputs that
+`required` lists the inputs that are mandatory in every case (types.yaml mandatory: always), and their value
+is never empty ("" is accepted by admission through allowEmpty and refused by the validate step); inputs that
 are mandatory only in some cases (without clusterMap, for one mode, ...) and the combinations of inputs
 (types.yaml rules) are left to the validate step of the workflow and the admission policy, which remain
 the authority. Needs PyYAML.
@@ -188,7 +189,9 @@ def value_schema(spec, types, name):
     """The schema of one input's value, without description and default."""
     t = spec["type"]
     ty = types[t]
-    empty = bool(spec.get("allowEmpty"))
+    # allowEmpty lets "" pass admission so that the validate step reports the missing input; an input that is
+    # mandatory in every case is never empty in a parameter file, so the schema leaves the empty alternative out
+    empty = bool(spec.get("allowEmpty")) and spec.get("mandatory") != "always"
     if t == "string":
         return {"type": "string"}
     if t == "enum":

@@ -8,7 +8,6 @@ additionalProperties: false
 properties:
   clusters:
     anyOf:
-    - const: ''
     - type: string
       pattern: ^\s*all\s*$
     - type: string

@@ -29,7 +29,8 @@
 #               pattern of "components" lets auto stand bare in the same way
 #   mandatory   absent: optional. always: the validate step refuses the run without it in
 #               every case (it has no default in the template), and the parameter-file schema
-#               lists it as required. conditional: mandatory in some cases only (without
+#               lists it as required and does not accept an empty value for it (admission does,
+#               through allowEmpty; the validate step refuses it). conditional: mandatory in some cases only (without
 #               clusterMap, for one mode, ...), so the schema does not require it and the
 #               validate step decides. The Mandatory column of docs/workflow-commands.md says
 #               "yes" / "no" / the condition; tests/params checks the column against this.

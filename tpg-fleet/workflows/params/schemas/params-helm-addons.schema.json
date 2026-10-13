@@ -9,9 +9,6 @@
     "clusters": {
       "anyOf": [
         {
-          "const": ""
-        },
-        {
           "type": "string",
           "pattern": "^\\s*all\\s*$"
         },
