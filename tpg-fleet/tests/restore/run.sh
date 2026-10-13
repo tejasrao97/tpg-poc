@@ -1732,9 +1732,9 @@ TABLE="$(printf '%s\n' "$SEC16" | awk '/^### Reasons the restore records/{f=1; n
 if [[ -z "$TABLE" ]]; then bad "section 16 of the docs has no 'Reasons the restore records' table"; else
   missing=""
   # every code the script passes to fail, block or warn (the placeholders REASON and CODE are the helpers' own parameters)
-  for code in $(grep -oE '\b(fail|block|warn) [A-Z][A-Z_]{3,}' "$ROOT/workflows/scripts/restore-pair.sh" | awk '{print $2}' | sort -u | grep -vxE 'REASON|CODE'); do
+  while read -r code; do
     printf '%s\n' "$TABLE" | grep -q "\`${code}\`" || missing="${missing} ${code}"
-  done
+  done < <(grep -oE '\b(fail|block|warn) [A-Z][A-Z_]{3,}' "$ROOT/workflows/scripts/restore-pair.sh" | awk '{print $2}' | sort -u | grep -vxE 'REASON|CODE')
   # the codes record() writes directly
   for code in INVALID_PAIR SKIPPED_IN_PROGRESS TIMEOUT DRY_RUN UNEXPECTED_ERROR; do
     printf '%s\n' "$TABLE" | grep -q "\`${code}\`" || [[ "$code" == DRY_RUN ]] || missing="${missing} ${code}"
@@ -1743,12 +1743,12 @@ if [[ -z "$TABLE" ]]; then bad "section 16 of the docs has no 'Reasons the resto
   printf '%s\n' "$TABLE" | grep -q '`IN_PLACE_NOT_ALLOWED`' || missing="${missing} IN_PLACE_NOT_ALLOWED"
   [[ -z "$missing" ]] && ok "every reason of restore-pair.sh is in the table of section 16" || bad "section 16 lacks the reasons:${missing}"
   unknown=""
-  for code in $(printf '%s\n' "$TABLE" | awk -F'|' 'NF > 3 {print $2}' | grep -oE '`[A-Z][A-Z_<>]+`' | tr -d '`' | sort -u); do
+  while read -r code; do
     case "$code" in
       TARGET_POD_\<REASON\>) code=TARGET_ ;;
     esac
     grep -qE "\b${code}" "$ROOT/workflows/scripts/restore-pair.sh" "$ROOT/workflows/scripts/validate-params.sh" || unknown="${unknown} ${code}"
-  done
+  done < <(printf '%s\n' "$TABLE" | awk -F'|' 'NF > 3 {print $2}' | grep -oE '`[A-Z][A-Z_<>]+`' | tr -d '`' | sort -u)
   [[ -z "$unknown" ]] && ok "every reason of the table of section 16 is written by restore-pair.sh or the validate step" || bad "the table of section 16 names reasons no script writes:${unknown}"
 fi
 
