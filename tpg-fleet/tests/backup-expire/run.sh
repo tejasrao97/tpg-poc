@@ -424,6 +424,25 @@ yq -e '.spec.templates[] | select(.name == "expire-instance") | .synchronization
   && ok "expire-instance holds the same mutex as tpg-delete-instance" || bad "mutex"
 ! grep -qE 'blob_|curl' "$ROOT/workflows/scripts/backup-expire.sh" && ok "backup-expire.sh has no blob code (blobs are deleted only by purgeBackups of the delete workflows)" || bad "blob code in backup-expire.sh"
 
+# ---------------------------------------------------------------- the reasons of the docs
+# section 14 of docs/workflow-commands.md lists every reason backup-expire.sh records, and only those
+DOC="$ROOT/docs/workflow-commands.md"
+RES="$(awk '/^## 14\. tpg-backup-expire/{f=1; next} /^## 15\./{f=0} f' "$DOC" | grep '^Results per instance:' | sed 's/ Lab item:.*//')"
+if [[ -z "$RES" ]]; then bad "section 14 of the docs has no 'Results per instance:' paragraph"; else
+  codes="$(grep -oE '(record "\$key" (FAILED|BLOCKED|SUCCEEDED|WARNING)|record_entry "[^"]*" WARNING|reason=) ?[A-Z][A-Z_]{3,}' "$ROOT/workflows/scripts/backup-expire.sh" | awk '{print $NF}' | sed 's/^reason=//' | sort -u)"
+  [[ -n "$codes" ]] || bad "no reason found in backup-expire.sh (the pattern of this test is stale)"
+  missing=""
+  while read -r code; do
+    [[ -z "$code" ]] || printf '%s\n' "$RES" | grep -q "\`${code}\`" || missing="${missing} ${code}"
+  done <<<"$codes"
+  [[ -z "$missing" ]] && ok "every reason of backup-expire.sh is in the results of section 14" || bad "section 14 lacks the reasons:${missing}"
+  unknown=""
+  while read -r code; do
+    grep -qE "\b${code}\b" "$ROOT/workflows/scripts/backup-expire.sh" || unknown="${unknown} ${code}"
+  done < <(printf '%s\n' "$RES" | grep -oE '`[A-Z][A-Z_]+`' | tr -d '`' | sort -u)
+  [[ -z "$unknown" ]] && ok "every reason of the results of section 14 is written by backup-expire.sh" || bad "section 14 names reasons the script does not write:${unknown}"
+fi
+
 echo
 echo "backup-expire: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

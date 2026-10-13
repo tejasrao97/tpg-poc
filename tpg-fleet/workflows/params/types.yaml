@@ -132,7 +132,7 @@ templates:
     postgresOverlayFilePath: {type: patchFileList, allowEmpty: true}
     postgresValuesOverlayFilePath: {type: patchFile, allowEmpty: true}
     operatorValuesOverlayFilePath: {type: patchFile, allowEmpty: true}
-    patchFiles: {type: jsonMap, allowEmpty: true}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     dryRun: {type: boolean}
     syncTimeoutSeconds: {type: posint}
     prTimeoutSeconds: {type: posint}
@@ -214,8 +214,8 @@ templates:
     patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     patchMode: {type: enum, values: [apply, clear]}
     clearKinds: {type: kindList, allowEmpty: true, mandatory: conditional}
-    backupCaBundleFile: {type: caFile, allowEmpty: true}
-    backupCaBundleVaultSecret: {type: k8sName, allowEmpty: true}
+    backupCaBundleFile: {type: caFile, allowEmpty: true, mandatory: conditional}
+    backupCaBundleVaultSecret: {type: k8sName, allowEmpty: true, mandatory: conditional}
     pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     maxParallel: {type: posint}
     rolloutMode: {type: enum, values: [canary, batches, all]}

@@ -102,13 +102,13 @@ properties:
         type: string
         pattern: ^(repo:)?(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.(pem|crt|cer)$
       maxItems: 1
-    description: 'One PEM file in brackets, [./ca.pem] (.pem, .crt, .cer; local, absolute or relative, or repo:ca-bundles/<file>): the new CA bundle of the backup location of every selected instance with enableSSL true (contents in patchFiles); a map key of the instance or its cluster wins. Changing the backup location restarts the instance [List (one file path)]'
+    description: 'One PEM file in brackets, [./ca.pem] (.pem, .crt, .cer; local, absolute or relative, or repo:ca-bundles/<file>): the new CA bundle of the backup location of every selected instance with enableSSL true (contents in patchFiles); a map key of the instance or its cluster wins. Changing the backup location restarts the instance [List (one file path); mandatory in some cases (the validate step decides)]'
   backupCaBundleVaultSecret:
     anyOf:
     - const: ''
     - type: string
       pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
-    description: 'The name of a CA bundle in Vault (tpg/ca-bundles/<name>, key caBundle; tpg-aks-infra scripts/vault-secret.sh ca put writes it): the new CA bundle of every selected enableSSL instance. Not with backupCaBundleFile [String (name)]'
+    description: 'The name of a CA bundle in Vault (tpg/ca-bundles/<name>, key caBundle; tpg-aks-infra scripts/vault-secret.sh ca put writes it): the new CA bundle of every selected enableSSL instance. Not with backupCaBundleFile [String (name); mandatory in some cases (the validate step decides)]'
   patchMode:
     enum:
     - apply

@@ -635,7 +635,7 @@
           }
         }
       ],
-      "description": "JSON map: the contents of the local overlay (and patch) files, {\"<path as given above>\": \"<base64>\"}; filled by scripts/submit/tpg-day0.sh, or written into a parameter file by scripts/submit/pack-patch-files.sh -o FILE [Map (JSON)]"
+      "description": "JSON map: the contents of the local overlay (and patch) files, {\"<path as given above>\": \"<base64>\"}; filled by scripts/submit/tpg-day0.sh, or written into a parameter file by scripts/submit/pack-patch-files.sh -o FILE [Map (JSON); mandatory in some cases (the validate step decides)]"
     },
     "backupCaBundleFile": {
       "anyOf": [

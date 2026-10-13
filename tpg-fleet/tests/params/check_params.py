@@ -36,6 +36,7 @@
 Prints one line per problem; exit 1 when there is any.
 """
 import glob
+import importlib.util
 import os
 import re
 import subprocess
@@ -61,6 +62,31 @@ r = subprocess.run([sys.executable, os.path.join(ROOT, "workflows/params/params_
                    capture_output=True, text=True)
 if r.returncode != 0:
     problems.append(r.stderr.strip() or "params_schema.py --check failed")
+
+# 1c a generated block must sit in the section of its own workflow: put_block refuses the block of tpg-day0 moved
+# into the next section (a replacement in place would never show the move as drift)
+_spec = importlib.util.spec_from_file_location("params_schema", os.path.join(ROOT, "workflows/params/params_schema.py"))
+_ps = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_ps)
+_doc = open(os.path.join(ROOT, "docs/workflow-commands.md")).read()
+_b, _e = "<!-- BEGIN GENERATED: params-day0 -->", "<!-- END GENERATED: params-day0 -->"
+if _b not in _doc or _e not in _doc:
+    problems.append("docs/workflow-commands.md: no generated block params-day0 (the self-test of put_block needs one)")
+else:
+    _i, _j = _doc.index(_b), _doc.index(_e) + len(_e)
+    _block, _rest = _doc[_i:_j], _doc[:_i] + _doc[_j:]
+    _at = _rest.index("\n", _rest.index("\n## ", _i) + 1) + 1   # the line after the heading of the next section
+    _moved = _rest[:_at] + "\n" + _block + "\n" + _rest[_at:]
+    try:
+        _ps.put_block(_moved, "tpg-day0", _block)
+        problems.append("params_schema.put_block accepted the block of tpg-day0 inside another section")
+    except SystemExit as ex:
+        if "must sit inside its own section" not in str(ex):
+            problems.append(f"params_schema.put_block refused the moved block with another message: {ex}")
+    try:
+        _ps.put_block(_doc, "tpg-day0", _block)
+    except SystemExit as ex:
+        problems.append(f"params_schema.put_block refused the block of tpg-day0 in its own section: {ex}")
 
 src = yaml.safe_load(open(os.path.join(ROOT, "workflows/params/types.yaml")))
 types, typed = src["types"], src["templates"]

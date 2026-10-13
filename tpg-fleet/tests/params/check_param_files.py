@@ -15,8 +15,10 @@ people write, by running the same files through all three:
               seconds per call, so those run in parallel. The tables of values and the other list forms create the
               Workflow with kubectl from python_str() (the policy sees the same Workflow)
   validate    workflows/scripts/validate-params.sh of the workflow, offline (stub kubectl with four registered
-              clusters, a fleet repository fixture), with the inputs argo produced; skipped for a file that names
-              local files (their contents travel in patchFiles, packed with pack-patch-files.sh)
+              clusters, a fleet repository fixture), with the inputs argo produced. A file that names local files
+              has one error the validate step may report: their contents travel in patchFiles (packed with
+              pack-patch-files.sh), which a documented file does not carry, so "its contents are not in patchFiles"
+              is the only error accepted for it
 
 Files checked:
   1 the generated example of each of the 13 workflows (workflows/params/schemas/params-W.example.yaml), also
@@ -233,6 +235,7 @@ exit 0
 VALIDATE = ValidateStep()
 tmpdir = tempfile.mkdtemp(prefix="tpg-params-files-")
 
+NO_CONTENTS = "its contents are not in patchFiles"   # validate-params.sh, patch_files_check
 LOCAL_FILE = re.compile(r"(?<![\w:/.])(\./|~/|/)[A-Za-z0-9_./@+-]*\.(ya?ml|pem|crt|cer)")
 
 
@@ -281,14 +284,16 @@ def check_file(label, t, path, overrides=()):
             inputs.update({k: v for k, v in got.items() if k in inputs})
     else:
         skip(label, NO_ADMISSION)
-    if names_local_files(merged):
-        skip(label, "the validate step (the file names local files, whose contents travel in patchFiles)")
+    rc, out = VALIDATE.run(t, inputs)
+    if rc == 0:
+        where.append("validate step")
+    elif names_local_files(merged) and all(NO_CONTENTS in ln for ln in out.splitlines() if ln.startswith("  - ")) \
+            and "  - " in out:
+        # the contents of a local file travel in patchFiles (pack-patch-files.sh), which a documented file does not
+        # carry: that is the one error the validate step may report for such a file, and everything else it checks passed
+        where.append("validate step (apart from the contents of the local files, which are not in patchFiles)")
     else:
-        rc, out = VALIDATE.run(t, inputs)
-        if rc == 0:
-            where.append("validate step")
-        else:
-            problems.append(f"validate step (rc={rc}): {out.strip()[-600:]}")
+        problems.append(f"validate step (rc={rc}): {out.strip()[-600:]}")
     if problems:
         bad(label, "\n".join(problems))
     else:

@@ -98,7 +98,7 @@ EXAMPLES = {
         ("confirm", ["aks-tpg-poc-01"]),
         ("purgePvcs", "false"), ("purgeNamespace", "false"),
         ("pushMode", "direct"), ("dryRun", "true")]),
-    "tpg-delete-instance": ("No dryRun input. The least-impact run: one instance, a final backup, volumes and namespace kept.", [
+    "tpg-delete-instance": ("No dryRun input: this file DELETES the instance for real (a final backup first; volumes and namespace kept). Set clusters, instances and confirm to your own before submitting.", [
         ("clusters", ["aks-tpg-poc-01"]), ("instances", ["orders-db"]),
         ("confirm", ["orders-db"]), ("finalBackup", "true"),
         ("purgePvcs", "false"), ("purgeNamespace", "false"), ("pushMode", "direct")]),
@@ -308,15 +308,19 @@ def put_block(doc, template, block):
     begin, end = f"<!-- BEGIN GENERATED: params-{w} -->", f"<!-- END GENERATED: params-{w} -->"
     if doc.count(begin) > 1 or doc.count(end) > 1 or doc.count(begin) != doc.count(end):
         raise SystemExit(f"{DOC}: the markers {begin} and {end} must appear once each")
-    if begin in doc:
-        a, rest = doc.split(begin)
-        _, b = rest.split(end)
-        return a + block + b
     lines = doc.split("\n")
     start = next((i for i, ln in enumerate(lines) if re.match(rf"^## (\d+\. )?{re.escape(template)}\s*$", ln)), None)
     if start is None:
         raise SystemExit(f"{DOC}: no section '## N. {template}'")
     nxt = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    if begin in doc:
+        a, rest = doc.split(begin)
+        mid, b = rest.split(end)
+        first, last = a.count("\n"), a.count("\n") + (begin + mid + end).count("\n")
+        if not (start < first and last < nxt):
+            raise SystemExit(f"{DOC}: the generated block params-{w} must sit inside its own section "
+                             f"'## N. {template}' (lines {start + 1} to {nxt}); move or delete its markers")
+        return a + block + b
     head = next((i for i in range(start + 1, nxt) if lines[i].startswith("| Input | Type |")), None)
     if head is None:
         raise SystemExit(f"{DOC}: section {template} has no input table (| Input | Type |)")

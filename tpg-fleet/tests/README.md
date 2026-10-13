@@ -196,7 +196,8 @@ suite fails when:
   argo 4.1.3 turns YAML values into strings (skipped, and listed, without envtest or
   the argo CLI); and the validate step of the workflow offline (`validate-params.sh`
   with a stub `kubectl` that lists four clusters and a fleet repository fixture;
-  skipped for a file that names local files, whose contents travel in `patchFiles`).
+  for a file that names local files the one error "its contents are not in `patchFiles`"
+  is accepted, since their contents travel in `patchFiles`, which a documented file does not carry).
   The files are the generated example of each workflow and every parameter-file
   example of `docs/workflow-commands.md`: a yaml block whose first line is
   `# NAME.yaml`, or a heredoc `cat > NAME.yaml <<'TAG'` in a bash block, bound to the
