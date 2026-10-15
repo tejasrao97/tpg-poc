@@ -11,8 +11,11 @@ also converted to JSON by the caller.
                           [--registered FILE] [--flags F.json] [--out N.json]
       Prints one error per line and exits 1 when the map is invalid; otherwise
       writes the normalized map to --out (or stdout) and exits 0.
-  clustermap.py normalize --map M.json --keys K.json
-      Writes the normalized map without checking workflows or clusters.
+  clustermap.py normalize --map M.json --keys K.json [--normalized]
+      Writes the normalized map without checking workflows or clusters. --normalized: the map holds
+      values that validate (or an earlier normalize) already wrote, in which a single-file key is
+      the bare path, not [path]; every rule on the path still applies (fleet-day0.sh and
+      network-policy.sh read the validated clusterMap and add the inputs to it).
   clustermap.py restore   --map M.json --keys K.json [--registered FILE] [--confirm-required] [--out N.json]
       The clusterMap of tpg-restore (Round 23, phase 6): a LIST of pairs, not a map of clusters (see
       "Restore pairs" below). Prints one error per line and exits 1 when it is invalid; otherwise
@@ -342,8 +345,9 @@ def check_namespace(spec, s, where, hint):
     return None
 
 
-def check_value(spec, value, where):
-    """Return (normalized value, error or None)."""
+def check_value(spec, value, where, normalized=False):
+    """Return (normalized value, error or None). normalized: value may be the output of an earlier
+    check_value, where a single-file key (patchFile, caFile) is the bare path."""
     t = spec["type"]
     if value is None:
         return None, f"{where}: null is not a value; remove the key to use the default"
@@ -353,6 +357,8 @@ def check_value(spec, value, where):
         return check_map(value, where)
     if t in ("patchFile", "caFile"):
         # one file, but still a list (Round 23): [./a.yaml]; normalized to the path
+        if normalized and isinstance(value, str):
+            value = [value]   # the path an earlier check wrote: the same rules apply to it
         try:
             items = as_list(value, where, files=True)
         except ListError as e:
@@ -453,8 +459,8 @@ def instance_name_hint(name):
     return f" (for example {fixed})" if fixed and NAME.match(fixed) else ""
 
 
-def process(raw, keys, workflow=None, registered=None, flags=None):
-    """Return (normalized map, [errors]). workflow=None: normalize only."""
+def process(raw, keys, workflow=None, registered=None, flags=None, normalized=False):
+    """Return (normalized map, [errors]). workflow=None: normalize only. normalized: see check_value."""
     errors = []
     norm = {}
     if raw is None or raw == "" or raw == {}:
@@ -511,7 +517,7 @@ def process(raw, keys, workflow=None, registered=None, flags=None):
                 errors.append(f"{where_c}.{k}: not used by {template(workflow)} "
                               f"(used by {', '.join(template(w) for w in ckeys[k]['workflows'])}){overlay_hint(workflow, k)}")
                 continue
-            ncluster[k], err = check_value(ckeys[k], v, f"{where_c}.{k}")
+            ncluster[k], err = check_value(ckeys[k], v, f"{where_c}.{k}", normalized)
             if err:
                 errors.append(err)
         required_missing(ckeys, ncluster, where_c)
@@ -554,7 +560,7 @@ def process(raw, keys, workflow=None, registered=None, flags=None):
                     errors.append(f"{where_i}.{k}: not used by {template(workflow)} "
                                   f"(used by {', '.join(template(w) for w in ikeys[k]['workflows'])}){overlay_hint(workflow, k)}")
                     continue
-                ninst[k], err = check_value(ikeys[k], v, f"{where_i}.{k}")
+                ninst[k], err = check_value(ikeys[k], v, f"{where_i}.{k}", normalized)
                 if err:
                     errors.append(err)
             required_missing(ikeys, ninst, where_i)
@@ -856,6 +862,7 @@ def main():
     ap.add_argument("--flags")
     ap.add_argument("--out")
     ap.add_argument("--confirm-required", action="store_true")
+    ap.add_argument("--normalized", action="store_true")
     a = ap.parse_args()
     with open(a.map) as f:
         text = f.read().strip()
@@ -892,7 +899,7 @@ def main():
                 flags = json.load(f)
         norm, errors = process(raw, keys, a.workflow, registered, flags)
     else:
-        norm, errors = process(raw, keys)
+        norm, errors = process(raw, keys, normalized=a.normalized)
     if errors:
         print("\n".join(errors))
         return 1

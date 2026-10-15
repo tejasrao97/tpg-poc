@@ -962,6 +962,50 @@ day0 '[]' P_CLUSTER_MAP='aks-tpg-poc-01: {operatorVersion: v4.5.0, instances: {o
 [[ "$RC" -ne 0 ]] && grep -q "readReplicas 5 exceeds maxReadReplicas 3" "$TMP/records" \
   && ok "day0 clusterMap: readReplicas above maxReadReplicas fails the step" || bad "day0 max" "$(cat "$TMP/records") $OUT"
 
+# Round 23 (after phase 8): what validate writes (the normalized map) is read again by fleet-day0.sh
+# and network-policy.sh through `clustermap.py normalize`, so normalize must take its own output:
+# a single-file key (patchFile, caFile) comes back as the bare path, not as [path]. Every generated
+# clusterMap example of every workflow but tpg-restore (its own command) goes through both.
+RT="$TMP/roundtrip"; mkdir -p "$RT"
+yq -o=json -I=0 '.' "$ROOT/workflows/params/cluster-map-keys.yaml" > "$RT/keys.json"
+printf 'aks-tpg-poc-01\naks-tpg-poc-02\naks-tpg-poc-03\naks-tpg-poc-04\n' > "$RT/registered"
+printf '%s' '{"operatorVersion":"v4.5.0","postgresVersion":"postgres-16.8","highAvailability":"true","pushMode":"direct","patchMode":"apply","component":"operator","targetVersion":"v4.5.1","mode":"apply","replicas":"2","backupEnableSSL":"true","finalBackup":"false"}' > "$RT/flags.json"
+rt_n=0; rt_bad=""
+for f in "$ROOT"/workflows/params/schemas/clustermap-*.example.yaml; do
+  wf="$(basename "$f" .example.yaml)"; wf="${wf#clustermap-}"
+  [[ "$wf" != restore ]] || continue
+  yq -o=json -I=0 '.' "$f" > "$RT/raw.json"
+  if ! python3 "$ROOT/workflows/scripts/clustermap.py" validate --workflow "$wf" --map "$RT/raw.json" --keys "$RT/keys.json" \
+      --registered "$RT/registered" --flags "$RT/flags.json" --out "$RT/validated.json" > "$RT/validate.out" 2>&1; then
+    rt_bad="${rt_bad} ${wf}(validate: $(head -c 150 "$RT/validate.out"))"; continue
+  fi
+  rt_n=$((rt_n + 1))
+  python3 "$ROOT/workflows/scripts/clustermap.py" normalize --normalized --map "$RT/validated.json" --keys "$RT/keys.json" --out "$RT/again.json" > "$RT/normalize.out" 2>&1 \
+    && cmp -s "$RT/validated.json" "$RT/again.json" || rt_bad="${rt_bad} ${wf}($(head -c 200 "$RT/normalize.out"))"
+done
+[[ -z "$rt_bad" && "$rt_n" -ge 10 ]] \
+  && ok "23 round trip: the validated clusterMap of all ${rt_n} workflow examples is accepted again by normalize, unchanged" \
+  || bad "23 round trip of validate to normalize" "${rt_bad:-only ${rt_n} examples checked}"
+# the same for a single-file key of each kind on its own (patchFile and caFile), cluster and instance level
+printf '%s' '{"aks-tpg-poc-01":{"operatorValuesOverlayFilePath":["./op.yaml"],"backupCaBundleFile":["./ca.pem"],"instances":{"i1":{"postgresValuesOverlayFilePath":["./v.yaml"],"backupCaBundleFile":["repo:ca-bundles/x.pem"]}}}}' > "$RT/raw.json"
+python3 "$ROOT/workflows/scripts/clustermap.py" validate --workflow day0 --map "$RT/raw.json" --keys "$RT/keys.json" --registered "$RT/registered" \
+  --flags "$RT/flags.json" --out "$RT/validated.json" > "$RT/validate.out" 2>&1 \
+  && python3 "$ROOT/workflows/scripts/clustermap.py" normalize --normalized --map "$RT/validated.json" --keys "$RT/keys.json" --out "$RT/again.json" > "$RT/normalize.out" 2>&1 \
+  && jq -e '.["aks-tpg-poc-01"] | .operatorValuesOverlayFilePath == "./op.yaml" and .backupCaBundleFile == "./ca.pem"
+      and .instances.i1.postgresValuesOverlayFilePath == "./v.yaml" and .instances.i1.backupCaBundleFile == "repo:ca-bundles/x.pem"' "$RT/again.json" >/dev/null \
+  && ok "23 round trip: single-file keys (patchFile and caFile, cluster and instance level) stay the bare path through normalize" \
+  || bad "23 round trip single-file keys" "$(cat "$RT/validate.out" "$RT/normalize.out" 2>/dev/null | head -5)"
+# without --normalized, normalize stays strict: the bare path of a single-file key is refused there
+python3 "$ROOT/workflows/scripts/clustermap.py" normalize --map "$RT/validated.json" --keys "$RT/keys.json" --out "$RT/strict.json" > "$RT/strict.out" 2>&1 \
+  && bad "23 round trip: normalize without --normalized refuses the bare path of a single-file key" "accepted" \
+  || { grep -q "is not a list" "$RT/strict.out" && ok "23 round trip: normalize without --normalized stays strict (a bare path is not a list)" || bad "23 strict normalize" "$(cat "$RT/strict.out")"; }
+# the strict forms stay refused when the map is not the output of validate: a bare string in a raw map
+printf '%s' '{"aks-tpg-poc-01":{"instances":{"i1":{"postgresValuesOverlayFilePath":"./v.yaml"}}}}' > "$RT/raw.json"
+python3 "$ROOT/workflows/scripts/clustermap.py" validate --workflow day0 --map "$RT/raw.json" --keys "$RT/keys.json" --registered "$RT/registered" \
+  --flags "$RT/flags.json" --out "$RT/validated.json" > "$RT/validate.out" 2>&1 \
+  && bad "23 round trip: a raw bare string for a single-file key is still refused by validate" "accepted" \
+  || { grep -q "is not a list" "$RT/validate.out" && ok "23 round trip: a raw bare string for a single-file key is still refused by validate (brackets, one file)" || bad "23 raw bare string" "$(cat "$RT/validate.out")"; }
+
 echo
 echo "tests/cluster-map: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

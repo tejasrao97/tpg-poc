@@ -503,6 +503,25 @@ rec "precheck.c1|BLOCKED" | grep -q "backupCaBundleVaultSecret nope: tpg/ca-bund
 plan P_CLUSTER_MAP='c1: {backupCaBundleVaultSecret: azure-storage, instances: {orders-db: {backupCaBundleFile: [storage-ca.pem]}}}' P_PATCH_FILES="$(pack storage-ca.pem)"
 [[ "$(yq 'select(.kind == "PostgresBackupLocation") | .spec.storage.azure.caBundle' "$TMP/dryrun.yaml")" == "$(cat "$L/storage-ca.pem")" ]] \
   && ok "13 the instance source wins over the cluster source" || bad "13 precedence" "$OUT $(cat "$TMP/records")"
+# Round 23 (after phase 8): the single-file keys of tpg-patch (operatorValuesPatchFilePath,
+# postgresValuesPatchFilePath, backupCaBundleFile), each written [path] in a clusterMap, are planned,
+# stored and recorded: validate hands them over as the bare path and the patch scripts read that
+# form directly (nothing normalizes it a second time, as fleet-day0.sh does)
+plan P_CLUSTER_MAP='c1: {operatorValuesPatchFilePath: [op.yaml], backupCaBundleFile: [storage-ca.pem], instances: {orders-db: {postgresValuesPatchFilePath: [retention.yaml]}}}' \
+  P_PATCH_FILES="$(pack op.yaml retention.yaml storage-ca.pem)"
+! rec "precheck.c1|BLOCKED" | grep -q . && ! rec "INVALID_INPUT" | grep -q . \
+  && rec "patch.names|SET" | grep -q '"op.yaml":"helm_artifacts/operator/patches/op-' \
+  && rec "patch.names|SET" | grep -q '"retention.yaml":"helm_artifacts/instance/tpg-instance/patches/retention-' \
+  && ok "23 tpg-patch: operatorValuesPatchFilePath, postgresValuesPatchFilePath and backupCaBundleFile as clusterMap [path] values are planned and stored" \
+  || bad "23 patch single-file keys plan" "$(cat "$TMP/records") $OUT"
+cluster P_PUSH_MODE=direct P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1: {operatorValuesPatchFilePath: [op.yaml], instances: {orders-db: {postgresValuesPatchFilePath: [retention.yaml]}}}' \
+  P_PATCH_FILES="$(pack op.yaml retention.yaml)"
+W="$TMP/work/repo"
+[[ "$(yq -r '.clusters.c1.operator.patches.values.current' "$W/clusters/fleet.yaml")" =~ ^helm_artifacts/operator/patches/op-[a-z0-9]{5}\.yaml$ ]] \
+  && [[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgresValues.current' "$W/clusters/fleet.yaml")" =~ ^patches/retention-[a-z0-9]{5}\.yaml$ ]] \
+  && ok "23 tpg-patch: the clusterMap single-file keys are recorded as current files of the operator and the instance in clusters/fleet.yaml" \
+  || bad "23 patch single-file keys cluster" "$(yq '.clusters.c1' "$W/clusters/fleet.yaml") $OUT"
+
 git -C "$REPO" checkout -q "$BASE_SAVED" -- clusters/fleet.yaml
 plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_BACKUP_CA_VAULT=azure-storage
 rec "precheck.c1|BLOCKED" | grep -q "a CA bundle source needs backup.enableSSL true" \

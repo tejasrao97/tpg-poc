@@ -905,6 +905,42 @@ rec "result.c1.restored-db|BLOCKED|INSTANCE_RESTORED" | grep -q "tpg-create-inst
   && [[ "$(jq -r '.clusters.c1.instances["restored-db"].instance.storageSize' /tmp/fleet.json)" == 50Gi ]] \
   && ok "23 restored: tpg-create-instance blocks it as well and leaves the entry (storageSize 50Gi) alone" || bad "restored create" "$(cat "$TMP/records") $(cat "$TMP/out")"
 
+# Round 23 (after phase 8): a single-file key of a clusterMap (operatorValuesOverlayFilePath,
+# postgresValuesOverlayFilePath, backupCaBundleFile; each written [path]) reaches fleet-day0.sh
+# normalized to the bare path, and the second normalize of effective.raw.json refused it
+# ("'./op.yaml' is not a list; ... Did you mean [./op.yaml]?"): the whole run failed INVALID_INPUT
+printf 'resources:\n  limits: {cpu: 500m, memory: 300Mi}\n  requests: {cpu: 500m, memory: 300Mi}\n' > "$P/op.yaml"
+PF_OP="$(pf ./op.yaml op.yaml)"
+PF_CA2="$(jq -cn --arg b "$(base64 < "$TMP/ca2.pem" | tr -d '\n')" '{"ca2.pem": $b}')"
+PF_ALL="$(jq -cn --argjson a "$PF_OP" --argjson b "$PF_VALS" --argjson c "$PF_CA2" '$a + $b + $c')"
+h2="$(printf '%s' "$(cat "$TMP/ca2.pem")" | sha256sum | cut -c1-12)"
+# (no operator on the cluster yet: an operator overlay is refused on a running one, OVERLAY_USE_TPG_PATCH)
+reset
+S_OPERATOR=none S_RUNNING="" S_CA="$CA1" env P_CLUSTERS='[c1]' P_OPERATOR_VERSION=v4.5.0 P_PATCH_FILES="$PF_ALL" P_CLUSTER_MAP='c1:
+  operatorValuesOverlayFilePath: [./op.yaml]
+  backupCaBundleFile: [ca2.pem]
+  instances:
+    new-db: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: true, postgresValuesOverlayFilePath: [vals.yaml]}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+! rec "result.git|FAILED|INVALID_INPUT" | grep -q . \
+  && jq -e --arg ph "@ca:${h2}@" '.clusters.c1 as $c | $c.instances["new-db"] as $i
+    | ($c.operator.overlays.values.current | test("^helm_artifacts/operator/overlays/.*\\.yaml$"))
+    and ($i.overlays.postgresValues.current | test("^overlays/vals-[a-z0-9]{5}\\.yaml$"))
+    and $i.backup.caBundle == $ph' /tmp/fleet.json >/dev/null \
+  && ok "23 tpg-day0: single-file clusterMap keys (operator overlay, values overlay, CA bundle file) are stored and recorded" \
+  || bad "23 day0 single-file keys" "$(head -6 "$TMP/records") $(rec result.git | head -3) $(jq -c '.clusters.c1' /tmp/fleet.json) $(tail -5 "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" S_CA="$CA1" env FLEET_MODE=create P_CLUSTERS='[c1]' P_PATCH_FILES="$PF_ALL" P_CLUSTER_MAP='c1:
+  instances:
+    new-db: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: true, backupCaBundleFile: [ca2.pem], postgresValuesOverlayFilePath: [vals.yaml]}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+! rec "result.git|FAILED|INVALID_INPUT" | grep -q . \
+  && jq -e --arg ph "@ca:${h2}@" '.clusters.c1.instances["new-db"] as $i
+    | ($i.overlays.postgresValues.current | test("^overlays/vals-[a-z0-9]{5}\\.yaml$")) and $i.backup.caBundle == $ph' /tmp/fleet.json >/dev/null \
+  && ok "23 tpg-create-instance: single-file clusterMap keys of an instance (values overlay, CA bundle file) are stored and recorded" \
+  || bad "23 create single-file keys" "$(rec 'result.git' | head -3) $(jq -c '.clusters.c1.instances["new-db"]' /tmp/fleet.json) $(tail -5 "$TMP/out")"
+rm -f "$P/op.yaml"
+
 echo
 echo "day0-plan: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

@@ -68,7 +68,7 @@ if [[ "$CMD" == "plan" ]]; then
      | {($c): {instances: {($i): ($f[0] + (($m[0][$c].instances[$i]) // {}) | del(.postgresVersion))}}}]
     | reduce .[] as $e ({}; . * $e)' <<<"$inv" > "$WORK/targets.raw.json"
   yq -o=json -I=0 '.' "$(cmap_keys_file)" > "$WORK/keys.json"
-  if ! errs="$(python3 "$TPG_LIB_DIR/clustermap.py" normalize --map "$WORK/targets.raw.json" --keys "$WORK/keys.json" --out "$WORK/targets.json")"; then
+  if ! errs="$(python3 "$TPG_LIB_DIR/clustermap.py" normalize --normalized --map "$WORK/targets.raw.json" --keys "$WORK/keys.json" --out "$WORK/targets.json")"; then
     record result.git FAILED INVALID_INPUT "$(tr '\n' ';' <<<"$errs")"
     exit 1
   fi

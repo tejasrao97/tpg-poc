@@ -168,8 +168,9 @@ jq -c --arg w "$WF_ID" --slurpfile keys "$WORK/keys.json" --slurpfile flags "$WO
     with_entries(.value |= (fill($k.cluster; .)
       | .instances = ((.instances // {}) | with_entries(.value |= fill($k.instance; .)))))
 ' "$WORK/targets.json" > "$WORK/effective.raw.json"
-# Lists and maps given as inputs are checked and normalized like clusterMap values
-if ! errs="$(python3 "$TPG_LIB_DIR/clustermap.py" normalize --map "$WORK/effective.raw.json" \
+# Lists and maps given as inputs are checked and normalized like clusterMap values. The clusterMap values
+# in the effective targets are what validate wrote (a single-file key is the bare path): --normalized
+if ! errs="$(python3 "$TPG_LIB_DIR/clustermap.py" normalize --normalized --map "$WORK/effective.raw.json" \
       --keys "$WORK/keys.json" --out "$WORK/effective.json")"; then
   record result.git FAILED INVALID_INPUT "$(tr '\n' ';' <<<"$errs")"
   exit 1
