@@ -57,8 +57,24 @@ expect "pairs: no pair, no batch"                                              "
 expect "pairs: an unknown mode fails"                                          "$(pairs_plan "$P4" 2 fast)" 'ERROR'
 expect "pairs: a maxParallel that is not a number fails"                       "$(pairs_plan "$P4" x all)" 'ERROR'
 (cd "$TMP" && P_PAIRS="$P4" bash "$TMP/plan.sh" wf false 2 canary >/dev/null 2>&1)
-expect "pairs: an item carries index, cluster, instance, method and the pair as JSON" \
-  "$(jq -c '.[0][0] | [.index, .cluster, .instance, .method, (.pair | fromjson | .target.instance)]' /tmp/batches.json)" '[0,"t0","t0","latest","t0"]'
+expect "pairs: an item carries index, cluster, instance, method and the pair as base64 of its JSON" \
+  "$(jq -c '.[0][0] | [.index, .cluster, .instance, .method, (.pair | @base64d | fromjson | .target.instance)]' /tmp/batches.json)" '[0,"t0","t0","latest","t0"]'
+# Argo substitutes {{item.pair}} with the JSON-escaped text of the field, so a pair that crossed as JSON text
+# reached the step as {\"inPlace\":false,...} (a backslash before every quote: not JSON, INVALID_PAIR). Nothing
+# that crosses Argo in an item may hold a quote or a backslash: the pair is base64 (plan-batches.sh).
+QP="$(jq -c '.[0].label = "a \"quoted\" \\ label" | .[1].label = "x"' <<<"$P4")"
+(cd "$TMP" && P_PAIRS="$QP" bash "$TMP/plan.sh" wf false 2 all >/dev/null 2>&1)
+expect "pairs: no field of an item holds a quote or a backslash (Argo escapes them in {{item.x}})" \
+  "$(jq -c '[.[][] | to_entries[] | select(.value | tostring | test("[\"\\\\]")) | .key]' /tmp/batches.json)" '[]'
+expect "pairs: the pair of an item is plain base64" \
+  "$(jq -c '[.[][] | .pair | test("^[A-Za-z0-9+/=]+$")] | all' /tmp/batches.json)" 'true'
+expect "pairs: the pair of an item decodes to the pair, quotes and backslashes intact" \
+  "$(jq -r '.[0][0].pair | @base64d | fromjson | .label' /tmp/batches.json)" 'a "quoted" \ label'
+# every {{item.<field>}} a template uses: these fields carry names, numbers and booleans only, except pair (base64);
+# a new field has to be added here knowing that Argo escapes quotes and backslashes in it
+expect "templates: the item fields used by withParam steps are the known plain ones" \
+  "$(grep -hoE '\{\{item\.[A-Za-z]+\}\}' "$ROOT"/workflows/templates/*.yaml | sort -u | tr -d '{}' | paste -sd' ' -)" \
+  'item.cluster item.instance item.method item.name item.namespace item.pair item.previous item.replicas item.scheduled'
 expect "pairs: an item also carries the target namespace (the mutex of the pair step is per target cluster and namespace)" \
   "$(jq -c '.[0][0].namespace' /tmp/batches.json)" '"pg-t"'
 RT="$ROOT/workflows/templates/tpg-restore.yaml"

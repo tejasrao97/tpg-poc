@@ -1707,6 +1707,17 @@ echo "== 8. crashes and unknown clusters"
 reset
 RK=c2.orders-dr
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"
+# The pair crosses Argo as base64 (plan-batches.sh): the step decodes it, and raw JSON still works (tests, by hand). The
+# JSON text with a backslash before every quote, as {{item.pair}} delivered it to the step, is not accepted
+rm -rf "$TMP/rec"; mkdir -p "$TMP/rec"
+run "$PJ"; RAW="$(st)/$(cat "$TMP/rec/result.$RK.reason" 2>/dev/null || true)"
+rm -rf "$TMP/rec"; mkdir -p "$TMP/rec"
+run "$(printf '%s' "$PJ" | base64 -w0)"; B64="$(st)/$(cat "$TMP/rec/result.$RK.reason" 2>/dev/null || true)"
+[[ -n "$(st)" && "$RAW" == "$B64" ]] && ok "the pair as base64 gives the same result as the pair as JSON (${B64})" || bad "pair as base64" "raw ${RAW} base64 ${B64} $OUT"
+ESC="$(jq -c '.' <<<"$PJ" | sed 's/"/\\"/g')"
+RC=0; OUT="$(cd "$TMP" && env P_DRY_RUN=true P_PAIR="$ESC" bash "$TMP/restore-pair.sh" tpg-restore-x 2>&1)" || RC=$?
+[[ "$RC" -ne 0 && "$(cat "$TMP/rec/result.restore.reason")" == INVALID_PAIR ]] && grep -q "neither JSON nor base64 of JSON" "$TMP/rec/result.restore.detail" 2>/dev/null \
+  && ok "the escaped JSON text of the log (a backslash before every quote) is refused with INVALID_PAIR and says what is accepted" || bad "escaped pair" "$OUT $(cat "$TMP/records")"
 RC=0; OUT="$(cd "$TMP" && env P_DRY_RUN=true P_PAIR='{"nonsense":1}' bash "$TMP/restore-pair.sh" tpg-restore-x 2>&1)" || RC=$?
 [[ "$RC" -ne 0 && "$(cat "$TMP/rec/result.restore.status")" == FAILED && "$(cat "$TMP/rec/result.restore.reason")" == INVALID_PAIR ]] && ok "a P_PAIR that is not a normalized pair: INVALID_PAIR" || bad "invalid pair" "$OUT"
 mkdir -p "$TMP/cl.gone"; mv "$TMP/cl/c2" "$TMP/cl.gone/c2"

@@ -2,8 +2,8 @@
 # restore-pair.sh WORKFLOW_NAME
 # Restore one pair of the clusterMap of tpg-restore (Round 23, locked decision 7, phase 6b). The pair
 # comes from the environment as the normalized JSON object that clustermap.py restore writes (fields in
-# the header of clustermap.py; the plan-batches step hands it over whole):
-#   P_PAIR                   the pair
+# the header of clustermap.py; plan-batches.sh hands it over whole):
+#   P_PAIR                   the pair: base64 of its JSON (plan-batches.sh), or the JSON itself
 #   P_DRY_RUN                true (default): read-only plan; false: restore
 #   P_PUSH_MODE              direct | pr, for the clusters/fleet.yaml entry of a new target
 #   P_KEEP_SOURCE_LOCATION   true (default): keep the copy of the source backup location in the target namespace
@@ -105,8 +105,11 @@ WF="$1"
 source /scripts/lib.sh
 
 PAIR="${P_PAIR:-}"
+# plan-batches.sh hands the pair over as base64 of its JSON (Argo escapes quotes in {{item.pair}}); raw JSON is
+# accepted as well (the tests, a run by hand)
+if [[ "$PAIR" != "{"* ]]; then PAIR="$(base64 -d <<<"$PAIR" 2>/dev/null || true)"; fi
 jq -e 'type == "object" and (.target.cluster | type == "string") and (.target.instance | type == "string")' <<<"$PAIR" >/dev/null 2>&1 \
-  || { record result.restore FAILED INVALID_PAIR "P_PAIR is not a normalized pair: ${PAIR:0:200}"; exit 1; }
+  || { record result.restore FAILED INVALID_PAIR "P_PAIR is neither JSON nor base64 of JSON of a normalized pair: ${P_PAIR:0:200}"; exit 1; }
 pj() { jq -r "$1" <<<"$PAIR"; }
 SC="$(pj .source.cluster)"; SNS="$(pj .source.namespace)"; SI="$(pj .source.instance)"; SBK="$(pj '.source.backupName // ""')"
 TC="$(pj .target.cluster)"; TNS="$(pj .target.namespace)"; TI="$(pj .target.instance)"
