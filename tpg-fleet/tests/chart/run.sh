@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# charts/tpg-instance rendering of the Round 12 values (design decisions D63 to D65):
+# helm_artifacts/instance/tpg-instance rendering of the Round 12 values (design decisions D63 to D65):
 #   exposure        serviceType and the Azure load balancer annotations; an empty
 #                   map is never rendered (F7); instance.serviceType is refused
 #   caBundle        written with enableSSL: true, and only then; enableSSL: true
 #                   without a bundle fails the render
 #   network policy  none renders nothing; baseline renders NetworkPolicy
-#                   tpg-ingress and CiliumNetworkPolicy tpg-egress; a rule is
-#                   rendered only for a non-empty input, and no peer list is
-#                   empty (an empty peer list allows every source: F9)
+#                   tpg-ingress-<instance> and CiliumNetworkPolicy
+#                   tpg-egress-<instance>; a rule is rendered only for a
+#                   non-empty input, and no peer list is empty (an empty peer
+#                   list allows every source: F9)
 #   Round 13 (D69 to D71)
 #   zero defaults   highAvailability only for an HA instance (enabled true,
 #                   readReplicas 1 or more), refused combinations, tpg.prune on
@@ -15,7 +16,7 @@
 #   schedules       PostgresBackupSchedule objects only with backup.scheduled false
 #   FerretDB        PostgresFerretDocumentDB (version, read-only proxies, exposure)
 #                   and its client rule on 27017
-#   reference       every rendered object is what charts/crd-reference renders
+#   reference       every rendered object is what helm_artifacts/instance/crd-reference renders
 #                   for the same spec (already pruned), and passes kubeconform
 #                   -strict against the CRD schemas when kubeconform is installed
 #   Round 14 (D78), Round 15 (D81, D84)
@@ -28,6 +29,15 @@
 #                   PostgresBackupLocation, PostgresBackupSchedule, FerretDB), each
 #                   merged into its object and winning over the chart values;
 #                   fullRetentionType count or time
+#   Round 23 phase 3 (the instance namespace): the release namespace is the
+#                   instance namespace; the shared Secrets (ServiceAccount
+#                   tpg-vso, VaultStaticSecrets regsecret and backup-storage) only
+#                   from the instance with sharedSecretsOwner true, the network
+#                   policies named and selected by instance, the ApplicationSet
+#                   destination.namespace from instance.namespace
+#   Round 23 review: the owner flag is read from the clusters/fleet.yaml value file
+#                   (the synced commit) before the inline values; the FerretDB pods
+#                   (app ferretdb-rw-<i>, ferretdb-ro-<i>) have their own policy pair
 # Requires: helm (v3 or v4), yq (mikefarah), python3 with PyYAML; skipped without them.
 # shellcheck disable=SC2015
 set -euo pipefail
@@ -40,7 +50,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 PASS=0; FAIL=0
 ok()  { printf 'ok   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL %s\n' "$1"; [[ -z "${2:-}" ]] || printf '%s\n' "$2" | sed 's/^/       | /' | tail -12; FAIL=$((FAIL + 1)); }
-CHART="$ROOT/charts/tpg-instance"
+CHART="$ROOT/helm_artifacts/instance/tpg-instance"
 render() {  # render VALUES_YAML -> $OUT (rendered manifests) and $RC
   printf 'cluster: {name: c1}\ninstance: {name: i1, postgresVersion: postgres-17.6}\nbackup: {container: pg-backups-c1}\n' > "$TMP/base.yaml"
   printf '%s\n' "$1" > "$TMP/v.yaml"
@@ -49,11 +59,12 @@ render() {  # render VALUES_YAML -> $OUT (rendered manifests) and $RC
     -f "$ROOT/clusters/_template/instance.yaml" -f "$TMP/base.yaml" -f "$TMP/v.yaml" --namespace pg-i1 2>&1)" || RC=$?
 }
 pg() { yq "select(.kind == \"Postgres\") | $1" <<<"$OUT"; }
-f9() {  # every NetworkPolicy ingress rule has a non-empty from, and no peer is all
-        # empty selectors ({namespaceSelector: {}} alone would admit every pod of
+f9() {  # every ingress rule of EVERY NetworkPolicy in the render (the Postgres pods' and, with FerretDB, the FerretDB pods')
+        # has a non-empty from, and no peer is all empty selectors ({namespaceSelector: {}} alone would admit every pod of
         # every namespace); {podSelector: {}} alone is the instance namespace itself
-  pycheck 'all(r.get("from") and all(p == {"podSelector": {}} or any(p.values()) for p in r["from"])
-           for r in K("NetworkPolicy")["spec"]["ingress"])'
+  pycheck '[d for d in docs if d.get("kind") == "NetworkPolicy"] != []
+    and all(r.get("from") and all(p == {"podSelector": {}} or any(p.values()) for p in r["from"])
+            for d in docs if d.get("kind") == "NetworkPolicy" for r in d["spec"]["ingress"])'
 }
 
 pycheck() {  # pycheck PYTHON_EXPR: true when the expression holds; K(kind) is the rendered object of that kind
@@ -62,6 +73,8 @@ import sys, yaml
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 def K(kind):
     return next(d for d in docs if d.get("kind") == kind)
+def N(kind, name):
+    return next(d for d in docs if d.get("kind") == kind and d.get("metadata", {}).get("name") == name)
 def egress(): return K("CiliumNetworkPolicy")["spec"]["egress"]
 def ports(rule): return [p["port"] for p in rule["toPorts"][0]["ports"]]
 sys.exit(0 if eval("(" + sys.argv[1] + ")") else 1)
@@ -148,7 +161,7 @@ render 'instance: {highAvailability: {enabled: true, readReplicas: 0}}'
 render 'instance: {highAvailability: {enabled: false, readReplicas: 2}}'
 [[ "$RC" -ne 0 ]] && grep -q "read replicas need highAvailability.enabled true" <<<"$OUT" && ok "readReplicas without enabled fails the render" || bad "rr only" "$OUT"
 # patch file content is pruned too; a required field inside a kept object stays
-CHART="$TMP/tpg-instance"; cp -r "$ROOT/charts/tpg-instance" "$CHART"
+CHART="$TMP/tpg-instance"; cp -r "$ROOT/helm_artifacts/instance/tpg-instance" "$CHART"
 printf 'kind: Postgres\nspec:\n  dataPodConfig: {tolerations: []}\n  deploymentOptions: {continuousRestoreTarget: false}\n  customConfig: {initDb: {checksum: false}}\n' > "$CHART/patches/zero.yaml"
 printf 'kind: Postgres\nspec:\n  deploymentOptions: {continuousRestoreTarget: false, sourceStanzaName: pg-src-0}\n' > "$CHART/patches/keep.yaml"
 render 'patches: {postgres: {current: patches/zero.yaml}}'
@@ -157,7 +170,7 @@ render 'patches: {postgres: {current: patches/zero.yaml}}'
 render 'patches: {postgres: {current: patches/keep.yaml}}'
 [[ "$(pg '.spec.deploymentOptions' | yq '.continuousRestoreTarget == false and .sourceStanzaName == "pg-src-0"')" == "true" ]] \
   && ok "continuousRestoreTarget false is kept when deploymentOptions holds more (required by the schema)" || bad "required kept" "$(pg '.spec')"
-CHART="$ROOT/charts/tpg-instance"
+CHART="$ROOT/helm_artifacts/instance/tpg-instance"
 render 'backup: {additionalParameters: {}, forcePathStyle: false}'
 pycheck 'K("PostgresBackupLocation")["spec"]["storage"]["azure"]["enableSSL"] is False
   and "forcePathStyle" not in K("PostgresBackupLocation")["spec"]["storage"]["azure"]
@@ -201,10 +214,10 @@ ferret: {enabled: true, replicas: 2, readOnlyReplicas: 1, exposure: internalLoad
   && ok "ferret: read-only proxies with their Secret, internal load balancers with the instance's ranges" || bad "ferret ha" "$OUT"
 render 'network: {policy: baseline, ingressFromNamespaces: [app]}
 ferret: {enabled: true, exposure: loadBalancer}'
-pycheck 'K("NetworkPolicy")["spec"]["ingress"][4] == {"from": [
+pycheck 'N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["ingress"][2] == {"from": [
     {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "app"}}}, {"ipBlock": {"cidr": "168.63.129.16/32"}}],
   "ports": [{"protocol": "TCP", "port": 27017}]}' && f9 \
-  && ok "ferret with baseline: 27017 from the same clients, with the probe address for its load balancer" || bad "ferret netpol" "$(yq 'select(.kind == "NetworkPolicy")' <<<"$OUT")"
+  && ok "ferret with baseline: 27017 from the same clients, with the probe address for its load balancer (Round 23: in the policy of the FerretDB pods)" || bad "ferret netpol" "$(yq 'select(.kind == "NetworkPolicy")' <<<"$OUT")"
 render 'network: {policy: baseline, ingressFromNamespaces: [app]}'
 pycheck 'not any(p["port"] == 27017 for r in K("NetworkPolicy")["spec"]["ingress"] for p in r.get("ports", []))' \
   && ok "no FerretDB: no 27017 rule" || bad "no ferret rule" "$OUT"
@@ -221,13 +234,13 @@ for k in Postgres PostgresBackupLocation PostgresBackupSchedule PostgresFerretDo
     | {"postgresBackupSchedule": {"enabled": true, "name": .metadata.name, "spec": .spec}}' <<<"$OUT" > "$TMP/ref-$k.yaml"
   want="$(K="$k" yq 'select(.kind == strenv(K)) | .spec' <<<"$OUT" | head -n 400)"
   [[ "$k" != PostgresBackupSchedule ]] || want="$(yq 'select(.metadata.name == "i1-backup-full") | .spec' <<<"$OUT")"
-  got="$(helm template ref "$ROOT/charts/crd-reference" -f "$TMP/ref-$k.yaml" | K="$k" yq 'select(.kind == strenv(K)) | .spec')"
+  got="$(helm template ref "$ROOT/helm_artifacts/instance/crd-reference" -f "$TMP/ref-$k.yaml" | K="$k" yq 'select(.kind == strenv(K)) | .spec')"
   [[ "$got" == "$want" ]] || { same=0; bad "reference $k" "$(diff <(echo "$want") <(echo "$got"))"; }
 done
-[[ "$same" -eq 1 ]] && ok "Postgres, backup location, schedule and FerretDB are what charts/crd-reference renders (nothing left to prune)"
+[[ "$same" -eq 1 ]] && ok "Postgres, backup location, schedule and FerretDB are what helm_artifacts/instance/crd-reference renders (nothing left to prune)"
 if command -v kubeconform >/dev/null; then
   yq 'select(.apiVersion == "sql.tanzu.vmware.com/v1")' <<<"$OUT" > "$TMP/sql.yaml"
-  kc="$(kubeconform -strict -summary -schema-location "$ROOT/charts/crd-reference/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" "$TMP/sql.yaml" 2>&1)" \
+  kc="$(kubeconform -strict -summary -schema-location "$ROOT/helm_artifacts/instance/crd-reference/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" "$TMP/sql.yaml" 2>&1)" \
     && grep -q "Valid: 5, Invalid: 0, Errors: 0, Skipped: 0" <<<"$kc" \
     && ok "the 5 rendered sql.tanzu.vmware.com objects pass kubeconform -strict against the live CRD schemas" || bad "kubeconform" "$kc"
 else
@@ -236,7 +249,7 @@ fi
 
 
 # ---- valuesOverride (tpg-restore) wins over a values patch file that turns FerretDB on
-cp -r "$ROOT/charts/tpg-instance" "$TMP/chart-copy"
+cp -r "$ROOT/helm_artifacts/instance/tpg-instance" "$TMP/chart-copy"
 printf 'ferret: {enabled: true}\n' > "$TMP/chart-copy/patches/t-ferret-on.yaml"
 CHART="$TMP/chart-copy"
 render 'patches: {postgresValues: {current: patches/t-ferret-on.yaml}}'
@@ -245,10 +258,10 @@ render 'patches: {postgresValues: {current: patches/t-ferret-on.yaml}}
 valuesOverride: {ferret: {enabled: false}}'
 [[ "$RC" -eq 0 ]] && ! grep -q 'kind: PostgresFerretDocumentDB' <<<"$OUT" \
   && ok "valuesOverride (a restored copy) wins over the values patch: no FerretDB" || bad "valuesOverride" "$OUT"
-CHART="$ROOT/charts/tpg-instance"
+CHART="$ROOT/helm_artifacts/instance/tpg-instance"
 
 # ---- Round 14 and 15: the current patch file, read from clusters/fleet.yaml when it is a value file
-cp -r "$ROOT/charts/tpg-instance" "$TMP/chart-r14"
+cp -r "$ROOT/helm_artifacts/instance/tpg-instance" "$TMP/chart-r14"
 CHART="$TMP/chart-r14"
 printf 'backup: {fullRetention: 11}\n' > "$CHART/patches/cur-aaaaa.yaml"
 printf 'backup: {fullRetention: 22}\n' > "$CHART/patches/prev-bbbbb.yaml"
@@ -363,6 +376,261 @@ render 'clusters:
 [[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Info && "$(pg '.spec.sharedMemorySize')" == 1Gi && "$(retention)" == 9 ]] \
   && ok "22: postgres overlay and patch documents merge per object: the patch wins where both set a field, the overlay's other fields stay" \
   || bad "postgres overlay then patch" "$OUT"
+# Round 23 (tpg-restore, second revision of phase 6b): a restored instance (instance.restored true) renders its Postgres from
+# the restore-patch (restore-patch/<file>.yaml, one kind: Postgres document: the spec file or the live snapshot), recorded as
+# restorePatch {current, previous, mode, postgresPatch}. mode base (default): the restore-patch is the base, nothing of the chart
+# defaults or the entry is filled in except the fleet's backupLocation and imagePullSecret; the entry's fleet-equivalent fields that
+# differ from it, then the current Postgres patch file, are applied over it. mode over (in-place restore with a spec file): the
+# normal render with the restore-patch over it.
+RPA="$CHART/restore-patch/i1-restore-aaaaa.yaml"
+cat > "$RPA" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  postgresVersion:
+    name: postgres-17.6
+  storageSize: 100Gi
+  logLevel: Warning
+  resources:
+    data:
+      requests:
+        memory: 6Gi
+YAML
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  logLevel: Error\n  storageSize: 70Gi\n' > "$CHART/restore-patch/i1-restore-bbbbb.yaml"
+# rr RP_FILE MODE ENTRY_INSTANCE_FLOW [ENTRY_EXTRA_LINE...]: a restored entry of clusters/fleet.yaml (value file), rendered
+RPX=""   # more fields of restorePatch, ", previous: {...}, postgresPatch: ..."
+rr() {
+  local rp="$1" mode="$2" ins="$3"; shift 3
+  { printf 'clusters:\n  c1:\n    instances:\n      i1:\n        instance: {restored: true%s}\n        restorePatch: {current: restore-patch/%s, mode: %s%s}\n' "${ins:+, $ins}" "$rp" "$mode" "$RPX"
+    local l; for l in "$@"; do printf '        %s\n' "$l"; done; } > "$TMP/rr.yaml"
+  render "$(cat "$TMP/rr.yaml")"
+}
+spec_keys() { pg '.spec | keys | join(",")'; }
+BASE_INS='postgresVersion: postgres-17.6, storageSize: 100Gi, resources: {data: {requests: {memory: 6Gi}}}, highAvailability: {enabled: false, readReplicas: 0}'
+rr i1-restore-aaaaa.yaml base "$BASE_INS"
+[[ "$RC" -eq 0 && "$(spec_keys)" == "backupLocation,imagePullSecret,logLevel,postgresVersion,resources,storageSize" ]] \
+  && ok "23 restored (base): the Postgres spec is the restore-patch's fields plus backupLocation and imagePullSecret; nothing else (no chart default, no entry value filled in)" \
+  || bad "restored base keys" "$(spec_keys) $OUT"
+[[ "$(pg '.spec.backupLocation.name')" == i1-backup-location && "$(pg '.spec.imagePullSecret.name')" == regsecret \
+   && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.postgresVersion.name')" == postgres-17.6 ]] \
+  && ok "23 restored (base): the fleet-managed backupLocation (<instance>-backup-location) and imagePullSecret (regsecret) are rendered, the restore-patch's values are the values" \
+  || bad "restored base values" "$(pg '.spec')"
+[[ "$(pg '.spec.resources.data | has("limits")')" == false && "$(pg '.spec | has("walStorageSize")')" == false && "$(pg '.spec | has("storageClassName")')" == false \
+   && "$(pg '.spec | has("highAvailability")')" == false && "$(pg '.spec | has("serviceType")')" == false && "$(pg '.spec | has("persistentVolumeClaimPolicy")')" == false ]] \
+  && ok "23 restored (base): omitted fields stay unset (no limits, walStorageSize, storageClassName, highAvailability, serviceType, persistentVolumeClaimPolicy of the chart defaults)" \
+  || bad "restored base omitted" "$(pg '.spec')"
+[[ "$(pg '.metadata.name')" == i1 && "$(pg '.metadata.annotations["argocd.argoproj.io/sync-options"]')" == "Prune=false,Delete=false" ]] \
+  && ok "23 restored (base): the metadata (name, Argo CD annotations) is the chart's" || bad "restored base metadata" "$(pg '.metadata')"
+[[ "$(yq 'select(.kind == "PostgresBackupLocation") | .metadata.name' <<<"$OUT")" == i1-backup-location ]] \
+  && ok "23 restored (base): the other objects of the instance (the backup location) render as before" || bad "restored base location" "$OUT"
+# Round 23, third revision: the restore-patch's own backupLocation / imagePullSecret win; the fleet's (<instance>-backup-location,
+# regsecret) are only filled in where the restore-patch omits them (each one on its own), in both modes
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  storageSize: 100Gi\n  backupLocation:\n    name: shared-location\n  imagePullSecret:\n    name: other-pull\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml base "postgresVersion: postgres-17.6, storageSize: 100Gi"
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == shared-location && "$(pg '.spec.imagePullSecret.name')" == other-pull ]] \
+  && ok "23 restored (base): a restore-patch that sets backupLocation and imagePullSecret keeps them (they win over the fleet's i1-backup-location and regsecret)" \
+  || bad "restored base own references" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  backupLocation:\n    name: shared-location\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml base "postgresVersion: postgres-17.6"
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == shared-location && "$(pg '.spec.imagePullSecret.name')" == regsecret ]] \
+  && ok "23 restored (base): a restore-patch with its own backupLocation only: imagePullSecret is filled in with the fleet's regsecret" || bad "restored base own location" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  imagePullSecret:\n    name: other-pull\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml base "postgresVersion: postgres-17.6"
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == i1-backup-location && "$(pg '.spec.imagePullSecret.name')" == other-pull ]] \
+  && ok "23 restored (base): a restore-patch with its own imagePullSecret only: backupLocation is filled in with the fleet's i1-backup-location" || bad "restored base own secret" "$(pg '.spec')"
+# an entry whose fleet-equivalent fields equal the restore-patch's changes nothing (HA {false,0} is a single node: no block)
+rr i1-restore-aaaaa.yaml base "$BASE_INS, exposure: clusterIP, readOnlyExposure: clusterIP"
+[[ "$RC" -eq 0 && "$(spec_keys)" == "backupLocation,imagePullSecret,logLevel,postgresVersion,resources,storageSize" ]] \
+  && ok "23 later changes: entry fields equal to the restore-patch's (a single node highAvailability false/0 against none, exposure clusterIP against no serviceType) are a no-op" \
+  || bad "later no-op" "$(spec_keys) $OUT"
+# an entry field that differs, or that the restore-patch lacks, overrides it
+rr i1-restore-aaaaa.yaml base "postgresVersion: postgres-17.8, storageSize: 200Gi, resources: {data: {requests: {memory: 8Gi}}}, walStorageSize: 30Gi, storageClassName: premium-fast"
+[[ "$RC" -eq 0 && "$(pg '.spec.storageSize')" == 200Gi && "$(pg '.spec.postgresVersion.name')" == postgres-17.8 && "$(pg '.spec.resources.data.requests.memory')" == 8Gi \
+   && "$(pg '.spec.walStorageSize')" == 30Gi && "$(pg '.spec.storageClassName')" == premium-fast && "$(pg '.spec.logLevel')" == Warning ]] \
+  && ok "23 later changes: an entry value that differs (storageSize, postgresVersion, resources) or that the restore-patch lacks (walStorageSize, storageClassName) overrides; the restore-patch's other fields stay" \
+  || bad "later override" "$(pg '.spec')"
+[[ "$(pg '.spec.resources.data | has("limits")')" == false && "$(pg '.spec.resources.data.requests | keys | join(",")')" == memory ]] \
+  && ok "23 later changes: a differing resources block replaces the restore-patch's block (no limits of the chart default, no mix)" || bad "later resources" "$(pg '.spec.resources')"
+# highAvailability: the scale workflow's entry fields
+rr i1-restore-aaaaa.yaml base "highAvailability: {enabled: true, readReplicas: 3}"
+[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.enabled')" == true && "$(pg '.spec.highAvailability.readReplicas')" == 3 ]] \
+  && ok "23 later changes: tpg-scale-instance writing highAvailability {true, 3} to an entry whose restore-patch is a single node renders HA with 3 read replicas" || bad "ha scale up" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  highAvailability:\n    enabled: true\n    readReplicas: 2\n' > "$CHART/restore-patch/i1-restore-ccccc.yaml"
+rr i1-restore-ccccc.yaml base "postgresVersion: postgres-17.6, highAvailability: {enabled: true, readReplicas: 2}"
+[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.readReplicas')" == 2 ]] \
+  && ok "23 later changes: the same HA values as the restore-patch's change nothing" || bad "ha equal" "$(pg '.spec')"
+rr i1-restore-ccccc.yaml base "postgresVersion: postgres-17.6, highAvailability: {enabled: true, readReplicas: 3}"
+[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.readReplicas')" == 3 && "$(pg '.spec.highAvailability.enabled')" == true ]] \
+  && ok "23 later changes: scaling an HA restored instance to 3 overrides the restore-patch's 2" || bad "ha 3" "$(pg '.spec')"
+rr i1-restore-ccccc.yaml base "postgresVersion: postgres-17.6, highAvailability: {enabled: false, readReplicas: 0}"
+[[ "$RC" -eq 0 && "$(pg '.spec | has("highAvailability")')" == false ]] \
+  && ok "23 later changes: scaling to a single node (false/0) over an HA restore-patch leaves no highAvailability block (no HA special case needed)" || bad "ha single" "$(pg '.spec')"
+rr i1-restore-aaaaa.yaml base "highAvailability: {enabled: true, readReplicas: 0}"
+[[ "$RC" -ne 0 ]] && grep -q "instance.highAvailability.enabled is true with readReplicas 0" <<<"$OUT" \
+  && ok "23 later changes: an entry HA that is no valid combination fails the render when it is applied" || bad "ha invalid" "$OUT"
+# the exposure
+rr i1-restore-aaaaa.yaml base "exposure: internalLoadBalancer, serviceAnnotations: {a/b: c}"
+[[ "$RC" -eq 0 && "$(pg '.spec.serviceType')" == LoadBalancer && "$(pg '.spec.serviceAnnotations["service.beta.kubernetes.io/azure-load-balancer-internal"]')" == "true" \
+   && "$(pg '.spec.serviceAnnotations["a/b"]')" == c ]] \
+  && ok "23 later changes: an exposure the restore-patch does not have renders serviceType and the annotations" || bad "exposure" "$(pg '.spec')"
+# the same exposure as the restore-patch's: no-op, and the stored annotations are kept verbatim
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  serviceType: LoadBalancer\n  serviceAnnotations:\n    service.beta.kubernetes.io/azure-load-balancer-internal: "true"\n    service.beta.kubernetes.io/azure-allowed-ip-ranges: 10.0.0.0/8\n' > "$CHART/restore-patch/i1-restore-ddddd.yaml"
+rr i1-restore-ddddd.yaml base 'postgresVersion: postgres-17.6, exposure: internalLoadBalancer, serviceAnnotations: {service.beta.kubernetes.io/azure-allowed-ip-ranges: 10.0.0.0/8}'
+[[ "$RC" -eq 0 && "$(pg '.spec.serviceAnnotations | keys | length')" == 2 && "$(pg '.spec.serviceAnnotations["service.beta.kubernetes.io/azure-allowed-ip-ranges"]')" == 10.0.0.0/8 ]] \
+  && ok "23 later changes: the seeded exposure (exposure + the annotations of the restore-patch verbatim) renders what the restore-patch holds" || bad "exposure seeded" "$(pg '.spec')"
+rm -f "$CHART/restore-patch/i1-restore-ccccc.yaml" "$CHART/restore-patch/i1-restore-ddddd.yaml"
+# the Postgres patch file (tpg-patch) is applied after the restore-patch and the entry's later changes
+cat > "$CHART/patches/pgpt-ddddd.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  logLevel: Info
+  storageSize: 300Gi
+YAML
+rr i1-restore-aaaaa.yaml base "$BASE_INS, storageSize: 200Gi" "patches: {postgres: {current: patches/pgpt-ddddd.yaml}}"
+[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Info && "$(pg '.spec.storageSize')" == 300Gi && "$(pg '.spec.postgresVersion.name')" == postgres-17.6 ]] \
+  && ok "23 tpg-patch: the current Postgres patch file is applied after the restore-patch and the entry's later changes (it wins over both)" || bad "patch last" "$(pg '.spec')"
+# creation overlays and the instance values patch do not reach the restored Postgres
+cat > "$CHART/overlays/pgov-ccccc.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  sharedMemorySize: 1Gi
+  logLevel: Debug
+YAML
+printf 'instance:\n  storageSize: 400Gi\nbackup:\n  fullRetention: 9\n' > "$CHART/patches/vpt-eeeee.yaml"
+rr i1-restore-aaaaa.yaml base "$BASE_INS" "overlays: {postgres: {current: overlays/pgov-ccccc.yaml}}" "patches: {postgresValues: {current: patches/vpt-eeeee.yaml}}"
+[[ "$RC" -eq 0 && "$(pg '.spec | has("sharedMemorySize")')" == false && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi \
+   && "$(yq 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number' <<<"$OUT")" == 9 ]] \
+  && ok "23 restored (base): the Postgres overlay of the creation and the instance keys of a values patch do not reach the Postgres; the values patch still renders the other objects (backup retention 9)" \
+  || bad "overlay not applied" "$(pg '.spec') $OUT"
+rm -f "$CHART/patches/pgpt-ddddd.yaml" "$CHART/patches/vpt-eeeee.yaml"
+# re-restore: only restorePatch.current; mode, a restored entry without a current file, a current file without the flag
+RPX=", previous: {path: restore-patch/i1-restore-bbbbb.yaml, commit: abc}"
+rr i1-restore-aaaaa.yaml base "$BASE_INS"
+RPX=""
+[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi ]] \
+  && ok "23 re-restore: only restorePatch.current is applied, not previous" || bad "previous" "$(pg '.spec')"
+render 'clusters:
+  c1:
+    instances:
+      i1:
+        instance: {restored: true, storageSize: 50Gi}
+        restorePatch: {previous: {path: restore-patch/i1-restore-bbbbb.yaml, commit: abc}}'
+[[ "$RC" -ne 0 ]] && grep -q "instance.restored is true for i1 but restorePatch.current is empty" <<<"$OUT" \
+  && ok "23 a restored entry without a current restore-patch fails the render (nothing to render it from)" || bad "restored without current" "$OUT"
+render 'instance: {storageSize: 50Gi}
+clusters:
+  c1:
+    instances:
+      i1:
+        restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}'
+[[ "$RC" -eq 0 && "$(pg '.spec.storageSize')" == 50Gi && "$(pg '.spec | has("logLevel")')" == false ]] \
+  && ok "23 a restore-patch of an entry that is not instance.restored is not applied" || bad "not restored" "$OUT"
+rr i1-restore-aaaaa.yaml sideways "$BASE_INS"
+[[ "$RC" -ne 0 ]] && grep -q "restorePatch.mode of i1 must be base or over" <<<"$OUT" \
+  && ok "23 restorePatch.mode other than base or over fails the render" || bad "mode" "$OUT"
+render 'clusters:
+  c1:
+    instances:
+      i1:
+        instance: {restored: true}
+        restorePatch: [restore-patch/i1-restore-aaaaa.yaml]'
+[[ "$RC" -ne 0 ]] && grep -q "restorePatch of i1 must be {current" <<<"$OUT" \
+  && ok "23 a restorePatch that is not {current, previous, mode} fails the render" || bad "restore-patch shape" "$OUT"
+rr missing-zzzzz.yaml base "$BASE_INS"
+[[ "$RC" -ne 0 ]] && grep -q "restore-patch file restore-patch/missing-zzzzz.yaml not found in the chart" <<<"$OUT" \
+  && ok "23 a restore-patch file that is not in the chart fails the render" || bad "restore-patch missing" "$OUT"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: x}\n' > "$CHART/restore-patch/i1-restore-eeeee.yaml"
+rr i1-restore-eeeee.yaml base "$BASE_INS"
+[[ "$RC" -ne 0 ]] && grep -q 'restore-patch file restore-patch/i1-restore-eeeee.yaml: kind "ConfigMap" is not a kind the tpg-instance chart renders' <<<"$OUT" \
+  && ok "23 a restore-patch document of another kind fails the render" || bad "restore-patch kind" "$OUT"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: PostgresBackupLocation\nspec: {}\n' > "$CHART/restore-patch/i1-restore-eeeee.yaml"
+rr i1-restore-eeeee.yaml base "$BASE_INS"
+[[ "$RC" -ne 0 ]] && grep -q 'restore-patch file restore-patch/i1-restore-eeeee.yaml: kind "PostgresBackupLocation" is not Postgres' <<<"$OUT" \
+  && ok "23 a restore-patch holds the Postgres document only" || bad "restore-patch not postgres" "$OUT"
+rm -f "$CHART/restore-patch/i1-restore-eeeee.yaml"
+# a render by hand (no clusters/fleet.yaml): .Values.instance.restored and .Values.restorePatch are used; there is no entry to compare
+render 'instance: {restored: true, storageSize: 55Gi}
+restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}'
+[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec | has("walStorageSize")')" == false ]] \
+  && ok "23 without clusters/fleet.yaml (a render by hand) .Values.instance.restored and .Values.restorePatch are used and the restore-patch renders alone (no entry to compare)" || bad "restore-patch inline" "$OUT"
+
+# mode over: an in-place restore with a spec file: the normal render (entry, overlay, the patch that was current at the restore),
+# the restore-patch over it, the entry's later changes, then a patch file newer than the restore
+cat > "$CHART/overlays/pgov-ccccc.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  sharedMemorySize: 1Gi
+YAML
+cat > "$CHART/patches/pgpt-ddddd.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  logLevel: Info
+  storageClassName: premium-fast
+YAML
+cat > "$CHART/patches/pgpt-fffff.yaml" <<'YAML'
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  logLevel: Debug
+  walStorageSize: 40Gi
+YAML
+RPX=", postgresPatch: patches/pgpt-ddddd.yaml"
+rr i1-restore-aaaaa.yaml over 'postgresVersion: postgres-17.6, storageSize: 100Gi, resources: {data: {requests: {memory: 6Gi}}}' \
+  "overlays: {postgres: {current: overlays/pgov-ccccc.yaml}}" "patches: {postgres: {current: patches/pgpt-ddddd.yaml}}"
+[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec.resources.data.requests.memory')" == 6Gi \
+   && "$(pg '.spec.sharedMemorySize')" == 1Gi && "$(pg '.spec.storageClassName')" == premium-fast && "$(pg '.spec.walStorageSize')" == 10Gi \
+   && "$(pg '.spec.persistentVolumeClaimPolicy')" == retain && "$(pg '.spec.resources.data.requests.cpu')" == 1 ]] \
+  && ok "23 restored (over): the normal render (overlay, the patch of the time of the restore, chart defaults) with the restore-patch over it: its fields win, the rest of the render stays" \
+  || bad "over render" "$(pg '.spec')"
+rr i1-restore-aaaaa.yaml over 'postgresVersion: postgres-17.6, storageSize: 100Gi' \
+  "overlays: {postgres: {current: overlays/pgov-ccccc.yaml}}" "patches: {postgres: {current: patches/pgpt-fffff.yaml}}"
+[[ "$RC" -eq 0 && "$(pg '.spec.logLevel')" == Debug && "$(pg '.spec.walStorageSize')" == 40Gi && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec | has("storageClassName")')" == true ]] \
+  && ok "23 restored (over): a patch file set after the restore (tpg-patch) is applied after the restore-patch and wins over it" || bad "over later patch" "$(pg '.spec')"
+[[ "$(pg '.spec.storageClassName')" == tpg-data-retain ]] \
+  && ok "23 restored (over): the patch file that was current at the restore is no longer applied once tpg-patch replaced it (storageClassName back to the entry's)" || bad "over old patch" "$(pg '.spec')"
+RPX=""
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageSize: 100Gi\n  highAvailability:\n    enabled: true\n    readReplicas: 1\n' > "$CHART/restore-patch/i1-restore-ccccc.yaml"
+rr i1-restore-ccccc.yaml over 'storageSize: 150Gi, highAvailability: {enabled: true, readReplicas: 3}'
+[[ "$RC" -eq 0 && "$(pg '.spec.storageSize')" == 150Gi && "$(pg '.spec.highAvailability.readReplicas')" == 3 ]] \
+  && ok "23 restored (over): the entry's later changes (storageSize, scale) that differ from the restore-patch's override it" || bad "over later" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability:\n    enabled: false\n' > "$CHART/restore-patch/i1-restore-ccccc.yaml"
+rr i1-restore-ccccc.yaml over 'highAvailability: {enabled: false, readReplicas: 0}'
+[[ "$RC" -eq 0 && "$(pg '.spec | has("highAvailability")')" == false ]] \
+  && ok "23 restored (over): a restore-patch single node (enabled false) over the render's HA leaves no highAvailability block" || bad "over single node" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageSize: 100Gi\n  backupLocation:\n    name: shared-location\n  imagePullSecret:\n    name: other-pull\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml over 'postgresVersion: postgres-17.6, storageSize: 100Gi'
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == shared-location && "$(pg '.spec.imagePullSecret.name')" == other-pull ]] \
+  && ok "23 restored (over): the restore-patch's own backupLocation and imagePullSecret win over the render's (and over the fleet's references)" || bad "over own references" "$(pg '.spec')"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageSize: 100Gi\n' > "$CHART/restore-patch/i1-restore-lllll.yaml"
+rr i1-restore-lllll.yaml over 'postgresVersion: postgres-17.6, storageSize: 100Gi'
+[[ "$RC" -eq 0 && "$(pg '.spec.backupLocation.name')" == i1-backup-location && "$(pg '.spec.imagePullSecret.name')" == regsecret ]] \
+  && ok "23 restored (over): a restore-patch without them leaves the fleet's i1-backup-location and regsecret" || bad "over fleet references" "$(pg '.spec')"
+render 'clusters:
+  c1:
+    instances:
+      i1:
+        instance: {restored: true, highAvailability: {enabled: true, readReplicas: 1}}
+        restorePatch: {current: restore-patch/i1-restore-ccccc.yaml, mode: over}'
+[[ "$RC" -eq 0 && "$(pg '.spec.highAvailability.enabled')" == true ]] \
+  && ok "23 restored (over): an entry that still says HA against a single-node restore-patch is a later change (the entry wins): seeding writes the restore-patch's values into the entry" || bad "over stale entry" "$(pg '.spec')"
+rm -f "$CHART/restore-patch/i1-restore-lllll.yaml" "$CHART/restore-patch/i1-restore-ccccc.yaml" "$CHART/overlays/pgov-ccccc.yaml" "$CHART/patches/pgpt-ddddd.yaml" "$CHART/patches/pgpt-fffff.yaml"
+# .helmignore must not hide restore-patch/ (the chart reads it with .Files.Get): it is in the packaged chart
+rm -rf "$TMP/rp"; mkdir -p "$TMP/rp"; cp -r "$CHART" "$TMP/rp/tpg-instance"
+if (cd "$TMP/rp" && helm package tpg-instance -d out >/dev/null 2>&1); then
+  PKG="$(tar -tzf "$TMP"/rp/out/*.tgz)"
+  grep -q 'tpg-instance/restore-patch/i1-restore-aaaaa.yaml' <<<"$PKG" && grep -q 'tpg-instance/restore-patch/README.md' <<<"$PKG" \
+    && ok "23 .helmignore does not exclude restore-patch/: its files are in the packaged chart" || bad "restore-patch: package" "$PKG"
+  rm -rf "$TMP/rp/x"; mkdir -p "$TMP/rp/x"; tar -xzf "$TMP"/rp/out/*.tgz -C "$TMP/rp/x" 2>/dev/null
+  printf 'cluster: {name: c1}\ninstance: {name: i1, postgresVersion: postgres-17.6, restored: true}\nbackup: {container: pg-backups-c1}\nrestorePatch: {current: restore-patch/i1-restore-aaaaa.yaml}\n' > "$TMP/rp/v.yaml"
+  PKGOUT="$(helm template i1 "$TMP/rp/x/tpg-instance" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" -f "$TMP/rp/v.yaml" --namespace pg-i1 2>&1)" || PKGOUT="FAILED: $PKGOUT"
+  [[ "$(yq 'select(.kind == "Postgres") | .spec.logLevel' <<<"$PKGOUT")" == Warning ]] \
+    && ok "23 the packaged chart renders the restore-patch (the file is read from the package)" || bad "restore-patch: packaged render" "$PKGOUT"
+else bad "restore-patch: helm package failed"; fi
+rm -f "$CHART/restore-patch/i1-restore-aaaaa.yaml" "$CHART/restore-patch/i1-restore-bbbbb.yaml"
 # Round 22: backup repository path and the skip-initial-backup annotation
 blpath() { yq 'select(.kind == "PostgresBackupLocation") | .spec.storage.azure.repoPath' <<<"$OUT"; }
 render ''
@@ -387,7 +655,255 @@ render 'backup: {fullRetention: 30, fullRetentionType: time}'
   && ok "1g: fullRetentionType time is rendered (retentionDays is gone)" || bad "retention type" "$OUT"
 render 'backup: {fullRetentionType: days}'
 [[ "$RC" -ne 0 ]] && ok "fullRetentionType other than count or time fails the render" || bad "retention type bad" "$OUT"
-CHART="$ROOT/charts/tpg-instance"
+CHART="$ROOT/helm_artifacts/instance/tpg-instance"
+
+# ---- Round 23: the values the tpg-instances ApplicationSet builds. The valueFiles list and the
+# `values` template are read from bootstrap/appsets/tpg-instances.yaml; the template is evaluated
+# with helm's tpl (sprig, as the ApplicationSet controller has it) against a context made like the
+# generator's: name, instance.{name,values} and the clusters of fleet.yaml
+APPSET="$ROOT/bootstrap/appsets/tpg-instances.yaml"
+AS="$TMP/appset"; mkdir -p "$AS/helm_artifacts/instance" "$AS/clusters" "$AS/tplchart/templates"
+cp -r "$ROOT/helm_artifacts/instance/tpg-instance" "$AS/helm_artifacts/instance/"; cp -r "$ROOT/clusters/_template" "$AS/clusters/"
+printf 'apiVersion: v2\nname: tplvalues\nversion: 0.0.0\n' > "$AS/tplchart/Chart.yaml"
+printf '%s\n' '{{ tpl .Values.tmpl .Values.ctx }}' > "$AS/tplchart/templates/values.yaml"
+appset_render() {  # appset_render ENTRY_YAML: the chart rendered for clusters.c1.instances.i1 = ENTRY -> $OUT, $RC
+  local fleet f
+  printf 'clusters:\n  c1:\n    operator: {version: v4.5.0}\n    instances:\n      i1: %s\n' "$1" > "$AS/clusters/fleet.yaml"
+  fleet="$(yq -o=json -I=0 '.' "$AS/clusters/fleet.yaml")"
+  jq -n --arg t "$(yq -r '.spec.template.spec.source.helm.values' "$APPSET")" --argjson f "$fleet" \
+    '{tmpl: $t, ctx: {name: "c1", instance: {name: "i1", values: $f.clusters.c1.instances.i1}, clusters: $f.clusters}}' > "$AS/tpl-values.json"
+  RC=0
+  helm template tplvalues "$AS/tplchart" -f "$AS/tpl-values.json" 2>&1 | yq '.' > "$AS/values.yaml" || RC=$?
+  [[ "$RC" -eq 0 && -s "$AS/values.yaml" ]] || { OUT="the appset values template did not evaluate: $(cat "$AS/values.yaml" 2>/dev/null)"; RC=1; return; }
+  local args=()
+  while IFS= read -r f; do args+=(-f "$AS/helm_artifacts/instance/tpg-instance/$f"); done < <(yq -r '.spec.template.spec.source.helm.valueFiles[]' "$APPSET")
+  OUT="$(helm template i1 "$AS/helm_artifacts/instance/tpg-instance" "${args[@]}" -f "$AS/values.yaml" --namespace pg-i1 2>&1)" || RC=$?
+}
+skip_ann='sql.tanzu.vmware.com/skip-initial-backup'
+appset_render '{instance: {postgresVersion: postgres-17.6, disableInitialBackup: true}}'
+[[ "$RC" -eq 0 && "$(yq '.instance.name' "$AS/values.yaml")" == i1 && "$(pg ".metadata.annotations[\"$skip_ann\"]")" == "true" ]] \
+  && ok "23: ApplicationSet values with instance.disableInitialBackup true: the Postgres object carries $skip_ann: \"true\"" || bad "appset annotation true" "$OUT"
+appset_render '{instance: {postgresVersion: postgres-17.6, disableInitialBackup: false}}'
+[[ "$RC" -eq 0 && "$(pg ".metadata.annotations | has(\"$skip_ann\")")" == false ]] \
+  && ok "23: ApplicationSet values with instance.disableInitialBackup false: no skip-initial-backup annotation" || bad "appset annotation false" "$OUT"
+appset_render '{instance: {postgresVersion: postgres-17.6}}'
+[[ "$RC" -eq 0 && "$(pg ".metadata.annotations | has(\"$skip_ann\")")" == false ]] \
+  && ok "23: ApplicationSet values without the key (and the chart default false): no skip-initial-backup annotation" || bad "appset annotation absent" "$OUT"
+
+# the ApplicationSet leaves restorePatch out of the inline values (like patches and overlays): the entry of clusters/fleet.yaml,
+# read at the synced commit, decides which restore-patch file applies; instance.restored travels in the inline instance block
+# and is read from the entry first
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  logLevel: Warning\n  storageSize: 100Gi\n' > "$AS/helm_artifacts/instance/tpg-instance/restore-patch/i1-restore-aaaaa.yaml"
+appset_render '{instance: {postgresVersion: postgres-17.6, storageSize: 100Gi, restored: true}, restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml, mode: base}}'
+[[ "$RC" -eq 0 && "$(yq 'has("restorePatch")' "$AS/values.yaml")" == false && "$(yq '.instance.restored' "$AS/values.yaml")" == true \
+   && "$(pg '.spec.logLevel')" == Warning && "$(pg '.spec.storageSize')" == 100Gi && "$(pg '.spec | has("walStorageSize")')" == false ]] \
+  && ok "23: the ApplicationSet values carry no restorePatch; the chart still renders the restored instance from the restore-patch the fleet.yaml entry names (entry fields equal to it, none filled in)" || bad "appset restorePatch" "$(cat "$AS/values.yaml") $OUT"
+appset_render '{instance: {postgresVersion: postgres-17.6, storageSize: 50Gi, restored: true}, restorePatch: {current: restore-patch/i1-restore-aaaaa.yaml, mode: base}}'
+[[ "$RC" -eq 0 && "$(pg '.spec.storageSize')" == 50Gi && "$(pg '.spec.logLevel')" == Warning ]] \
+  && ok "23: …and an entry value that differs from the restore-patch's (a later change) wins through the ApplicationSet values as well" || bad "appset later change" "$OUT"
+rm -f "$AS/helm_artifacts/instance/tpg-instance/restore-patch/i1-restore-aaaaa.yaml"
+
+# ---- Round 23 phase 3: the instance namespace (locked decision 8). The chart renders in the
+# namespace Argo CD gives it (.Release.Namespace = instance.namespace, default pg-<instance>);
+# instances may share a namespace, and then the namespace-scoped objects with a fixed name are
+# rendered once: the ServiceAccount tpg-vso and the VaultStaticSecrets regsecret and
+# backup-storage by the owner (instance.sharedSecretsOwner, default true) only, and the network
+# policies carry the instance name and select the pods of their instance by the
+# postgres-instance label
+render_ns() {  # render_ns INSTANCE NAMESPACE [VALUES_YAML] -> $OUT, $RC
+  printf 'cluster: {name: c1}\ninstance: {name: %s, postgresVersion: postgres-17.6}\nbackup: {container: pg-backups-c1}\n' "$1" > "$TMP/ns-$1.yaml"
+  printf '%s\n' "${3:-}" > "$TMP/ns-v-$1.yaml"
+  RC=0
+  OUT="$(helm template "$1" "$CHART" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" \
+    -f "$TMP/ns-$1.yaml" -f "$TMP/ns-v-$1.yaml" --namespace "$2" 2>&1)" || RC=$?
+}
+names() { yq -r '.kind + "/" + .metadata.name' <<<"$OUT" | grep -E '^[A-Za-z]+/' | sort; }
+render_ns i1 pg-i1 'network: {policy: baseline}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23: by default (sharedSecretsOwner true) the instance renders the ServiceAccount tpg-vso and the VaultStaticSecrets regsecret and backup-storage" || bad "owner default" "$OUT"
+render_ns i1 pg-i1 'instance: {sharedSecretsOwner: true}
+network: {policy: baseline}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23: sharedSecretsOwner true renders them as well" || bad "owner true" "$OUT"
+pycheck 'K("NetworkPolicy")["metadata"]["name"] == "tpg-ingress-i1" and K("CiliumNetworkPolicy")["metadata"]["name"] == "tpg-egress-i1"' \
+  && ok "23: the network policies are named tpg-ingress-<instance> and tpg-egress-<instance>" || bad "policy names" "$(names)"
+pycheck 'K("NetworkPolicy")["spec"]["podSelector"] == {"matchLabels": {"postgres-instance": "i1"}}
+  and K("CiliumNetworkPolicy")["spec"]["endpointSelector"] == {"matchLabels": {"postgres-instance": "i1"}}' \
+  && ok "23: both policies select the pods of the instance by the postgres-instance label (not every pod of the namespace)" \
+  || bad "policy selectors" "$(yq 'select(.kind == "NetworkPolicy" or .kind == "CiliumNetworkPolicy") | .spec | pick(["podSelector", "endpointSelector"])' <<<"$OUT")"
+render_ns i2 shared 'instance: {sharedSecretsOwner: false}
+network: {policy: baseline}'
+[[ "$RC" -eq 0 ]] && ! names | grep -qE '^(ServiceAccount|VaultStaticSecret)/' \
+  && ok "23: sharedSecretsOwner false: no ServiceAccount and no VaultStaticSecret is rendered" || bad "owner false" "$OUT"
+pycheck 'any(r.get("toEndpoints") == [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "shared"}},
+  {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "tanzu-postgres-operator"}}] for r in egress())' \
+  && ok "23: the egress rule for the own namespace names the release namespace, not pg-<instance>" || bad "egress namespace" "$(yq 'select(.kind == "CiliumNetworkPolicy")' <<<"$OUT")"
+[[ "$(yq 'select(.kind == "PostgresBackupLocation") | .spec.storage.azure.repoPath' <<<"$OUT")" == "/shared/i2" ]] \
+  && ok "23: repoPath default /<namespace>/<instance> uses the real namespace" || bad "repoPath in shared" "$OUT"
+# the pair in one namespace: every kind/name once, the shared objects from the owner only
+render_ns i1 shared 'network: {policy: baseline}'; own="$OUT"; own_rc="$RC"
+render_ns i2 shared 'instance: {sharedSecretsOwner: false}
+network: {policy: baseline}'; nonown="$OUT"; non_rc="$RC"
+pair="$(printf '%s\n---\n%s\n' "$own" "$nonown")"
+[[ "$own_rc" -eq 0 && "$non_rc" -eq 0 && -z "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | grep -E '^[A-Za-z]+/' | sort | uniq -d)" ]] \
+  && ok "23: two instances in one namespace render distinct objects: no kind/name twice" || bad "pair distinct" "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | sort | uniq -c)"
+[[ "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23: exactly one of the two renders the shared Secrets (the owner)" || bad "pair one owner" "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | sort | uniq -c)"
+render_ns i1 pg-other 'instance: {namespace: pg-i1}'
+[[ "$RC" -ne 0 ]] && grep -q 'instance.namespace "pg-i1" differs from the release namespace "pg-other"' <<<"$OUT" \
+  && ok "23: instance.namespace that differs from the release namespace fails the render" || bad "namespace mismatch" "$OUT"
+render_ns i1 pg-i1 'instance: {namespace: pg-i1}'
+[[ "$RC" -eq 0 ]] && ok "23: instance.namespace equal to the release namespace renders" || bad "namespace equal" "$OUT"
+render_ns i1 pg-i1 'instance: {sharedSecretsOwner: maybe}'
+[[ "$RC" -ne 0 ]] && grep -q 'instance.sharedSecretsOwner "maybe" must be true or false' <<<"$OUT" \
+  && ok "23: sharedSecretsOwner other than true or false fails the render" || bad "owner invalid" "$OUT"
+# the ApplicationSet: destination.namespace from the entry, owner flag passed through its values
+appset_dest() {  # appset_dest ENTRY_YAML -> the destination namespace the template builds
+  local fleet
+  printf 'clusters:\n  c1:\n    instances:\n      i1: %s\n' "$1" > "$AS/clusters/fleet.yaml"
+  fleet="$(yq -o=json -I=0 '.' "$AS/clusters/fleet.yaml")"
+  jq -n --arg t "dest: $(yq -r '.spec.template.spec.destination.namespace' "$APPSET")" --argjson f "$fleet" \
+    '{tmpl: $t, ctx: {name: "c1", instance: {name: "i1", values: $f.clusters.c1.instances.i1}, clusters: $f.clusters}}' > "$AS/tpl-dest.json"
+  helm template tplvalues "$AS/tplchart" -f "$AS/tpl-dest.json" 2>&1 | yq '.dest' | tr -d '[:space:]'
+}
+[[ "$(appset_dest '{instance: {postgresVersion: postgres-17.6}}')" == "pg-i1" ]] \
+  && ok "23: ApplicationSet destination.namespace defaults to pg-<instance>" || bad "appset dest default" "$(appset_dest '{instance: {postgresVersion: postgres-17.6}}')"
+[[ "$(appset_dest '{instance: {postgresVersion: postgres-17.6, namespace: team-db}}')" == "team-db" ]] \
+  && ok "23: ApplicationSet destination.namespace is the entry's instance.namespace" || bad "appset dest explicit" "$(appset_dest '{instance: {postgresVersion: postgres-17.6, namespace: team-db}}')"
+appset_render '{instance: {postgresVersion: postgres-17.6, namespace: pg-i1, sharedSecretsOwner: false}}'
+[[ "$RC" -eq 0 ]] && ! names | grep -qE '^(ServiceAccount|VaultStaticSecret)/' \
+  && ok "23: ApplicationSet values pass instance.sharedSecretsOwner false to the chart: no shared Secrets" || bad "appset non-owner" "$OUT"
+appset_render '{instance: {postgresVersion: postgres-17.6, namespace: pg-i1}}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23: ApplicationSet values without the flag: the instance owns the shared Secrets" || bad "appset owner" "$OUT"
+
+# ---- Round 23 review: the owner flag follows the fleet.yaml value file at the synced revision, not the inline values
+# The tpg-instances ApplicationSet builds the inline values from the fleet branch and refreshes them
+# asynchronously; tpg-delete-instance syncs the successor at the commit that moved the flag, so the file at that
+# commit decides (the way the patch records are read). Without the file (a render by hand) the inline value is used.
+render_fleet() {  # render_fleet INSTANCE NAMESPACE FLEET_ENTRIES_YAML INLINE_VALUES_YAML -> $OUT, $RC (fleet.yaml as a value file, like the ApplicationSet)
+  printf 'clusters:\n  c1:\n    instances:\n%s\n' "$3" > "$TMP/fl-fleet.yaml"
+  printf 'cluster: {name: c1}\ninstance: {name: %s, postgresVersion: postgres-17.6}\nbackup: {container: pg-backups-c1}\n' "$1" > "$TMP/fl-$1.yaml"
+  printf '%s\n' "$4" > "$TMP/fl-v-$1.yaml"
+  RC=0
+  OUT="$(helm template "$1" "$CHART" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" \
+    -f "$TMP/fl-fleet.yaml" -f "$TMP/fl-$1.yaml" -f "$TMP/fl-v-$1.yaml" --namespace "$2" 2>&1)" || RC=$?
+}
+FLEET_PAIR='      i1: {instance: {namespace: shared, postgresVersion: postgres-17.6}}
+      i2: {instance: {namespace: shared, sharedSecretsOwner: false, postgresVersion: postgres-17.6}}'
+# the successor of a hand-over: the file (rev1) says owner, the inline values (the old main) still say false
+render_fleet i1 shared "$FLEET_PAIR" 'instance: {namespace: shared, sharedSecretsOwner: false}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23 review: the successor renders the shared Secrets when fleet.yaml at the synced commit makes it the owner, whatever the stale inline values say" || bad "race successor" "$(names)"
+# the old owner: the file says false, the inline values (the old main) still say owner
+render_fleet i2 shared "$FLEET_PAIR" 'instance: {namespace: shared, sharedSecretsOwner: true}'
+[[ "$RC" -eq 0 ]] && ! names | grep -qE '^(ServiceAccount|VaultStaticSecret)/' \
+  && ok "23 review: the old owner stops rendering them when fleet.yaml at the synced commit says false, whatever the inline values say" || bad "race old owner" "$(names)"
+# an entry without the key owns them (the default), also against an inline false
+render_fleet i1 shared '      i1: {instance: {namespace: shared, postgresVersion: postgres-17.6}}' 'instance: {sharedSecretsOwner: false}'
+[[ "$RC" -eq 0 && "$(names | grep -c -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$')" == 3 ]] \
+  && ok "23 review: an entry in fleet.yaml without sharedSecretsOwner is an owner" || bad "race default" "$(names)"
+# an instance that is not in the file (a render by hand with another fleet.yaml): the inline value
+render_fleet i9 shared "$FLEET_PAIR" 'instance: {namespace: shared, sharedSecretsOwner: false}'
+[[ "$RC" -eq 0 ]] && ! names | grep -qE '^(ServiceAccount|VaultStaticSecret)/' \
+  && ok "23 review: an instance with no entry in the fleet.yaml value file falls back to the inline value" || bad "race fallback" "$(names)"
+render_fleet i1 shared '      i1: {instance: {namespace: shared, sharedSecretsOwner: maybe, postgresVersion: postgres-17.6}}' ''
+[[ "$RC" -ne 0 ]] && grep -q 'instance.sharedSecretsOwner "maybe" must be true or false' <<<"$OUT" \
+  && ok "23 review: a sharedSecretsOwner in fleet.yaml that is not true or false fails the render" || bad "race invalid" "$OUT"
+
+# ---- Round 23 re-review: the ApplicationSet's inline values are built from main, the value file from the synced revision.
+# tpg-delete-instance syncs the successor at the commit that moved the owner flag; main (what the ApplicationSet reads) may
+# still say i1 is no owner. The chart finds the entry of the instance in the value file through cluster.name, which the
+# values template puts in its base: without it the file is not consulted and the stale inline value decides.
+# $4: an ApplicationSet file other than bootstrap/appsets/tpg-instances.yaml
+appset_render_synced() {  # appset_render_synced INSTANCE STALE_ENTRIES SYNCED_ENTRIES [APPSET_FILE] -> $OUT, $RC
+  local fleet f appset="${4:-$APPSET}" inst="$1"
+  printf 'clusters:\n  c1:\n    operator: {version: v4.5.0}\n    instances:\n%s\n' "$2" > "$AS/stale-fleet.yaml"
+  printf 'clusters:\n  c1:\n    operator: {version: v4.5.0}\n    instances:\n%s\n' "$3" > "$AS/clusters/fleet.yaml"   # the value file of the synced revision
+  fleet="$(yq -o=json -I=0 '.' "$AS/stale-fleet.yaml")"
+  jq -n --arg t "$(yq -r '.spec.template.spec.source.helm.values' "$appset")" --arg i "$inst" --argjson f "$fleet" \
+    '{tmpl: $t, ctx: {name: "c1", instance: {name: $i, values: $f.clusters.c1.instances[$i]}, clusters: $f.clusters}}' > "$AS/tpl-values.json"
+  RC=0
+  helm template tplvalues "$AS/tplchart" -f "$AS/tpl-values.json" 2>&1 | yq '.' > "$AS/values.yaml" || RC=$?
+  [[ "$RC" -eq 0 && -s "$AS/values.yaml" ]] || { OUT="the appset values template did not evaluate: $(cat "$AS/values.yaml" 2>/dev/null)"; RC=1; return; }
+  local args=()
+  while IFS= read -r f; do args+=(-f "$AS/helm_artifacts/instance/tpg-instance/$f"); done < <(yq -r '.spec.template.spec.source.helm.valueFiles[]' "$appset")
+  OUT="$(helm template "$inst" "$AS/helm_artifacts/instance/tpg-instance" "${args[@]}" -f "$AS/values.yaml" --namespace shared 2>&1)" || RC=$?
+}
+STALE_PAIR='      i1: {instance: {namespace: shared, sharedSecretsOwner: false, postgresVersion: postgres-17.6}}
+      i2: {instance: {namespace: shared, postgresVersion: postgres-17.6}}'
+SYNCED_PAIR='      i1: {instance: {namespace: shared, postgresVersion: postgres-17.6}}
+      i2: {instance: {namespace: shared, sharedSecretsOwner: false, postgresVersion: postgres-17.6}}'
+shared_names() { names | grep -E '^(ServiceAccount/tpg-vso|VaultStaticSecret/(regsecret|backup-storage))$' | sort | paste -sd, || true; }
+appset_render_synced i1 "$STALE_PAIR" "$SYNCED_PAIR"
+[[ "$RC" -eq 0 && "$(yq '.instance.sharedSecretsOwner' "$AS/values.yaml")" == false \
+   && "$(shared_names)" == "ServiceAccount/tpg-vso,VaultStaticSecret/backup-storage,VaultStaticSecret/regsecret" ]] \
+  && ok "23 re-review: through the real ApplicationSet values template, i1 (inline values from main: no owner) renders tpg-vso, regsecret and backup-storage when the synced fleet.yaml makes it the owner" \
+  || bad "appset synced successor" "$(yq '.instance' "$AS/values.yaml") $(shared_names) $OUT"
+appset_render_synced i2 "$STALE_PAIR" "$SYNCED_PAIR"
+[[ "$RC" -eq 0 && "$(yq '.instance.sharedSecretsOwner' "$AS/values.yaml")" == null && -z "$(shared_names)" ]] \
+  && ok "23 re-review: and i2 (inline values from main: owner by default) renders none of them once the synced fleet.yaml says it is not" \
+  || bad "appset synced old owner" "$(yq '.instance' "$AS/values.yaml") $(shared_names) $OUT"
+# the test is sensitive to cluster.name in the base of the values template: without it the stale inline value wins
+yq '.spec.template.spec.source.helm.values |= sub("\"cluster\" [(]dict \"name\" [.]name[)] "; "")' "$APPSET" > "$AS/appset-no-cluster-name.yaml"
+! cmp -s "$APPSET" "$AS/appset-no-cluster-name.yaml" || bad "mutation did not change the template"
+appset_render_synced i1 "$STALE_PAIR" "$SYNCED_PAIR" "$AS/appset-no-cluster-name.yaml"
+[[ -z "$(shared_names)" ]] \
+  && ok "23 re-review: the same render with cluster.name removed from the values template does not render the shared Secrets for i1 (the check above would fail)" \
+  || bad "mutation not detected" "$(shared_names) $OUT"
+
+# ---- Round 23 review: the FerretDB pods have their own policy pair (they lack the postgres-instance label)
+render_ns i1 pg-i1 'network: {policy: baseline, ingressFromNamespaces: [app], egressToCidrs: [10.9.0.0/16]}
+ferret: {enabled: true}'
+pols="$(yq -r 'select(.kind == "NetworkPolicy" or .kind == "CiliumNetworkPolicy") | .metadata.name' <<<"$OUT" | grep '^tpg-' | sort | paste -sd,)"
+[[ "$RC" -eq 0 && "$pols" == "tpg-egress-ferretdb-i1,tpg-egress-i1,tpg-ingress-ferretdb-i1,tpg-ingress-i1" ]] \
+  && ok "23 review: with FerretDB there are two more policies: tpg-ingress-ferretdb-<instance> and tpg-egress-ferretdb-<instance>" || bad "ferret policy names" "$pols $OUT"
+pycheck 'N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["podSelector"] == {"matchExpressions": [{"key": "app", "operator": "In", "values": ["ferretdb-rw-i1", "ferretdb-ro-i1"]}]}
+  and N("CiliumNetworkPolicy", "tpg-egress-ferretdb-i1")["spec"]["endpointSelector"] == {"matchExpressions": [{"key": "app", "operator": "In", "values": ["ferretdb-rw-i1", "ferretdb-ro-i1"]}]}' \
+  && ok "23 review: they select the FerretDB pods: app in (ferretdb-rw-<instance>, ferretdb-ro-<instance>)" || bad "ferret selector" "$(yq 'select(.kind == "NetworkPolicy" or .kind == "CiliumNetworkPolicy") | .spec | pick(["podSelector", "endpointSelector"])' <<<"$OUT")"
+pycheck '[r for r in N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["ingress"]] == [
+    {"from": [{"podSelector": {}}]},
+    {"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "tanzu-postgres-operator"}}}]},
+    {"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "app"}}}], "ports": [{"protocol": "TCP", "port": 27017}]}]
+  and N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["policyTypes"] == ["Ingress"]' && f9 \
+  && ok "23 review: the FerretDB ingress policy denies by default and allows the namespace, the operator and 27017 from the clients" || bad "ferret ingress" "$(yq 'select(.metadata.name == "tpg-ingress-ferretdb-i1")' <<<"$OUT")"
+pycheck 'N("CiliumNetworkPolicy", "tpg-egress-ferretdb-i1")["spec"]["egress"] == N("CiliumNetworkPolicy", "tpg-egress-i1")["spec"]["egress"]' \
+  && ok "23 review: the FerretDB egress rules are those of the instance's egress policy (what the pods had before Round 23)" || bad "ferret egress" "$(yq 'select(.metadata.name == "tpg-egress-ferretdb-i1")' <<<"$OUT")"
+pycheck 'not any(p.get("port") == 27017 for r in N("NetworkPolicy", "tpg-ingress-i1")["spec"]["ingress"] for p in r.get("ports", []))
+  and N("NetworkPolicy", "tpg-ingress-i1")["spec"]["podSelector"] == {"matchLabels": {"postgres-instance": "i1"}}' \
+  && ok "23 review: the Postgres pods' policy keeps the postgres-instance selector and carries no 27017 rule" || bad "pg policy with ferret" "$(yq 'select(.metadata.name == "tpg-ingress-i1")' <<<"$OUT")"
+render_ns i1 pg-i1 'network: {policy: baseline}'
+! names | grep -q 'ferretdb' && ok "23 review: no FerretDB policies without FerretDB" || bad "no ferret policies" "$(names)"
+render_ns i1 pg-i1 'network: {policy: baseline}
+ferret: {enabled: true}'
+pycheck 'len(N("NetworkPolicy", "tpg-ingress-ferretdb-i1")["spec"]["ingress"]) == 2' && f9 \
+  && ok "23 review: FerretDB without client rules: the deny and the namespace and operator rules only (no empty peer list)" || bad "ferret no clients" "$(yq 'select(.metadata.name == "tpg-ingress-ferretdb-i1")' <<<"$OUT")"
+# f9 looks at every NetworkPolicy of the render, not the first: a bad rule in the second policy fails it
+SAVE_OUT="$OUT"
+OUT="$(printf '%s\n---\n%s\n' "$(yq 'select(.metadata.name == "tpg-ingress-i1")' <<<"$SAVE_OUT")" \
+  'apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: tpg-ingress-ferretdb-i1}
+spec: {ingress: [{from: [{namespaceSelector: {}}]}]}')"
+! f9 && ok "23 re-review: f9 fails when the second NetworkPolicy (FerretDB) has an all-empty peer, though the first is fine" || bad "f9 second policy"
+OUT="$(yq 'select(.kind == "NetworkPolicy")' <<<"$SAVE_OUT")"
+f9 && ok "23 re-review: f9 passes for the real pair (every NetworkPolicy of the render is checked)" || bad "f9 pair" "$OUT"
+OUT="$SAVE_OUT"
+
+# Round 23 phase 6a follow-up: restore-specs/ holds the spec files of tpg-restore; the chart never reads them
+# (.helmignore keeps the folder out of the packaged chart), so a file there changes no render
+rm -rf "$TMP/rs"; mkdir -p "$TMP/rs"; cp -r "$CHART" "$TMP/rs/tpg-instance"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability:\n    enabled: true\n' > "$TMP/rs/tpg-instance/restore-specs/probe.yaml"
+render ''
+BEFORE="$OUT"
+RC=0; AFTER="$(helm template i1 "$TMP/rs/tpg-instance" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" \
+  -f "$TMP/base.yaml" -f "$TMP/v.yaml" --namespace pg-i1 2>&1)" || RC=$?
+[[ "$RC" -eq 0 && "$AFTER" == "$BEFORE" ]] && ok "restore-specs: a spec file in the folder changes no render" || bad "restore-specs render" "$AFTER"
+if (cd "$TMP/rs" && helm package tpg-instance -d out >/dev/null 2>&1); then
+  PKG="$(tar -tzf "$TMP"/rs/out/*.tgz)"
+  ! grep -q 'restore-specs' <<<"$PKG" && grep -q 'tpg-instance/patches/' <<<"$PKG" \
+    && ok "restore-specs: .helmignore keeps the folder out of the packaged chart (patches/ is still in it)" || bad "restore-specs: package" "$PKG"
+else bad "restore-specs: helm package failed"; fi
 
 echo
 echo "chart: ${PASS} passed, ${FAIL} failed"

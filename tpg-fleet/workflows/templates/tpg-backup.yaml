@@ -32,10 +32,10 @@ spec:
       value: "full"
       enum: ["full", "incremental", "differential"]
     - name: clusters
-      description: "List: comma-separated registered clusters, or all (without clusterMap)"
+      description: "List: registered clusters in brackets, [aks-tpg-poc-01, aks-tpg-poc-02] (also with one value), or all (without clusterMap)"
       value: "all"
     - name: instances
-      description: "List: instances to back up, or all / empty for every instance (without clusterMap)"
+      description: "List: instances to back up in brackets, [orders-db], or all / empty for every instance (without clusterMap)"
       value: ""
     - name: clusterMap
       description: "Map (YAML or JSON): cluster -> {instances: {instance -> {backupType, backupTimeoutSeconds}}}; the inputs are the defaults"

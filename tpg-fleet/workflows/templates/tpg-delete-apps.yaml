@@ -9,7 +9,8 @@ metadata:
     workflows.argoproj.io/description: >-
       Day 2: delete Postgres instances and/or the Tanzu Postgres operator and its
       sql.tanzu.vmware.com CRDs from the selected clusters. Removes the entries from
-      clusters/fleet.yaml. dryRun=true (default) only records the plan.
+      clusters/fleet.yaml. dryRun=true (default) only records the plan. purgeBackups=true also expires every
+      backup and deletes the blobs under the instance's repoPath (a repoPath shared with another backup location keeps its blobs).
 spec:
   serviceAccountName: tpg-workflow
   # Vault Agent (injector on the hub) renders tpg/shared/broadcom-registry,
@@ -30,22 +31,22 @@ spec:
     parameters:
     # ---- targets: clusters and apps, or clusterMap (one of the two)
     - name: clusters
-      description: "List: comma-separated registered clusters to clean up (without clusterMap)"
+      description: "List: registered clusters to clean up, in brackets, [aks-tpg-poc-01] (also with one value) (without clusterMap)"
       value: ""
     - name: apps
       description: >-
         Map (JSON) of cluster to applications (without clusterMap). Applications: tpg-instances (all
-        instances), tpg-instances:<instance>[,<instance>], tpg-operator (operator and CRDs).
-        Example: {"aks-tpg-poc-01":["tpg-instances","tpg-operator"],"aks-tpg-poc-02":["tpg-instances:orders-db"]}
+        instances), tpg-instances:<instance> (one element per instance), tpg-operator (operator and CRDs).
+        Example: {"aks-tpg-poc-01":["tpg-instances","tpg-operator"],"aks-tpg-poc-02":["tpg-instances:orders-db","tpg-instances:billing-db"]}
       value: ""
     - name: clusterMap
       description: >-
         Map (YAML or JSON): cluster -> {deleteOperator, force, instances: {instance -> {purgePvcs,
-        purgeNamespace, finalBackup}}}; the inputs below are the defaults
+        purgeNamespace, purgeBackups, finalBackup}}}; the inputs below are the defaults
       value: ""
     # ---- mandatory (no default unless shown; the validate step lists the valid choices)
     - name: confirm
-      description: "List: repeat the clusters value, or the cluster names of clusterMap"
+      description: "List in brackets: repeat the clusters value, or the cluster names of clusterMap, for example [aks-tpg-poc-01]"
       value: ""
     - name: dryRun
       description: "true: record what would be deleted; false: delete"
@@ -56,9 +57,13 @@ spec:
       value: ""
       enum: ["", "false", "true"]
     - name: purgeNamespace
-      description: "true: delete the pg-<instance> namespaces (needs purgePvcs=true); false: keep them"
+      description: "true: delete the instance namespaces (needs purgePvcs=true; refused while another instance uses the namespace, except with deleteOperator); false: keep them"
       value: ""
       enum: ["", "false", "true"]
+    - name: purgeBackups
+      description: "true: expire every PostgresBackup of each instance while it runs, then delete the blobs left under its container and repoPath (irreversible; refused with finalBackup true or required; a repoPath another backup location uses keeps its blobs). With clusterMap: the default of purgeBackups"
+      value: "false"
+      enum: ["false", "true"]
     - name: pushMode
       description: "direct: push to the fleet branch; pr: open a pull request and continue after it is merged"
       value: ""
@@ -126,6 +131,7 @@ spec:
         - {name: P_DRY_RUN, value: "{{workflow.parameters.dryRun}}"}
         - {name: P_PURGE_PVCS, value: "{{workflow.parameters.purgePvcs}}"}
         - {name: P_PURGE_NS, value: "{{workflow.parameters.purgeNamespace}}"}
+        - {name: P_PURGE_BACKUPS, value: "{{workflow.parameters.purgeBackups}}"}
         - {name: P_PUSH_MODE, value: "{{workflow.parameters.pushMode}}"}
         - {name: P_FORCE, value: "{{workflow.parameters.force}}"}
         - {name: P_FINAL_BACKUP, value: "{{workflow.parameters.finalBackup}}"}
@@ -173,6 +179,7 @@ spec:
         - {name: P_DRY_RUN, value: "{{workflow.parameters.dryRun}}"}
         - {name: P_PURGE_PVCS, value: "{{workflow.parameters.purgePvcs}}"}
         - {name: P_PURGE_NS, value: "{{workflow.parameters.purgeNamespace}}"}
+        - {name: P_PURGE_BACKUPS, value: "{{workflow.parameters.purgeBackups}}"}
         - {name: P_FORCE, value: "{{workflow.parameters.force}}"}
         - {name: P_FINAL_BACKUP, value: "{{workflow.parameters.finalBackup}}"}
         - {name: P_FORCE_DELETE_STUCK, value: "{{workflow.parameters.forceDeleteStuckApps}}"}

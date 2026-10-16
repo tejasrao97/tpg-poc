@@ -18,6 +18,8 @@
 #      operation synced that commit, although the Application stays OutOfSync
 #      against the fleet branch; --revisions syncs one source of a multi-source
 #      Application (revisions and sourcePositions in the sync request)
+#   8. Round 23 review: --resources syncs the listed objects only and does not wait
+#      for the health or the Synced status of the Application
 #
 # Requires: bash 4, jq.
 # ok() and bad() always return 0, so "check && ok || bad" is an if-then-else here;
@@ -140,6 +142,28 @@ scenario "$OLD" "$OLD" "$(app Synced Healthy Succeeded 2026-09-22T17:44:00Z "suc
 bash -c "source '$TMP/prelude.sh'; app_sync_wait tpg-c1-operator 60 --revisions 2 abc123def4567890" > "$TMP/out" 2> "$TMP/err" || true
 jq -e 'select(. != null) | .revisions == ["abc123def4567890"] and .sourcePositions == [2] and (has("revision") | not)' "$TMP/s/posts" >/dev/null \
   && ok "--revisions: the request names the source position and its commit" || bad "--revisions" "$(cat "$TMP/s/posts")"
+
+echo
+echo "== 8. a selective sync (--resources): the request lists the objects, the Application as a whole is not waited for"
+# the Application is Degraded and OutOfSync for reasons of its own (a Postgres that is not deployed, a failing
+# object): a sync of three shared objects must not wait for it (tpg-delete-instance hand-over, tpg-day0)
+DEGRADED="$(jq -c '.status.health.status = "Degraded"' <<<"$(app OutOfSync Degraded Succeeded 2026-09-22T17:45:00Z "successfully synced")")"
+scenario "$OLD" "$OLD" "$DEGRADED"
+RES=':ServiceAccount:shared/tpg-vso,secrets.hashicorp.com:VaultStaticSecret:shared/regsecret,secrets.hashicorp.com:VaultStaticSecret:shared/backup-storage'
+bash -c "source '$TMP/prelude.sh'; rc=0; app_sync_wait tpg-c1-app-b 60 --revision abc123def4567890 --resources '$RES' || rc=\$?; echo \"rc=\$rc reason=\$SYNC_FAIL_REASON\"" > "$TMP/out" 2> "$TMP/err" || true
+grep -q '^rc=0 ' "$TMP/out" && grep -q 'the selected objects were synced' "$TMP/err" \
+  && ok "--resources: the operation Succeeded is the answer; a Degraded, OutOfSync Application does not fail or delay it" || bad "--resources degraded" "$(cat "$TMP/out" "$TMP/err")"
+jq -e 'select(. != null) | .revision == "abc123def4567890" and .prune == false and (.resources == [
+    {group: "", kind: "ServiceAccount", namespace: "shared", name: "tpg-vso"},
+    {group: "secrets.hashicorp.com", kind: "VaultStaticSecret", namespace: "shared", name: "regsecret"},
+    {group: "secrets.hashicorp.com", kind: "VaultStaticSecret", namespace: "shared", name: "backup-storage"}])' "$TMP/s/posts" >/dev/null \
+  && ok "--resources: the sync request names group, kind, namespace and name of each object, at the pinned revision, without prune" || bad "--resources body" "$(cat "$TMP/s/posts")"
+scenario "$OLD" "$OLD" "$(app OutOfSync Healthy Failed 2026-09-22T17:46:00Z "one or more objects failed to apply, reason: admission webhook denied the request")"
+bash -c "source '$TMP/prelude.sh'; rc=0; app_sync_wait tpg-c1-app-b 60 --resources '$RES' || rc=\$?; echo \"rc=\$rc reason=\$SYNC_FAIL_REASON\"" > "$TMP/out" 2> "$TMP/err" || true
+grep -q '^rc=1 reason=SYNC_REJECTED' "$TMP/out" && ok "--resources: a failed operation still fails with Argo CD's message" || bad "--resources failed" "$(cat "$TMP/out")"
+scenario "$OLD" "$OLD" "$(app OutOfSync Healthy Succeeded 2026-09-22T17:47:00Z "successfully synced")"
+bash -c "source '$TMP/prelude.sh'; app_sync_wait tpg-c1-app-b 60" > "$TMP/out" 2> "$TMP/err" || true
+jq -e 'select(. != null) | has("resources") | not' "$TMP/s/posts" >/dev/null && ok "without --resources the request has no resources list (the whole Application)" || bad "no resources" "$(cat "$TMP/s/posts")"
 
 echo
 echo "sync-engine: ${PASS} passed, ${FAIL} failed"

@@ -12,7 +12,7 @@
       "datasourceUid": "${DATASOURCE_UID}",
       "model": {
         "refId": "A",
-        "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_replicas{namespace=~\"pg-.*\"}) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{namespace=~\"pg-.*\"})",
+        "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_replicas and on (cluster, namespace, statefulset) label_replace(label_replace(max by (cluster, instance_namespace, instance_name) (tanzu_postgres_instance_state), \"namespace\", \"$1\", \"instance_namespace\", \"(.*)\"), \"statefulset\", \"$1\", \"instance_name\", \"(.*)\")) - max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready and on (cluster, namespace, statefulset) label_replace(label_replace(max by (cluster, instance_namespace, instance_name) (tanzu_postgres_instance_state), \"namespace\", \"$1\", \"instance_namespace\", \"(.*)\"), \"statefulset\", \"$1\", \"instance_name\", \"(.*)\"))",
         "instant": true,
         "range": false,
         "intervalMs": 60000,

@@ -4,7 +4,7 @@ Builds workflows/params/patch-schemas.json, which workflows/scripts/patchcheck.p
 reads in the validate step of tpg-patch and tpg-create-instance (the file ships in
 the tpg-scripts ConfigMap next to the scripts, so no repository clone is needed):
 
-  values     the key tree of the tpg-instance chart values: charts/tpg-instance/values.yaml
+  values     the key tree of the tpg-instance chart values: helm_artifacts/instance/tpg-instance/values.yaml
              merged with clusters/_template/cluster.yaml and instance.yaml. A map
              whose default is empty ({}) takes any key (annotations, pgBackRest
              parameters, operator schedules); FREE_FORM lists the maps the chart
@@ -14,7 +14,7 @@ the tpg-scripts ConfigMap next to the scripts, so no repository clone is needed)
              Postgres, PostgresBackupLocation, PostgresBackupSchedule,
              PostgresFerretDocumentDB), the spec of its CRD: the closed JSON schema
              that tools/crd-defaults/generate.py writes from the live 4.5 CRDs
-             (charts/crd-reference/schemas), without descriptions.
+             (helm_artifacts/instance/crd-reference/schemas), without descriptions.
   operator   the operator chart values a patch may set (the user's list, Round 14):
              every other key is refused.
 
@@ -27,9 +27,9 @@ import yaml
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT = os.path.join(ROOT, "workflows", "params", "patch-schemas.json")
-VALUE_FILES = ["charts/tpg-instance/values.yaml", "clusters/_template/cluster.yaml",
+VALUE_FILES = ["helm_artifacts/instance/tpg-instance/values.yaml", "clusters/_template/cluster.yaml",
                "clusters/_template/instance.yaml"]
-SCHEMA_DIR = "charts/crd-reference/schemas/sql.tanzu.vmware.com"
+SCHEMA_DIR = "helm_artifacts/instance/crd-reference/schemas/sql.tanzu.vmware.com"
 # the kinds the tpg-instance chart renders for an instance, and their schema files
 KINDS = {"Postgres": "postgres_v1.json", "PostgresBackupLocation": "postgresbackuplocation_v1.json",
          "PostgresBackupSchedule": "postgresbackupschedule_v1.json",

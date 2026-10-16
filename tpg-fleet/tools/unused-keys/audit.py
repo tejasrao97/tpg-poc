@@ -7,7 +7,7 @@ A key a person can set but nothing reads is a trap: retentionDays looked like a
 retention setting after the operator took over retention. This lint finds such
 keys in five places and fails when one is not explained in allow-list.yaml:
 
-  chart      every leaf of charts/tpg-instance/values.yaml and clusters/_template/*.yaml
+  chart      every leaf of helm_artifacts/instance/tpg-instance/values.yaml and clusters/_template/*.yaml
              is changed, one at a time, in three value profiles; the key is evaluated
              when the rendered manifests (or the render error) change in one of them
   fleet      every leaf of clusters/fleet.example.yaml under an instance or cluster
@@ -111,7 +111,7 @@ def render(chart, files, extra):
 
 def chart_check(findings):
     global CA
-    chart = os.path.join(ROOT, "charts", "tpg-instance")
+    chart = os.path.join(ROOT, "helm_artifacts", "instance", "tpg-instance")
     tpl = [os.path.join(ROOT, "clusters", "_template", "cluster.yaml"), os.path.join(ROOT, "clusters", "_template", "instance.yaml")]
     ca = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=audit",
                          "-keyout", "/dev/null"], capture_output=True, text=True)

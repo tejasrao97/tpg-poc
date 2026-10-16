@@ -21,7 +21,7 @@ helm upgrade --install cert-manager cert-manager -n cert-manager --force
 helm install vault hashicorp/vault -n vault --create-pods
 
 # helm4-post-renderer-path
-helm template orders-db charts/tpg-instance --post-renderer=./kustomize-wrapper.sh
+helm template orders-db helm_artifacts/instance/tpg-instance --post-renderer=./kustomize-wrapper.sh
 
 # helm4-registry-login-path: Helm 4 takes the domain only
 helm registry login tanzu-sql-postgres.packages.broadcom.com/tanzu-postgres --username u
@@ -39,4 +39,4 @@ kubectl delete application tpg-aks-tpg-poc-01-orders-db -n argocd --cascade=fals
 kubectl rollout status deploy/argocd-server -n argocd -w=false
 
 # argo-submit-instanceid-flag (warning)
-argo submit --from workflowtemplate/tpg-day0 --instanceid tpg -p clusters=all
+argo submit --from workflowtemplate/tpg-day0 --instanceid tpg -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]'

@@ -11,3 +11,4 @@ aks-tpg-poc-01:
       purgePvcs: true
       purgeNamespace: true
       finalBackup: required
+      purgeBackups: false

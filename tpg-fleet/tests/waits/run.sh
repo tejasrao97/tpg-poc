@@ -4,6 +4,7 @@
 # 20: the live checksum was taken with `jq -r` (trailing newline) against a Vault checksum without
 # one, so a Secret that already held the new value was reported SECRET_NOT_SYNCED after 5 minutes.
 # Needs bash and jq (sha256sum is shimmed with shasum on macOS).
+# shellcheck disable=SC2015  # ok/bad: A && ok || bad, as in the other suites
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 command -v jq >/dev/null || { echo "SKIP tests/waits: jq not installed" >&2; exit 0; }
@@ -22,6 +23,7 @@ LOGF="$T/step.log"
 log() { printf '%s\n' "$*" >> "$LOGF"; }
 SECRET_VALUE="hvs.example-token-value"
 # tk get secret -> a dockerconfigjson with the current password; get vaultstaticsecret -> conditions
+# shellcheck disable=SC2034  # what: the argument layout of tk, kept for reading
 tk() {
   local what="$3"
   case " $* " in
@@ -70,7 +72,7 @@ RC="$ROOT/workflows/scripts/rotate-cluster.sh"
 grep -q "jq -r \"\$expr\" 2>/dev/null | sha" "$RC" && bad "rotate-cluster.sh still compares with jq -r" || ok "rotate-cluster.sh does not compare with jq -r"
 grep -q "check_namespaces regsecret" "$RC" && grep -q "check_namespaces backup-storage" "$RC" && ok "rotate-cluster.sh checks regsecret and backup-storage with the logged wait" || bad "check_namespaces"
 grep -q "tanzu-postgres-operator\" { print \"0 \"" "$RC" && ok "the operator namespace is checked first" || bad "namespace order"
-grep -q "wait_logged" "$ROOT/workflows/scripts/day0-deploy.sh" "$ROOT/workflows/scripts/restore.sh" "$ROOT/workflows/scripts/rotate-hub.sh" && ok "day0, restore and rotate-hub wait with wait_logged" || bad "other scripts"
+grep -q "wait_logged" "$ROOT/workflows/scripts/day0-deploy.sh" "$ROOT/workflows/scripts/restore-pair.sh" "$ROOT/workflows/scripts/rotate-hub.sh" && ok "day0, restore and rotate-hub wait with wait_logged" || bad "other scripts"
 
 echo
 echo "tests/waits: ${PASS} passed, ${FAIL} failed"

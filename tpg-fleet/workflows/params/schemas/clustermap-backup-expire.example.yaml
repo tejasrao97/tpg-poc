@@ -1,0 +1,10 @@
+# clusterMap of tpg-backup-expire: every key the workflow takes (generated; see
+# workflows/params/schemas/clustermap-backup-expire.schema.json). Local files are packed
+# into patchFiles with scripts/submit/pack-patch-files.sh -o <parameter file>.
+# yaml-language-server: $schema=clustermap-backup-expire.schema.json
+aks-tpg-poc-01:
+  instances:
+    orders-db:
+      # purgeBackups: true   # instead of backups: expire every backup of the instance (not both; blobs are never deleted here)
+      backups: [orders-db-full-202609010100]
+      includeDependents: true

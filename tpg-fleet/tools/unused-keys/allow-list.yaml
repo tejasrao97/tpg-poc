@@ -9,43 +9,49 @@ chart:
   cluster.maxReadReplicas:
     reason: the cap tpg-day0, tpg-create-instance and tpg-scale-instance apply to readReplicas; read on the hub, not rendered
     readBy: workflows/scripts/discover.sh
+  cluster.allowInPlaceRestore:
+    reason: whether tpg-restore may overwrite an instance of the cluster in place (default false); read on the hub by the validate step of tpg-restore, which refuses the whole run (IN_PLACE_NOT_ALLOWED), not rendered
+    readBy: workflows/scripts/validate-params.sh
   cluster.name:
     reason: set by the tpg-instances ApplicationSet; selects the instance's entry of clusters/fleet.yaml when the chart reads the current patch files
-    readBy: charts/tpg-instance/templates/_helpers.tpl
+    readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl
   valuesOverride:
     reason: merged over the values after the patch files (tpg.ctx); written by tpg-restore; its keys are chart values
-    readBy: charts/tpg-instance/templates/_helpers.tpl
+    readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl
 fleet:
   instance.patches.postgres.current:
     reason: the current postgres patch file; read by the chart through the clusters value (tpg.kindPatch) and by the workflows
-    readBy: charts/tpg-instance/templates/_helpers.tpl
+    readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl
   instance.patches.postgresValues.current:
     reason: the current values patch file; read by the chart (tpg.ctx) and by the workflows
-    readBy: charts/tpg-instance/templates/_helpers.tpl
+    readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl
   instance.patches.postgresValues.previous.path:
     reason: a record of the file before the current one (tpg-patch revert and audit); read by the workflows only
     readBy: workflows/scripts/lib.sh
   instance.patches.postgresValues.previous.commit:
     reason: the commit that added the previous file; read by the workflows only
     readBy: workflows/scripts/lib.sh
-  instance.overlays.postgres.current:
-    reason: the current postgres overlay file (Round 22); read by the chart through the clusters value (tpg.kindPatch) and by the workflows
-    readBy: charts/tpg-instance/templates/_helpers.tpl
   instance.overlays.postgresValues.current:
     reason: the current values overlay file (Round 22); read by the chart (tpg.ctx) and by the workflows
-    readBy: charts/tpg-instance/templates/_helpers.tpl
-  instance.overlays.postgresValues.previous.path:
-    reason: a record of the overlay file before the current one; read by the workflows only
+    readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl
+  instance.restorePatch.current:
+    reason: the current restore-patch file, the spec of the instance tpg-restore restored (its spec file or the spec read from the cluster, Round 23); the chart renders the Postgres from it (tpg.restoredPostgres), and the workflows read it
+    readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl
+  instance.restorePatch.mode:
+    reason: base or over, how the chart renders the restored Postgres from the current restore-patch file (tpg.restoredMode); read by the chart through the restorePatch record and by scripts/validate.sh
+    readBy: helm_artifacts/instance/tpg-instance/templates/_helpers.tpl
+  instance.restorePatch.previous.path:
+    reason: the restore-patch file before the current one, kept until a third replaces it; read by the workflows and scripts/validate.sh only
     readBy: workflows/scripts/lib.sh
-  instance.overlays.postgresValues.previous.commit:
-    reason: the commit that added the previous overlay file; read by the workflows only
+  instance.restorePatch.previous.commit:
+    reason: the commit that added the previous restore-patch file; read by the workflows only
     readBy: workflows/scripts/lib.sh
   cluster.operator.version:
     reason: the operator chart version; read by the tpg-operator ApplicationSet and the workflows
     readBy: bootstrap/appsets/tpg-operator.yaml
   cluster.operator.patches.values.current:
-    reason: the current operator values file; copied to patches/operator/clusters/<cluster>.yaml, which the tpg-operator ApplicationSet passes
+    reason: the current operator values file; copied to helm_artifacts/operator/patches/clusters/<cluster>.yaml, which the tpg-operator ApplicationSet passes
     readBy: workflows/scripts/lib.sh
   cluster.operator.overlays.values.current:
-    reason: the current operator values overlay (Round 22); copied to overlays/operator/clusters/<cluster>.yaml, which the tpg-operator ApplicationSet passes before the patch copy
+    reason: the current operator values overlay (Round 22); copied to helm_artifacts/operator/overlays/clusters/<cluster>.yaml, which the tpg-operator ApplicationSet passes before the patch copy
     readBy: workflows/scripts/lib.sh

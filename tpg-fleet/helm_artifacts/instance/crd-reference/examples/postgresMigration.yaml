@@ -1,0 +1,8 @@
+# Example for helm_artifacts/instance/crd-reference (the 4.5 documentation sample, adapted to the
+# fleet names). Render it with:
+#   helm template ref helm_artifacts/instance/crd-reference -f helm_artifacts/instance/crd-reference/examples/postgresMigration.yaml
+postgresMigration:
+  enabled: true
+  name: migrate-orders
+  spec:
+    instances: [orders-db]

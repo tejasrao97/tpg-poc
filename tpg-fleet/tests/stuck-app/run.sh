@@ -2,6 +2,7 @@
 # Round 22: an Application stuck in Deleting with a ComparisonError (expired registry token) is
 # removed by clearing its finalizer: app_removed_or_force / app_stuck_reason from lib.sh, with stub
 # kubectl and app_exists. Needs bash and jq.
+# shellcheck disable=SC2015  # ok/bad: A && ok || bad, as in the other suites
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 command -v jq >/dev/null || { echo "SKIP tests/stuck-app: jq not installed" >&2; exit 0; }
@@ -15,6 +16,7 @@ LOGF="$T/log"; : > "$LOGF"
 log() { printf '%s\n' "$*" >> "$LOGF"; }
 log_cmd() { log "  \$ $*"; }
 sleep() { :; }
+# shellcheck disable=SC2034  # the signature of lib.sh wait_logged
 wait_logged() { local l="$1" n="$2" f="$4" i; shift 4; for i in $(seq 1 "$n"); do "$f" "$@" && return 0; done; return 1; }
 STATE="$T/state"          # present | gone
 PATCHED="$T/patched"

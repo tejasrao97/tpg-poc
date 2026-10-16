@@ -93,7 +93,7 @@ for c in $(jq -r '.[].name' <<<"$inv"); do
   # the next cluster starts from the fleet branch again (patch-cluster.sh commits per cluster)
   cp "$WORK/fleet.cluster.bak" "$REPO/$FLEET_REL"
   git -C "$REPO" checkout --quiet -- . 2>/dev/null || true
-  git -C "$REPO" clean --quiet -fd -- charts/tpg-instance/patches patches 2>/dev/null || true
+  git -C "$REPO" clean --quiet -fd -- helm_artifacts/instance/tpg-instance/patches helm_artifacts/operator/patches 2>/dev/null || true
 
   if [[ "${#C_ERRS[@]}" -gt 0 ]]; then
     record_entry "precheck.${c}" BLOCKED PATCH_REFUSED "$(printf '%s; ' "${C_ERRS[@]}")"

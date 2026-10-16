@@ -1,10 +1,18 @@
 # Instance defaults shared by every Postgres instance on every cluster.
 #
-# The tpg-instances ApplicationSet passes this file to charts/tpg-instance as
+# The tpg-instances ApplicationSet passes this file to helm_artifacts/instance/tpg-instance as
 # the second value file. Override any key for one instance under
 # clusters.<cluster>.instances.<instance> in clusters/fleet.yaml; tpg-day0,
 # tpg-upgrade and tpg-scale-instance write those overrides for you.
 instance:
+  # Not set here, per instance in clusters/fleet.yaml (written by tpg-day0 and
+  # tpg-create-instance, clusterMap key namespace; Round 23):
+  #   namespace: <name>             the namespace of the instance, default pg-<instance>;
+  #                                 immutable. Instances may share a namespace
+  #   sharedSecretsOwner: false     set on the instances of a shared namespace that do not
+  #                                 render the shared Secrets (ServiceAccount tpg-vso,
+  #                                 VaultStaticSecrets regsecret and backup-storage); the
+  #                                 owner has no entry (default true). One owner per namespace
   # Required per instance: a name from `kubectl get postgresversion`
   postgresVersion: ""
   storageClassName: tpg-data-retain

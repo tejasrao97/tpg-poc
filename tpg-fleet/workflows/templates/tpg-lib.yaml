@@ -36,6 +36,10 @@ spec:
           value: ""
         - name: clusterMap
           value: ""
+        # tpg-delete-instance: purgeBackups=true accepts an instance that is gone but has an audit copy
+        # with its backup repository (the re-run of a blob purge that failed)
+        - name: purgeBackups
+          value: "false"
     outputs:
       parameters:
         - name: inventory
@@ -57,6 +61,7 @@ spec:
         - {name: P_FILTER, value: "{{inputs.parameters.filter}}"}
         - {name: P_INSTANCES, value: "{{inputs.parameters.instances}}"}
         - {name: P_CLUSTER_MAP, value: "{{inputs.parameters.clusterMap}}"}
+        - {name: P_PURGE_BACKUPS, value: "{{inputs.parameters.purgeBackups}}"}
       volumeMounts:
         - name: scripts
           mountPath: /scripts
@@ -71,6 +76,9 @@ spec:
         - name: maxParallel
         - name: rolloutMode
           value: canary
+        # tpg-restore: the normalized pairs (JSON); the batches then hold pairs, not clusters
+        - name: pairs
+          value: ""
     outputs:
       parameters:
         - name: batches
@@ -89,6 +97,8 @@ spec:
         - "{{inputs.parameters.requirePrecheck}}"
         - "{{inputs.parameters.maxParallel}}"
         - "{{inputs.parameters.rolloutMode}}"
+      env:
+        - {name: P_PAIRS, value: "{{inputs.parameters.pairs}}"}
       volumeMounts:
         - name: scripts
           mountPath: /scripts

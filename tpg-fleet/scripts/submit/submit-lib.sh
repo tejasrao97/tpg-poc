@@ -22,6 +22,11 @@
 # context). Plain numbered menus instead of arrow keys: TPG_PLAIN=1, or when the
 # terminal is not interactive.
 #
+# Lists (Round 23): every list input is bracketed, even with one value, [aks-tpg-poc-01] or
+# [a, b]; only all (and auto for components) stays bare. The prompts accept the plain form
+# (names separated by commas, one file path) and send the bracketed form (sl_bracket); a
+# single-file input is sent as [path]. The hub refuses anything else.
+#
 # Where the files come from (Round 15, D85): the tpg-fleet clone named by
 # TPG_FLEET_DIR, else the clone the tpg-*.sh script sits in (symbolic links are
 # followed, so a link in ~/bin works); a script copied elsewhere without
@@ -158,22 +163,25 @@ sl_type_text() {  # sl_type_text NAME -> "boolean", "number", "map (YAML or JSON
     map) printf 'map (YAML or JSON object)' ;;
     cron) printf 'cron schedule (5 fields: minute hour day month weekday, UTC)' ;;
     jsonMap) printf 'JSON map (a JSON object)' ;;
-    patchFile) printf 'file path (%s on this machine; its contents are sent in patchFiles)' "$desc" ;;
-    list|listOrAll|components|cidrList|fqdnList) printf 'list (%s)' "$desc" ;;
+    patchFile|caFile) printf 'list of one file path (%s; files of this machine are sent in patchFiles)' "$desc" ;;
+    list|listOrAll|components|cidrList|fqdnList|patchFileList|kindList) printf 'list (%s)' "$desc" ;;
     *) printf 'string: %s (%s)' "$disp" "$desc" ;;
   esac
 }
 
 sl_example() {  # sl_example NAME -> an example value
   case "$1" in
-    clusters) echo "aks-tpg-poc-01,aks-tpg-poc-02" ;;
-    instances) echo "orders-db,billing-db" ;;
+    clusters) echo "[aks-tpg-poc-01, aks-tpg-poc-02]" ;;
+    instances) echo "[orders-db, billing-db]" ;;
     clusterMap)
       case "$WF_TEMPLATE" in
         tpg-scale-instance) echo "{aks-tpg-poc-01: {maxReadReplicas: 4, instances: {orders-db: {replicas: 3}, billing-db: {replicas: 0}}}, aks-tpg-poc-02: {maxReadReplicas: 2}}" ;;
+        tpg-restore) echo "[{sourceClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {sourceBackupName: orders-db-full-20260914000000}}}}, targetClusterConfig: {aks-tpg-poc-01: {pg-orders: {orders-db: {pitrEnabled: false, confirm: orders-db}}}}}]" ;;
+        tpg-backup-expire) echo "{aks-tpg-poc-01: {instances: {orders-db: {backups: [orders-db-full-202609010100], includeDependents: true}, billing-db: {purgeBackups: true}}}}" ;;
         *) echo "{aks-tpg-poc-01: {instances: {orders-db: {postgresVersion: postgres-17.6, highAvailability: true}}}}" ;;
       esac ;;
     highAvailability) echo "true" ;;
+    backups) echo "[orders-db-full-202609010100, orders-db-incr-202609020100] (PostgresBackup names)" ;;
     operatorVersion) echo "v4.5.0" ;;
     postgresVersion) echo "postgres-17.6" ;;
     targetVersion) echo "v4.5.1 (component=operator) or postgres-17.9 (component=postgres)" ;;
@@ -195,44 +203,55 @@ sl_example() {  # sl_example NAME -> an example value
     memory) echo "4Gi" ;;
     exposure|readOnlyExposure) echo "internalLoadBalancer" ;;
     serviceAnnotations|readOnlyServiceAnnotations) echo "{service.beta.kubernetes.io/azure-dns-label-name: orders}" ;;
-    allowedSourceRanges|ingressFromCidrs) echo "10.20.0.0/16,192.168.10.0/24" ;;
+    allowedSourceRanges|ingressFromCidrs) echo "[10.20.0.0/16, 192.168.10.0/24]" ;;
     internalLoadBalancerSubnet) echo "apps-subnet" ;;
-    ingressFromNamespaces) echo "orders-app,reporting" ;;
+    ingressFromNamespaces) echo "[orders-app, reporting]" ;;
     ingressFromPodLabels) echo "{app: orders-api}" ;;
-    egressToCidrs) echo "10.30.0.0/24" ;;
-    egressToFqdns) echo "api.example.com,*.example.org" ;;
-    postgresPatchFilePath) echo "./orders-memory.yaml,/home/me/patches/orders-backup-location.yaml (files of this machine, absolute or relative, or repo:charts/tpg-instance/patches/<file>)" ;;
-    postgresValuesPatchFilePath) echo "./orders-backup.yaml (a file of this machine, or repo:charts/tpg-instance/patches/<file>)" ;;
-    operatorValuesPatchFilePath) echo "./operator-resources.yaml (a file of this machine, or repo:patches/operator/<file>)" ;;
-    postgresOverlayFilePath) echo "./orders-memory.yaml,/home/me/overlays/orders-backup-location.yaml (files of this machine, absolute or relative, or repo:charts/tpg-instance/overlays/<file>; one document per kind)" ;;
-    postgresValuesOverlayFilePath) echo "./orders-backup.yaml (a file of this machine, or repo:charts/tpg-instance/overlays/<file>)" ;;
-    operatorValuesOverlayFilePath) echo "./operator-resources.yaml (a file of this machine, or repo:overlays/operator/<file>)" ;;
-    clearKinds) echo "PostgresBackupLocation,postgresValues (or all)" ;;
-    backupCaBundleFile) echo "./azure-ca-bundle.pem (a PEM file of this machine, or repo:ca-bundles/<file>)" ;;
+    egressToCidrs) echo "[10.30.0.0/24]" ;;
+    egressToFqdns) echo "[api.example.com, *.example.org]" ;;
+    postgresPatchFilePath) echo "[./orders-memory.yaml, /home/me/patches/orders-backup-location.yaml] (files of this machine, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/patches/<file>)" ;;
+    postgresValuesPatchFilePath) echo "[./orders-backup.yaml] (a file of this machine, or repo:helm_artifacts/instance/tpg-instance/patches/<file>)" ;;
+    operatorValuesPatchFilePath) echo "[./operator-resources.yaml] (a file of this machine, or repo:helm_artifacts/operator/patches/<file>)" ;;
+    postgresOverlayFilePath) echo "[./orders-memory.yaml, /home/me/overlays/orders-backup-location.yaml] (files of this machine, absolute or relative, or repo:helm_artifacts/instance/tpg-instance/overlays/<file>; one document per kind)" ;;
+    postgresValuesOverlayFilePath) echo "[./orders-backup.yaml] (a file of this machine, or repo:helm_artifacts/instance/tpg-instance/overlays/<file>)" ;;
+    operatorValuesOverlayFilePath) echo "[./operator-resources.yaml] (a file of this machine, or repo:helm_artifacts/operator/overlays/<file>)" ;;
+    clearKinds) echo "[PostgresBackupLocation, postgresValues] (or all)" ;;
+    backupCaBundleFile) echo "[./azure-ca-bundle.pem] (a PEM file of this machine, or repo:ca-bundles/<file>)" ;;
     backupCaBundleVaultSecret) echo "azure-storage (Vault tpg/ca-bundles/<name>, key caBundle)" ;;
-    caBundleFile) echo "./azure-ca-bundle.pem (secretType ca-bundle; a PEM file of this machine)" ;;
+    caBundleFile) echo "[./azure-ca-bundle.pem] (secretType ca-bundle; a PEM file of this machine)" ;;
     secretName) echo "azure-storage (ca-bundle: tpg/ca-bundles/<name>; custom: tpg/custom/<name>)" ;;
     wrappingToken) echo "hvs.CAES... (tpg-aks-infra scripts/vault-secret.sh wrap <secretType> prints it; single use, 10 minutes)" ;;
     backupFullRetention) echo "4 (count) or 30 (days with backupFullRetentionType=time)" ;;
-    apps) echo '{"aks-tpg-poc-01": ["tpg-instances:orders-db", "tpg-operator"]}' ;;
-    confirm) echo "aks-tpg-poc-01 (the same names as the targets)" ;;
-    targetTime) echo "2026-09-15T08:30:00Z" ;;
-    lsn) echo "0/3000060" ;;
-    xid) echo "12345" ;;
-    backupName) echo "orders-db-full-20260915" ;;
-    sourceCluster|targetCluster) echo "aks-tpg-poc-01" ;;
-    instance|targetInstance) echo "orders-db" ;;
+    apps) echo '{"aks-tpg-poc-01": ["tpg-instances:orders-db", "tpg-instances:billing-db", "tpg-operator"]}' ;;
+    confirm) echo "[aks-tpg-poc-01] (the same names as the targets)" ;;
     maxParallel) echo "2" ;;
     *Seconds) echo "1800" ;;
-    components) echo "cert-manager,vso" ;;
+    components) echo "[cert-manager, vso] (or auto)" ;;
     toolsImage) echo "alpine/k8s:1.35.8" ;;
     *) local i; i="$(sl_idx "$1")" || return 0
        if [[ -n "${P_ENUM[$i]}" ]]; then echo "${P_ENUM[$i]%%,*}"; else echo "${P_DEF[$i]:-}"; fi ;;
   esac
 }
 
+sl_bracket() {  # sl_bracket NAME VALUE -> SL_BR: the value in the form the workflow takes (Round 23)
+  # A list input is bracketed, even with one value: plain names ("a, b" or "a") get the brackets,
+  # [a, b] and JSON stay as typed; the bare words all (listOrAll, kindList) and auto (components)
+  # stay bare. A single-file input is sent as [path]. Other types are left alone.
+  local i t v="$2"
+  SL_BR="$v"
+  i="$(sl_idx "$1")" || return 0
+  t="${P_TYPE[$i]}"
+  [[ -n "$v" && "$v" != "["* ]] || return 0
+  case "$t" in
+    list|listOrAll|components|cidrList|fqdnList|patchFileList|kindList)
+      case "$t:$v" in listOrAll:all|kindList:all|components:auto) return 0 ;; list:all) return 0 ;; esac   # list:all stays bare so the type check refuses it
+      SL_BR="[$(printf '%s' "$v" | sed -e 's/[[:space:]]*,[[:space:]]*/, /g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')]" ;;
+    patchFile|caFile) SL_BR="[${v}]" ;;
+  esac
+}
+
 sl_check() {  # sl_check NAME VALUE -> 0 when VALUE matches the input type (types.yaml pattern)
-  local i t pat
+  local i t pat flat
   i="$(sl_idx "$1")" || return 0
   t="${P_TYPE[$i]}"
   [[ -n "$2" ]] || return 0
@@ -243,7 +262,10 @@ sl_check() {  # sl_check NAME VALUE -> 0 when VALUE matches the input type (type
   pat="$(T="$t" yq -r '.types[strenv(T)].pattern // ""' "$SL_TYPES")"
   [[ -n "$pat" ]] || return 0
   if python3 -c 'import re, sys; sys.exit(0 if re.match(sys.argv[1], sys.argv[2], re.S) else 1)' "$pat" "$2"; then
-    if [[ "$t" == "list" ]] && [[ ",$(tr -d ' ' <<<"$2")," == *",all,"* ]]; then SL_WHY="all is not accepted here: list the names"; return 1; fi
+    if [[ "$2" == "["* && ( "$t" == "list" || "$t" == "listOrAll" ) ]]; then
+      flat="$(printf '%s' "$2" | tr -d "[]\"' ")"
+      if [[ ",${flat}," == *",all,"* ]]; then SL_WHY="has all inside the brackets: all stands alone, without brackets"; return 1; fi
+    fi
     return 0
   fi
   SL_WHY="is not $(T="$t" yq -r '.types[strenv(T)].describe // "valid"' "$SL_TYPES")"
@@ -305,6 +327,10 @@ sl_prompt() {
   [[ -z "${P_DESC[$i]}" ]] || sl_say "  ${P_DESC[$i]}"
   sl_say "  Type:    $(sl_type_text "$name")"
   sl_say "  Example: $(sl_example "$name")"
+  case "${P_TYPE[$i]}" in
+    list|listOrAll|components|cidrList|fqdnList|patchFileList|kindList|patchFile|caFile)
+      sl_say "  Lists are written in brackets; plain names or one path are accepted here and sent in brackets." ;;
+  esac
   [[ -z "$def" ]] || sl_say "  Default: ${def}"
   [[ "${P_SET[$i]}" != 1 ]] || sl_say "  Current: ${P_VAL[$i]}"
   while true; do
@@ -328,6 +354,7 @@ sl_prompt() {
       if [[ -n "$must" ]]; then sl_err "  ${name} is mandatory"; continue; fi
       sl_unset "$name"; return 0
     fi
+    sl_bracket "$name" "$v"; v="$SL_BR"
     SL_WHY=""
     if sl_check "$name" "$v"; then sl_setv "$name" "$v"; return 0; fi
     sl_err "  '${v}' ${SL_WHY}"
@@ -356,6 +383,19 @@ sl_map_validate() {  # sl_map_validate JSON -> 0 when clustermap.py accepts it f
   sl_registered > "$SL_TMP/registered"
   sl_flags_json > "$SL_TMP/flags.json"
   local reg=(); [[ -s "$SL_TMP/registered" ]] && reg=(--registered "$SL_TMP/registered")
+  if [[ "$WF_TEMPLATE" == tpg-restore ]]; then   # a list of pairs (Round 23): clustermap.py restore
+    # the normalized pairs stay in $SL_TMP/pairs.json (the plan of each pair is printed from them); an in-place pair needs its
+    # confirm when the run is a real restore (dryRun false), as the validate step of the workflow checks
+    local opt=(); [[ "$(sl_val dryRun)" != false ]] || opt=(--confirm-required)
+    rm -f "$SL_TMP/pairs.json"
+    if out="$(python3 "${SL_ROOT}/workflows/scripts/clustermap.py" restore --map "$SL_TMP/map.json" --keys "$SL_TMP/keys.json" \
+        ${reg[@]+"${reg[@]}"} --out "$SL_TMP/pairs.json" ${opt[@]+"${opt[@]}"})"; then
+      return 0
+    fi
+    sl_err "clusterMap is not valid for ${WF_TEMPLATE}:"
+    printf '%s\n' "$out" | sed 's/^/  - /' >&2
+    return 1
+  fi
   if out="$(python3 "${SL_ROOT}/workflows/scripts/clustermap.py" validate --workflow "$(sl_wf_id "$WF_TEMPLATE")" \
       --map "$SL_TMP/map.json" --keys "$SL_TMP/keys.json" ${reg[@]+"${reg[@]}"} --flags "$SL_TMP/flags.json")"; then
     return 0
@@ -367,7 +407,7 @@ sl_map_validate() {  # sl_map_validate JSON -> 0 when clustermap.py accepts it f
 sl_key_prompt() {  # sl_key_prompt LEVEL KEY -> SL_LINE (the value; lists and maps as JSON)
   local lvl="$1" k="$2" t vals req
   t="$(L="$lvl" K="$k" yq -r '.[strenv(L)][strenv(K)].type' "$SL_KEYS")"
-  SL_JSON=0; case "$t" in stringMap|nameList|cidrList|fqdnList) SL_JSON=1 ;; esac
+  SL_JSON=0; case "$t" in stringMap|nameList|k8sNameList|cidrList|fqdnList|patchFileList|kindList|patchFile|caFile) SL_JSON=1 ;; esac
   vals="$(L="$lvl" K="$k" yq -r '.[strenv(L)][strenv(K)].values // [] | join(",")' "$SL_KEYS")"
   req="$(L="$lvl" K="$k" W="$(sl_wf_id "$WF_TEMPLATE")" yq -r '.[strenv(L)][strenv(K)].workflows[strenv(W)] // ""' "$SL_KEYS")"
   sl_say "  ${C_B}${k}${C_0} (${req}; type ${t}$( [[ -n "$vals" ]] && printf ': %s' "${vals//,/, }"))  example: $(sl_example "$k")"
@@ -377,9 +417,16 @@ sl_key_prompt() {  # sl_key_prompt LEVEL KEY -> SL_LINE (the value; lists and ma
       if [[ "$t" == boolean ]]; then choices=(true false); else IFS=',' read -r -a choices <<<"$vals"; fi
       sl_menu "  ${k}:" "${choices[@]}"; SL_LINE="${choices[$SL_PICK]}" ;;
     stringMap) sl_read_map "$k" ;;
-    nameList|cidrList|fqdnList)
-      sl_read "  ${k} (comma-separated): "
-      SL_LINE="$(jq -cn --arg v "$SL_LINE" '$v | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')" ;;
+    nameList|k8sNameList|cidrList|fqdnList|patchFileList|kindList)
+      sl_read "  ${k} (names separated by commas, or [a, b]; sent as a YAML sequence): "
+      # a clusterMap list is a sequence, also with one value; a kindList takes the bare word all
+      SL_LINE="$(jq -cn --arg v "$SL_LINE" --arg t "$t" '($v | gsub("^\\s*\\[|\\]\\s*$"; "") | split(",") | map(gsub("^\\s+|\\s+$"; "") | gsub("^[\"\u0027]|[\"\u0027]$"; "")) | map(select(length > 0))) as $l
+        | if $t == "kindList" and $l == ["all"] then "all" else $l end')"
+      [[ "$SL_LINE" != "[]" ]] || SL_LINE="" ;;
+    patchFile|caFile)
+      sl_read "  ${k} (one file; sent as a one-element sequence): "
+      SL_LINE="$(jq -cn --arg v "$SL_LINE" '($v | gsub("^\\s*\\[|\\]\\s*$"; "") | gsub("^\\s+|\\s+$"; "")) as $f | if $f == "" then [] else [$f] end')"
+      [[ "$SL_LINE" != "[]" ]] || SL_LINE="" ;;
     *) sl_read "  ${k}: " ;;
   esac
 }
@@ -456,6 +503,10 @@ sl_clustermap() {  # -> SL_LINE, 1 to ask again
 # ------------------------------------------------------------------ flow
 sl_targets() {  # the target inputs: clusterMap or the lists named in TARGET_LISTS
   local l
+  if [[ "${TARGETS:-lists}" == "map" ]]; then   # clusterMap only (tpg-backup-expire)
+    sl_prompt clusterMap mandatory
+    SL_MAP=1; return 0
+  fi
   if sl_has clusterMap && [[ "${TARGETS:-lists}" == "map-or-lists" ]]; then
     sl_menu "Targets of ${WF_TEMPLATE}:" "clusterMap: each cluster with its own instances and values" \
       "Lists: ${TARGET_LISTS:-} (every instance on every listed cluster)"

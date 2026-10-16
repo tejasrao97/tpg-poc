@@ -7,9 +7,9 @@
 # Two sources (multi-source Application):
 #   1. the operator chart from the Broadcom OCI registry, at the declared version
 #   2. the fleet repository as the reference "fleet", so the chart can take a value
-#      file from it: $fleet/overlays/operator/clusters/<cluster>.yaml (the copy of the
+#      file from it: $fleet/helm_artifacts/operator/overlays/clusters/<cluster>.yaml (the copy of the
 #      cluster's operator values overlay that tpg-day0 writes, Round 22), then
-#      $fleet/patches/operator/clusters/<cluster>.yaml (the copy of the cluster's
+#      $fleet/helm_artifacts/operator/patches/clusters/<cluster>.yaml (the copy of the cluster's
 #      current operator values patch that tpg-patch writes, Round 14, D78); the
 #      later file wins. Either is missing when the cluster has none, hence
 #      ignoreMissingValueFiles. The
@@ -77,8 +77,8 @@ spec:
           helm:
             ignoreMissingValueFiles: true
             valueFiles:
-              - {{ printf "$fleet/overlays/operator/clusters/%s.yaml" .name | quote }}
-              - {{ printf "$fleet/patches/operator/clusters/%s.yaml" .name | quote }}
+              - {{ printf "$fleet/helm_artifacts/operator/overlays/clusters/%s.yaml" .name | quote }}
+              - {{ printf "$fleet/helm_artifacts/operator/patches/clusters/%s.yaml" .name | quote }}
         - repoURL: https://github.com/<org>/tpg-fleet.git
           targetRevision: main
           ref: fleet

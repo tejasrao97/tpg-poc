@@ -1,11 +1,19 @@
 # Cluster defaults shared by every target cluster.
 #
-# The tpg-instances ApplicationSet passes this file to charts/tpg-instance as
+# The tpg-instances ApplicationSet passes this file to helm_artifacts/instance/tpg-instance as
 # the first value file; the workflows read it for cluster settings. Override
 # any key for one cluster under clusters.<name> in clusters/fleet.yaml.
 cluster:
   # Upper bound for tpg-scale-instance (read replicas per instance)
   maxReadReplicas: 3
+  # Round 23: may tpg-restore overwrite an instance of this cluster in place (the target of a pair is
+  # the source instance itself)? false refuses it however the pair is
+  # confirmed; set true under clusters.<name>.cluster in clusters/fleet.yaml for the clusters where an
+  # in-place restore is wanted. Read on the hub by the validate step of tpg-restore, which refuses the
+  # whole run (IN_PLACE_NOT_ALLOWED) when a pair restores in place on a cluster without it; not rendered. The pair still needs
+  # confirm (the instance name) for a real restore (dryRun=false). Restoring into another instance or
+  # namespace is not in place and needs no flag.
+  allowInPlaceRestore: false
 
 backup:
   # Empty: pg-backups-<cluster> (the container Terraform creates per target)
@@ -21,6 +29,9 @@ backup:
   # storage account must accept HTTP: Terraform backup_storage_https_only =
   # false), true uses HTTPS. Override per cluster or per instance under backup in
   # fleet.yaml, or with the tpg-day0 and tpg-create-instance input backupEnableSSL.
+  # Those workflows write the value per instance (false unless the input or the
+  # clusterMap key says true), so true here does not reach the instances they
+  # create: set the input or the key (Round 23).
   # With true, the workflows also write backup.caBundle (the storage account's
   # root CAs from tpg-settings backupCaBundle); the chart refuses true without it.
   enableSSL: false

@@ -1,0 +1,171 @@
+# Day 2: expire backups of Postgres instances (Round 23). clusterMap only: per instance
+# backups: [..] (PostgresBackup names) or purgeBackups: true (every backup of the instance),
+# optional includeDependents: true (needed for a backup that has dependent differential or
+# incremental backups; otherwise the instance is BLOCKED and the dependents are listed).
+# A backup is expired through spec.expire=true of its PostgresBackup (the operator runs
+# pgBackRest expire). Blobs are never deleted here (purgeBackups of tpg-delete-instance and
+# tpg-delete-apps deletes them). dryRun=true (default) records the plan and changes nothing;
+# dryRun=false needs confirm = the cluster names of clusterMap.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tpg-backup-expire
+  namespace: argo
+  annotations:
+    workflows.argoproj.io/description: >-
+      Day 2: expire PostgresBackups (clusterMap: backups [..] or purgeBackups true per instance,
+      includeDependents for a backup with dependents). dryRun=true (default) records the plan;
+      dryRun=false needs confirm. The blobs of the backup repository are not deleted.
+spec:
+  serviceAccountName: tpg-workflow
+  # Vault Agent (injector on the hub) renders tpg/shared/broadcom-registry,
+  # github-push and backup-storage into /vault/secrets before each step starts
+  # (ConfigMap tpg-vault-agent, workflows/vault-agent/config-init.hcl).
+  # Steps that need no credentials set agent-inject to "false".
+  podMetadata:
+    annotations:
+      vault.hashicorp.com/agent-inject: "true"
+      vault.hashicorp.com/agent-pre-populate-only: "true"
+      vault.hashicorp.com/agent-init-first: "true"
+      vault.hashicorp.com/agent-configmap: tpg-vault-agent
+      vault.hashicorp.com/tls-secret: vault-ca
+  entrypoint: main
+  onExit: exit-handler
+  parallelism: 5
+  arguments:
+    parameters:
+    - name: clusterMap
+      description: >-
+        Map (YAML or JSON), mandatory: cluster -> {instances: {instance -> {backups: [..] or purgeBackups: true,
+        includeDependents}}}. backups lists PostgresBackup names, in brackets even with one:
+        {aks-tpg-poc-01: {instances: {orders-db: {backups: [orders-db-full-202609010100], includeDependents: true}}}}
+      value: ""
+    - name: dryRun
+      description: "true (default): record the plan (what would be expired, what is BLOCKED) and change nothing; false: expire (needs confirm)"
+      value: "true"
+      enum: ["true", "false"]
+    - name: confirm
+      description: "List in brackets: the cluster names of clusterMap, for example [aks-tpg-poc-01]; mandatory with dryRun=false"
+      value: ""
+    - name: timeoutSeconds
+      description: "How long to wait for the operator's answer to the expire of one backup"
+      value: "600"
+    - name: toolsImage
+      value: alpine/k8s:1.35.8
+  volumes:
+    - name: scripts
+      configMap:
+        name: tpg-scripts
+        defaultMode: 0755
+  templates:
+  - name: main
+    steps:
+    - - name: validate
+        template: validate
+    - - name: init
+        templateRef:
+          name: tpg-lib
+          template: init-run
+    - - name: discover
+        templateRef:
+          name: tpg-lib
+          template: discover
+        arguments:
+          parameters:
+            - name: clusters
+              value: "{{steps.validate.outputs.parameters.selection}}"
+            - name: filter
+              value: pairs
+            - name: instances
+              value: ""
+            - name: clusterMap
+              value: "{{workflow.parameters.clusterMap}}"
+    - - name: expire
+        template: expire-instance
+        arguments:
+          parameters:
+            - name: cluster
+              value: "{{item.cluster}}"
+            - name: instance
+              value: "{{item.instance}}"
+        withParam: "{{steps.discover.outputs.parameters.instanceItems}}"
+    # an instance that is BLOCKED (HAS_DEPENDENTS) ends the run Failed after the others ran
+    - - name: gate
+        templateRef:
+          name: tpg-lib
+          template: blocked-gate
+  - name: validate
+    metadata:
+      annotations:
+        vault.hashicorp.com/agent-inject: "false"
+    outputs:
+      parameters:
+        - name: selection
+          valueFrom:
+            path: /tmp/selection
+            default: ""
+    container:
+      image: "{{workflow.parameters.toolsImage}}"
+      command: [bash, /scripts/validate-params.sh, backup-expire]
+      env:
+        - {name: P_CLUSTER_MAP, value: "{{workflow.parameters.clusterMap}}"}
+        - {name: P_DRY_RUN, value: "{{workflow.parameters.dryRun}}"}
+        - {name: P_CONFIRM, value: "{{workflow.parameters.confirm}}"}
+        - {name: P_TIMEOUT, value: "{{workflow.parameters.timeoutSeconds}}"}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+  - name: expire-instance
+    inputs:
+      parameters:
+        - name: cluster
+        - name: instance
+    # the same lock as tpg-delete-instance: no expire while the instance is being deleted
+    synchronization:
+      mutexes:
+        - name: "tpg-instance-{{inputs.parameters.cluster}}-{{inputs.parameters.instance}}"
+    outputs:
+      parameters:
+        - name: result
+          valueFrom:
+            path: /tmp/result
+            default: UNKNOWN
+    metrics:
+      prometheus:
+        - name: tpg_backup_expire_result
+          help: "Backup expire result per instance"
+          labels:
+            - key: cluster
+              value: "{{inputs.parameters.cluster}}"
+            - key: instance_name
+              value: "{{inputs.parameters.instance}}"
+            - key: dry_run
+              value: "{{workflow.parameters.dryRun}}"
+            - key: result
+              value: "{{outputs.parameters.result}}"
+          counter:
+            value: "1"
+    container:
+      image: "{{workflow.parameters.toolsImage}}"
+      command: [bash, /scripts/backup-expire.sh]
+      args:
+        - "{{workflow.name}}"
+        - "{{inputs.parameters.cluster}}"
+        - "{{inputs.parameters.instance}}"
+        - "{{workflow.parameters.dryRun}}"
+        - "{{workflow.parameters.timeoutSeconds}}"
+      env:
+        - {name: P_CLUSTER_MAP, value: "{{workflow.parameters.clusterMap}}"}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+  - name: exit-handler
+    steps:
+    - - name: report
+        templateRef:
+          name: tpg-lib
+          template: report
+        arguments:
+          parameters:
+            - name: mode
+              value: instance

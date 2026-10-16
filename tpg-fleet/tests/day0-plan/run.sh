@@ -14,6 +14,9 @@
 #   discover.sh       an instance or cluster the plan blocked is left out; the
 #                     backup scheduler and FerretDB as the chart sees them
 #                     (values patch files included, D70, D71)
+#   Round 23 review:  day0-precheck.sh blocks NAMESPACE_SECRET_CONFLICT (a regsecret or
+#                     backup-storage Secret in the requested namespace that the fleet does
+#                     not manage)
 #   Round 13 (D69 to D72): highAvailability=true with readReplicas 0 and read-only
 #                     FerretDB proxies without HA are refused; backupSchedule=operator
 #                     and ferret write their keys; FERRET_VERSION_UNSUPPORTED,
@@ -45,9 +48,10 @@ BIG="$(cat "$TMP"/ca[1-8].pem)"
 
 REPO="$TMP/repo"
 mkdir -p "$REPO/clusters"
-cp -r "$ROOT/charts" "$REPO/"
+mkdir -p "$REPO/helm_artifacts"
+cp -r "$ROOT/helm_artifacts/instance" "$REPO/helm_artifacts/"
 cp -r "$ROOT/clusters/_template" "$REPO/clusters/"
-P="$REPO/charts/tpg-instance/patches"
+P="$REPO/helm_artifacts/instance/tpg-instance/patches"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageClassName: premium-fast\n' > "$P/sc.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  highAvailability: {enabled: false}\n' > "$P/ha.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: PostgresBackupLocation\nspec:\n  retentionPolicy:\n    fullRetention: {number: 5}\n' > "$P/loc.yaml"
@@ -145,13 +149,51 @@ tk() {
       printf ']}' ;;
     *"get postgresversion"*) return 0 ;;
     *" get postgres "*)
-      local ns="\${2#pg-}"
-      if [[ " \${S_RUNNING:-} " == *" \$ns "* ]]; then
+      # -n NAMESPACE get postgres INSTANCE: a running instance is in pg-<instance>, or in the
+      # namespace S_NSMAP gives it ("name=namespace" words, Round 23)
+      local ns="\$5" want m
+      want="pg-\$ns"; for m in \${S_NSMAP:-}; do [[ "\${m%%=*}" == "\$ns" ]] && want="\${m#*=}"; done
+      if [[ " \${S_RUNNING:-} " == *" \$ns "* && "\$2" == "\$want" ]]; then
         case "\$*" in *currentState*) printf 'Running' ;; *jsonpath*) printf 'postgres-17.6' ;; esac
         return 0
       fi
       if [[ " \${S_API_ERR:-} " == *" \$ns "* ]]; then echo "Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout" >&2; return 1; fi
       echo "Error from server (NotFound): postgres.sql.tanzu.vmware.com \"\$ns\" not found" >&2
+      return 1 ;;
+    *" get secret "*|*" get vaultstaticsecret "*)
+      # -n NAMESPACE get secret|vaultstaticsecret NAME -o jsonpath={.metadata}: the metadata object only (the precheck never reads
+      # the data). S_SECRETS lists "namespace/name=kind" words (Round 23 review) for the Secret:
+      #   foreign (nobody manages it), tracked (Argo CD tracking annotation of a fleet Application), other-app (tracking
+      #   annotation of another Argo CD Application), vss-other (owned by a VaultStaticSecret of another name), forbidden (the
+      #   API answers Forbidden), vss* (owned by the VaultStaticSecret of its name, and that VaultStaticSecret is
+      #   vss: tracked by a fleet Application, vss-untracked: applied by somebody else, vss-gone: NotFound, vss-forbidden: Forbidden)
+      local w k sn="\$5" sns="\$2" what=secret
+      [[ "\$*" != *" get vaultstaticsecret "* ]] || what=vss
+      for w in \${S_SECRETS:-}; do
+        [[ "\${w%%=*}" == "\$sns/\$sn" ]] || continue
+        k="\${w#*=}"
+        if [[ "\$what" == vss ]]; then
+          case "\$k" in
+            vss) echo '{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"tpg-c1-app-a:secrets.hashicorp.com/VaultStaticSecret:'"\$sns"'/'"\$sn"'"}}' ;;
+            vss-untracked) echo '{"name":"'"\$sn"'"}' ;;
+            vss-forbidden) echo "Error from server (Forbidden): vaultstaticsecrets.secrets.hashicorp.com \"\$sn\" is forbidden: User cannot get resource" >&2; return 1 ;;
+            *) break ;;
+          esac
+          return 0
+        fi
+        case "\$k" in
+          foreign) echo '{"name":"'"\$sn"'"}' ;;
+          vss|vss-untracked|vss-forbidden) echo '{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"'"\$sn"'"}]}' ;;
+          tracked) echo '{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"tpg-c1-app-a:secrets.hashicorp.com/VaultStaticSecret:'"\$sns"'/'"\$sn"'"}}' ;;
+          other-app) echo '{"name":"'"\$sn"'","annotations":{"argocd.argoproj.io/tracking-id":"team-app:/Secret:'"\$sns"'/'"\$sn"'"}}' ;;
+          vss-other) echo '{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"somebody-elses"}]}' ;;
+          vss-gone) echo '{"name":"'"\$sn"'","ownerReferences":[{"apiVersion":"secrets.hashicorp.com/v1beta1","kind":"VaultStaticSecret","name":"'"\$sn"'"}]}' ;;
+          forbidden) echo "Error from server (Forbidden): secrets \"\$sn\" is forbidden: User \"system:serviceaccount:argo:wf\" cannot get resource \"secrets\" in namespace \"\$sns\"" >&2; return 1 ;;
+        esac
+        return 0
+      done
+      if [[ "\$what" == vss ]]; then echo "Error from server (NotFound): vaultstaticsecrets.secrets.hashicorp.com \"\$sn\" not found" >&2
+      else echo "Error from server (NotFound): secrets \"\$sn\" not found" >&2; fi
       return 1 ;;
     *"get nodes -l tpg.fleet/pool=postgres -o json"*)
       printf '{"items":['; local z first=1
@@ -175,7 +217,7 @@ plan_json() { cat "$TMP/planned.json"; }
 # ---- 1 Day 0 re-run adding billing-db on a cluster the fleet already runs
 reset
 export S_OPERATOR=ours S_TRACKED=yes S_CRDS=yes S_RUNNING="orders-db" S_APPRES=yes
-env P_CLUSTERS=c1 P_INSTANCES=orders-db,billing-db P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 \
+env P_CLUSTERS='[c1]' P_INSTANCES='[orders-db, billing-db]' P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 \
   P_READ_REPLICAS=1 bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 [[ ! -f "$TMP/pushed.yaml" ]] && ok "1 the plan pushes nothing" || bad "1 plan pushed" "$(cat "$TMP/out")"
 cp /tmp/fleet.json "$TMP/planned.json"; cp /tmp/fleet-base.json "$TMP/base.json"
@@ -268,12 +310,12 @@ rec "precheck.c1|BLOCKED" | grep -q "no spec.storage.azure.caBundle" && ok "6 en
 # ---- 7 enableSSL: the CA bundle from tpg-settings, or CA_BUNDLE_MISSING
 reset
 S_OPERATOR=ours S_RUNNING="orders-db" S_CA="" \
-  env P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
+  env P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.git|FAILED|INVALID_INPUT" | grep -q CA_BUNDLE_MISSING && ok "7 enableSSL=true without a bundle: CA_BUNDLE_MISSING" || bad "7 missing" "$(cat "$TMP/records")"
 reset
 S_OPERATOR=ours S_RUNNING="orders-db" S_CA="$CA1" \
-  env P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
+  env P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 jq -e --arg ph "$CA_PH" '.clusters.c1.instances["new-db"].backup | .enableSSL == true and .caBundle == $ph' /tmp/fleet.json >/dev/null \
   && rec "ca.${CA_PH:4:12}|SET" | grep -q "BEGIN CERTIFICATE" \
@@ -298,8 +340,8 @@ S_CA="" bash "$TMP/fleet-commit.sh" wf "$(cat "$TMP/planned.json")" "$(cat "$TMP
 reset
 PF_CA2="$(jq -cn --arg b "$(base64 < "$TMP/ca2.pem" | tr -d '\n')" '{"ca2.pem": $b}')"
 S_OPERATOR=ours S_RUNNING="orders-db" S_CA="$CA1" \
-  env P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
-  P_BACKUP_CA_FILE=ca2.pem P_PATCH_FILES="$PF_CA2" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+  env P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
+  P_BACKUP_CA_FILE='[ca2.pem]' P_PATCH_FILES="$PF_CA2" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 h2="$(printf '%s' "$(cat "$TMP/ca2.pem")" | sha256sum | cut -c1-12)"
 jq -e --arg ph "@ca:${h2}@" '.clusters.c1.instances["new-db"].backup.caBundle == $ph' /tmp/fleet.json >/dev/null \
   && rec "ca.${h2}|SET" | grep -q . && grep -q "CA_BUNDLE c1/new-db from file ca2.pem" "$TMP/out" \
@@ -307,17 +349,17 @@ jq -e --arg ph "@ca:${h2}@" '.clusters.c1.instances["new-db"].backup.caBundle ==
 reset
 printf 'not a certificate\n' > "$TMP/junk.pem"
 S_OPERATOR=ours S_RUNNING="orders-db" S_CA="$CA1" \
-  env P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
-  P_BACKUP_CA_FILE=junk.pem P_PATCH_FILES="$(jq -cn --arg b "$(base64 < "$TMP/junk.pem" | tr -d '\n')" '{"junk.pem": $b}')" \
+  env P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
+  P_BACKUP_CA_FILE='[junk.pem]' P_PATCH_FILES="$(jq -cn --arg b "$(base64 < "$TMP/junk.pem" | tr -d '\n')" '{"junk.pem": $b}')" \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.git|FAILED|INVALID_INPUT" | grep -q "the CA bundle (file junk.pem): no PEM certificate" \
   && ok "7 3.i: a file that holds no certificate is refused" || bad "7 junk" "$(cat "$TMP/records")"
 # the plan stays small with many enableSSL instances (one container argument is limited to 128 KiB)
 reset
 BIG="$BIG" yq -i '.clusters.c1.instances["orders-db"].backup = {"enableSSL": true, "caBundle": strenv(BIG)}' "$TMP/fleet.yaml"
-many="$(seq -s, -f 'db-%02g' 1 20)"
+many="[$(seq -s, -f 'db-%02g' 1 20 | sed 's/,/, /g')]"
 S_OPERATOR=ours S_RUNNING="orders-db" S_CA="$BIG" \
-  env P_CLUSTERS=c1 P_INSTANCES="$many" P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
+  env P_CLUSTERS='[c1]' P_INSTANCES="$many" P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_ENABLE_SSL=true \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 [[ "$(jq '[.clusters.c1.instances[] | select(.backup.enableSSL == true)] | length' /tmp/fleet.json)" -eq 21 ]] \
   && [[ "$(wc -c < /tmp/fleet.json)" -lt 16384 && "$(wc -c < /tmp/fleet-base.json)" -lt 16384 ]] \
@@ -327,9 +369,9 @@ S_OPERATOR=ours S_RUNNING="orders-db" S_CA="$BIG" \
 # ---- 8 exposure and network policy inputs (lists and maps normalized)
 reset
 S_OPERATOR=ours S_RUNNING="orders-db" S_ACNS=true \
-  env P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 \
+  env P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 \
   P_EXPOSURE=loadBalancer P_SERVICE_ANNOTATIONS='service.beta.kubernetes.io/azure-dns-label-name: orders' \
-  P_NETWORK_POLICY=baseline P_INGRESS_FROM_NAMESPACES='app, reporting' P_INGRESS_FROM_CIDRS=10.1.0.0/16 \
+  P_NETWORK_POLICY=baseline P_INGRESS_FROM_NAMESPACES='[app, reporting]' P_INGRESS_FROM_CIDRS='[10.1.0.0/16]' \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 jq -e '.clusters.c1.instances["new-db"] | .instance.exposure == "loadBalancer"
    and .instance.serviceAnnotations["service.beta.kubernetes.io/azure-dns-label-name"] == "orders"
@@ -339,38 +381,38 @@ jq -e '.clusters.c1.instances["new-db"] | .instance.exposure == "loadBalancer"
 rec "warning.c1.new-db.exposure|WARNING|EXPOSURE_UNRESTRICTED" | grep -q . \
   && ok "8 loadBalancer without allowedSourceRanges: warning EXPOSURE_UNRESTRICTED" || bad "8 warning" "$(cat "$TMP/records")"
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_OPERATOR_VERSION=v4.5.0 \
-  P_POSTGRES_VERSION=postgres-17.6 P_ALLOWED_SOURCE_RANGES=10.0.0.1/8 bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_OPERATOR_VERSION=v4.5.0 \
+  P_POSTGRES_VERSION=postgres-17.6 P_ALLOWED_SOURCE_RANGES='[10.0.0.1/8]' bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.git|FAILED|INVALID_INPUT" | grep -q "must be a CIDR" && ok "8 a CIDR with host bits is refused" || bad "8 cidr" "$(cat "$TMP/records")"
 
 # ---- 9 tpg-create-instance: operator required, idempotent, patch creation rules
 reset
-S_OPERATOR=none S_RUNNING="" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
+S_OPERATOR=none S_RUNNING="" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "block.c1|BLOCKED|OPERATOR_NOT_INSTALLED" | grep -q . && ok "9 no operator on the cluster: OPERATOR_NOT_INSTALLED" || bad "9 operator" "$(cat "$TMP/records") $(cat "$TMP/out")"
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=orders-db P_HA=true P_READ_REPLICAS=1 \
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_HA=true P_READ_REPLICAS=1 \
   P_POSTGRES_VERSION=postgres-17.6 bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.c1.orders-db|SUCCEEDED|ALREADY_EXISTS" | grep -q . && ok "9 a running instance with the same values: ALREADY_EXISTS" || bad "9 exists" "$(cat "$TMP/records") $(cat "$TMP/out")"
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=orders-db P_HA=true P_READ_REPLICAS=2 \
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_HA=true P_READ_REPLICAS=2 \
   P_POSTGRES_VERSION=postgres-17.6 bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.c1.orders-db|BLOCKED|INSTANCE_EXISTS" | grep -q "tpg-patch, tpg-scale-instance or tpg-upgrade" \
   && jq -e '.clusters.c1.instances["orders-db"].instance.highAvailability.readReplicas == 1' /tmp/fleet.json >/dev/null \
   && ok "9 a running instance with other values: INSTANCE_EXISTS, its entry unchanged" || bad "9 differs" "$(cat "$TMP/records")"
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=orders-db P_HA=true P_READ_REPLICAS=1 \
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_HA=true P_READ_REPLICAS=1 \
   P_POSTGRES_VERSION=postgres-17.6 P_EXPOSURE=loadBalancer bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.c1.orders-db|BLOCKED|INSTANCE_EXISTS" | grep -q . && ! rec "EXPOSURE_UNRESTRICTED" | grep -q . \
   && ok "9 no exposure warning for an entry that is put back (INSTANCE_EXISTS)" || bad "9 warning on revert" "$(cat "$TMP/records")"
 # Round 14: the patch files come from the submitting machine (patchFiles); values
-# files are stored as charts/tpg-instance/overlays/<name>-<uid>.yaml, postgres
+# files are stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml, postgres
 # patches combined per instance as <instance>-postgres-<hash>.yaml (Round 15, D81)
 pf() { jq -cn --arg a "$1" --arg b "$(base64 < "$P/$2" | tr -d '\n')" '{($a): $b}'; }
 PF_SC="$(pf ./sc.yaml sc.yaml)"; PF_VALS="$(pf vals.yaml vals.yaml)"; PF_HA="$(pf ha.yaml ha.yaml)"; PF_LOC="$(pf loc.yaml loc.yaml)"
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
-  P_POSTGRES_OVERLAY_FILES=./sc.yaml P_VALUES_OVERLAY_FILES=vals.yaml P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_VALS" '$a + $b')" \
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
+  P_POSTGRES_OVERLAY_FILES='[./sc.yaml]' P_VALUES_OVERLAY_FILES='[vals.yaml]' P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_VALS" '$a + $b')" \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 jq -e '.clusters.c1.instances["new-db"].overlays | (.postgres.current | test("^overlays/new-db-postgres-[0-9a-f]{5}\\.yaml$"))
        and (.postgresValues.current | test("^overlays/vals-[a-z0-9]{5}\\.yaml$")) and (has("values") | not)
@@ -378,52 +420,96 @@ jq -e '.clusters.c1.instances["new-db"].overlays | (.postgres.current | test("^o
   && ok "9 creation overlays are stored and recorded as current (postgres combined per instance; storage class allowed at creation)" \
   || bad "9 patches" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
 stored_sc="$(jq -r '.clusters.c1.instances["new-db"].overlays.postgres.current' /tmp/fleet.json)"
-[[ "$(yq ea -o=json -I=0 '[.]' "$TMP/work/repo/charts/tpg-instance/$stored_sc")" == "$(yq ea -o=json -I=0 '[.]' "$P/sc.yaml")" ]] \
-  && rec "patch.names|SET" | grep -q '"vals.yaml":"charts/tpg-instance/overlays/vals-' \
-  && rec "patch.files|SET" | grep -q "charts/tpg-instance/${stored_sc}" \
+[[ "$(yq ea -o=json -I=0 '[.]' "$TMP/work/repo/helm_artifacts/instance/tpg-instance/$stored_sc")" == "$(yq ea -o=json -I=0 '[.]' "$P/sc.yaml")" ]] \
+  && rec "patch.names|SET" | grep -q '"vals.yaml":"helm_artifacts/instance/tpg-instance/overlays/vals-' \
+  && rec "patch.files|SET" | grep -q "helm_artifacts/instance/tpg-instance/${stored_sc}" \
   && ok "9 the stored files hold the received documents; the run record patch.files carries them to the later steps" || bad "9 stored" "$(cat "$TMP/records")"
 # fleet-commit writes the stored files the written entries reference, and commits them
 cp /tmp/fleet.json "$TMP/planned.json"; cp /tmp/fleet-base.json "$TMP/base.json"
 echo 'precheck.c1|PASSED||' >> "$TMP/records"
 P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_VALS" '$a + $b')" \
   bash "$TMP/fleet-commit.sh" wf "$(cat "$TMP/planned.json")" "$(cat "$TMP/base.json")" > "$TMP/out" 2>&1 || true
-grep -qx "charts/tpg-instance/${stored_sc}" "$TMP/pushed-files" && grep -qx "clusters/fleet.yaml" "$TMP/pushed-files" \
-  && cmp -s "$TMP/work/repo/charts/tpg-instance/${stored_sc}" "$P/sc.yaml" \
+grep -qx "helm_artifacts/instance/tpg-instance/${stored_sc}" "$TMP/pushed-files" && grep -qx "clusters/fleet.yaml" "$TMP/pushed-files" \
+  && cmp -s "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_sc}" "$P/sc.yaml" \
   && ok "9 fleet-commit commits clusters/fleet.yaml with the stored overlay files" || bad "9 commit files" "$(cat "$TMP/pushed-files" 2>/dev/null) $(cat "$TMP/out")"
 # a repeated create with the same file keeps the current file: ALREADY_EXISTS
 yq -P '.' "$TMP/planned.json" > "$TMP/fleet.yaml"
-cp "$TMP/work/repo/charts/tpg-instance/${stored_sc}" "$P/"; stored_vals="$(yq -r '.clusters.c1.instances["new-db"].overlays.postgresValues.current' "$TMP/fleet.yaml")"
-cp "$TMP/work/repo/charts/tpg-instance/${stored_vals}" "$P/"
+cp "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_sc}" "$P/"; stored_vals="$(yq -r '.clusters.c1.instances["new-db"].overlays.postgresValues.current' "$TMP/fleet.yaml")"
+cp "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_vals}" "$P/"
+# the remote holds what fleet-commit pushed: both stored files
+cp "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_sc}" "$TMP/work/repo/helm_artifacts/instance/tpg-instance/${stored_vals}" "$REPO/helm_artifacts/instance/tpg-instance/overlays/"
 rm -rf "$TMP/work"; : > "$TMP/records"
-S_OPERATOR=ours S_RUNNING="orders-db new-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
-  P_POSTGRES_OVERLAY_FILES=./sc.yaml P_VALUES_OVERLAY_FILES=vals.yaml P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_VALS" '$a + $b')" \
+S_OPERATOR=ours S_RUNNING="orders-db new-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
+  P_POSTGRES_OVERLAY_FILES='[./sc.yaml]' P_VALUES_OVERLAY_FILES='[vals.yaml]' P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_VALS" '$a + $b')" \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.c1.new-db|SUCCEEDED|ALREADY_EXISTS" | grep -q . \
   && jq -e --arg s "$stored_sc" '.clusters.c1.instances["new-db"].overlays.postgres.current == $s' /tmp/fleet.json >/dev/null \
   && ok "9 the same file again: the current stored file is kept, ALREADY_EXISTS" || bad "9 idempotent" "$(cat "$TMP/records") $(jq -c '.clusters.c1.instances["new-db"].overlays' /tmp/fleet.json)"
 rm -f "$P/${stored_sc#overlays/}" "$P/${stored_vals#overlays/}"
+rm -f "$REPO/helm_artifacts/instance/tpg-instance/${stored_sc}" "$REPO/helm_artifacts/instance/tpg-instance/${stored_vals}"
 yq -e 'select(.metadata.name == "tpg-create-probe") | .spec.storageClassName == "premium-fast" and .metadata.namespace == "default"' "$TMP/dryrun.yaml" >/dev/null \
   && ok "9 the rendered instance is dry-run through the webhooks under a probe name" || bad "9 dry run" "$(cat "$TMP/dryrun.yaml")"
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
-  P_POSTGRES_OVERLAY_FILES=ha.yaml P_PATCH_FILES="$PF_HA" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
+  P_POSTGRES_OVERLAY_FILES='[ha.yaml]' P_PATCH_FILES="$PF_HA" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.c1.new-db|BLOCKED|OVERLAY_REFUSED" | grep -q "ha.yaml: Postgres spec.highAvailability is changed by tpg-scale-instance (at creation: the highAvailability and readReplicas inputs or map keys)" \
   && jq -e '.clusters.c1.instances | has("new-db") | not' /tmp/fleet.json >/dev/null \
   && ok "9 a patch of an input-owned field is refused and the instance left out" || bad "9 refused" "$(cat "$TMP/records")"
 # Round 22: disableInitialBackup
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-a P_HA=false P_POSTGRES_VERSION=postgres-17.6 P_DISABLE_INITIAL_BACKUP=true \
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-a]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 P_DISABLE_INITIAL_BACKUP=true \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 jq -e '.clusters.c1.instances["new-a"].instance.disableInitialBackup == true' /tmp/fleet.json >/dev/null \
   && ok "22: disableInitialBackup=true is written to instance.disableInitialBackup of the new instance" \
   || bad "22 disableInitialBackup" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# Round 23: the same keys through clusterMap. disableInitialBackup writes instance.disableInitialBackup
+# (and never backup.enableSSL); backupEnableSSL writes backup.enableSSL (it was written nowhere when
+# the registry entry of disableInitialBackup carried the fleet path and format of backupEnableSSL)
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    new-a: {postgresVersion: "17.6", highAvailability: false, disableInitialBackup: true}
+    new-b: {postgresVersion: "17.6", highAvailability: false}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-a"] as $a | .clusters.c1.instances["new-b"] as $b
+  | $a.instance.disableInitialBackup == true and (($a.backup.enableSSL // false) | not)
+  and ($b.instance | has("disableInitialBackup") | not) and (($b.backup.enableSSL // false) | not)' /tmp/fleet.json >/dev/null \
+  && ok "23: clusterMap disableInitialBackup=true writes instance.disableInitialBackup of that instance only and leaves backup.enableSSL untouched" \
+  || bad "23 clusterMap disableInitialBackup" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    ssl-on: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: true}
+    ssl-off: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: false}' \
+  S_CA="$CA1" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["ssl-on"] as $a | .clusters.c1.instances["ssl-off"] as $b
+  | $a.backup.enableSSL == true and $b.backup.enableSSL == false
+  and ($a.instance | has("disableInitialBackup") | not) and ($b.instance | has("disableInitialBackup") | not)' /tmp/fleet.json >/dev/null \
+  && ok "23: clusterMap backupEnableSSL true writes backup.enableSSL true and false writes false; neither writes instance.disableInitialBackup" \
+  || bad "23 clusterMap backupEnableSSL" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# tpg-day0 (no FLEET_MODE) takes the same clusterMap path; a running instance keeps its entry, so
+# disableInitialBackup (new instances only) is not written to it
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" S_CA="$CA1" env P_CLUSTERS='[c1]' P_OPERATOR_VERSION=v4.5.0 P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, disableInitialBackup: true}
+    new-a: {postgresVersion: "17.6", highAvailability: false, disableInitialBackup: true}
+    ssl-on: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: true}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances as $i
+  | ($i["orders-db"].instance | has("disableInitialBackup") | not)
+  and $i["new-a"].instance.disableInitialBackup == true and (($i["new-a"].backup.enableSSL // false) | not)
+  and $i["ssl-on"].backup.enableSSL == true and ($i["ssl-on"].backup.caBundle | startswith("@ca:"))' /tmp/fleet.json >/dev/null \
+  && ! grep -q '|FAILED|' "$TMP/records" \
+  && ok "23: tpg-day0 clusterMap: disableInitialBackup on new instances only, backupEnableSSL writes enableSSL and the CA placeholder" \
+  || bad "23 day0 clusterMap" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/records")"
 # Round 15 (1c, 1e): several postgres patch files, one kind each, at creation
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
-  P_POSTGRES_OVERLAY_FILES='./sc.yaml, loc.yaml' P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_LOC" '$a + $b')" \
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
+  P_POSTGRES_OVERLAY_FILES='[./sc.yaml, loc.yaml]' P_PATCH_FILES="$(jq -cn --argjson a "$PF_SC" --argjson b "$PF_LOC" '$a + $b')" \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 f="$(jq -r '.clusters.c1.instances["new-db"].overlays.postgres.current // ""' /tmp/fleet.json)"
-[[ -n "$f" ]] && [[ "$(yq ea -o=json -I=0 '[.kind]' "$TMP/work/repo/charts/tpg-instance/$f" | jq -sc 'add')" == '["Postgres","PostgresBackupLocation"]' ]] \
+[[ -n "$f" ]] && [[ "$(yq ea -o=json -I=0 '[.kind]' "$TMP/work/repo/helm_artifacts/instance/tpg-instance/$f" | jq -sc 'add')" == '["Postgres","PostgresBackupLocation"]' ]] \
   && yq -e 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number == 5' "$TMP/work/render-c1-new-db.yaml" >/dev/null \
   && ok "9 two postgres patch files (Postgres, PostgresBackupLocation) become one stored file; the backup location renders the patch" \
   || bad "9 two kinds" "$f $(cat "$TMP/out") $(yq 'select(.kind == "PostgresBackupLocation")' "$TMP/work/render-c1-new-db.yaml" 2>&1)"
@@ -442,29 +528,29 @@ rec "result.c1|FAILED|CLUSTER_API_ERROR" | grep -q "i/o timeout" && ! rec "INSTA
   && ok "10 an API error is not taken for an absent instance (CLUSTER_API_ERROR)" || bad "10 api error" "$(cat "$TMP/records") $(cat "$TMP/out")"
 
 # ---- 10b operator upgrade: the operatorImage tag of the current values patch
-mkdir -p "$REPO/patches/operator"
-printf 'operatorImage: myacr.azurecr.io/postgres-operator:v4.5.0\nresources:\n  limits: {cpu: 500m}\n' > "$REPO/patches/operator/op-ab12c.yaml"
+mkdir -p "$REPO/helm_artifacts/operator/patches"
+printf 'operatorImage: myacr.azurecr.io/postgres-operator:v4.5.0\nresources:\n  limits: {cpu: 500m}\n' > "$REPO/helm_artifacts/operator/patches/op-ab12c.yaml"
 { cat "$TMP/prelude.sh"; echo 'appset_refresh() { exit 0; }   # stop after the version commit'; } > "$TMP/prelude-upgrade.sh"
 sed "s#source $TMP/prelude.sh#source $TMP/prelude-upgrade.sh#" "$TMP/operator-upgrade.sh" > "$TMP/operator-upgrade-git.sh"
 reset
-yq -i '.clusters.c1.operator.patches.values.current = "patches/operator/op-ab12c.yaml"' "$TMP/fleet.yaml"
+yq -i '.clusters.c1.operator.patches.values.current = "helm_artifacts/operator/patches/op-ab12c.yaml"' "$TMP/fleet.yaml"
 inv '[{"name":"orders-db"}]'
 S_RUNNING="orders-db" P_PRE_BACKUP=false bash "$TMP/operator-upgrade-git.sh" wf c1 v4.5.1 600 > "$TMP/out" 2>&1 || true
 new="$(yq -r '.clusters.c1.operator.patches.values.current' "$TMP/pushed.yaml")"
-[[ "$new" =~ ^patches/operator/op-[a-z0-9]{5}\.yaml$ && "$new" != patches/operator/op-ab12c.yaml ]] \
+[[ "$new" =~ ^helm_artifacts/operator/patches/op-[a-z0-9]{5}\.yaml$ && "$new" != helm_artifacts/operator/patches/op-ab12c.yaml ]] \
   && [[ "$(yq -r '.operatorImage' "$TMP/work/repo/$new")" == "myacr.azurecr.io/postgres-operator:v4.5.1" ]] \
-  && [[ "$(yq -r '.operatorImage' "$TMP/work/repo/patches/operator/op-ab12c.yaml")" == "myacr.azurecr.io/postgres-operator:v4.5.0" ]] \
-  && [[ "$(yq -r '.clusters.c1.operator.patches.values.previous.path' "$TMP/pushed.yaml")" == patches/operator/op-ab12c.yaml ]] \
-  && grep -qx "$new" "$TMP/pushed-files" && grep -qx "patches/operator/clusters/c1.yaml" "$TMP/pushed-files" \
-  && grep -q "postgres-operator:v4.5.1" "$TMP/work/repo/patches/operator/clusters/c1.yaml" \
+  && [[ "$(yq -r '.operatorImage' "$TMP/work/repo/helm_artifacts/operator/patches/op-ab12c.yaml")" == "myacr.azurecr.io/postgres-operator:v4.5.0" ]] \
+  && [[ "$(yq -r '.clusters.c1.operator.patches.values.previous.path' "$TMP/pushed.yaml")" == helm_artifacts/operator/patches/op-ab12c.yaml ]] \
+  && grep -qx "$new" "$TMP/pushed-files" && grep -qx "helm_artifacts/operator/patches/clusters/c1.yaml" "$TMP/pushed-files" \
+  && grep -q "postgres-operator:v4.5.1" "$TMP/work/repo/helm_artifacts/operator/patches/clusters/c1.yaml" \
   && ok "10b the new tag goes to a new stored file, which becomes current; the old file is unchanged and previous" \
   || bad "10b operatorImage tag" "$(cat "$TMP/out") $(cat "$TMP/pushed-files" 2>/dev/null)"
 reset
-yq -i '.clusters.c1.operator.patches.values = ["patches/operator/op-ab12c.yaml"]' "$TMP/fleet.yaml"
+yq -i '.clusters.c1.operator.patches.values = ["helm_artifacts/operator/patches/op-ab12c.yaml"]' "$TMP/fleet.yaml"
 S_RUNNING="orders-db" P_DRY_RUN=true bash "$TMP/operator-upgrade.sh" wf c1 v4.5.1 600 > "$TMP/out" 2>&1 || true
 rec "result.c1|FAILED|FLEET_ENTRY_INVALID" | grep -q "is not {current, previous}: a fleet repository written before Round 15" \
   && ok "10b an operator patches entry that is not {current, previous} stops the upgrade (no migration)" || bad "10b old shape" "$(cat "$TMP/records") $(cat "$TMP/out")"
-rm -rf "$REPO/patches"
+rm -rf "$REPO/helm_artifacts/operator/patches"
 
 # ---- 11 discover after the plan: a blocked instance is left out, not UNKNOWN_INSTANCE
 cat > "$TMP/prelude-discover.sh" <<PRELUDE
@@ -475,30 +561,30 @@ kubectl() { :; }
 PRELUDE
 sed "s#source /scripts/lib.sh#source $TMP/prelude-discover.sh#" "$ROOT/workflows/scripts/discover.sh" > "$TMP/discover.sh"
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
-  P_POSTGRES_OVERLAY_FILES=ha.yaml P_PATCH_FILES="$PF_HA" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
-RC=0; P_FILTER=pairs P_INSTANCES=new-db bash "$TMP/discover.sh" wf c1 "$(cat /tmp/fleet.json)" > "$TMP/out" 2>&1 || RC=$?
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
+  P_POSTGRES_OVERLAY_FILES='[ha.yaml]' P_PATCH_FILES="$PF_HA" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+RC=0; P_FILTER=pairs P_INSTANCES='[new-db]' bash "$TMP/discover.sh" wf c1 "$(cat /tmp/fleet.json)" > "$TMP/out" 2>&1 || RC=$?
 [[ "$RC" -eq 0 ]] && grep -q "c1/new-db: blocked in the plan, left out" "$TMP/out" && ! rec "UNKNOWN_INSTANCE" | grep -q . \
   && rec "result.c1.new-db|BLOCKED|OVERLAY_REFUSED" | grep -q . \
   && ok "11 discover leaves out an instance the plan blocked (the run reaches the gate)" || bad "11 discover blocked" "$(cat "$TMP/records") $(cat "$TMP/out")"
 : > "$TMP/records"
-RC=0; P_FILTER=pairs P_INSTANCES=new-db bash "$TMP/discover.sh" wf c1 "$(cat /tmp/fleet.json)" > "$TMP/out" 2>&1 || RC=$?
+RC=0; P_FILTER=pairs P_INSTANCES='[new-db]' bash "$TMP/discover.sh" wf c1 "$(cat /tmp/fleet.json)" > "$TMP/out" 2>&1 || RC=$?
 [[ "$RC" -ne 0 ]] && rec "result.c1.new-db|FAILED|UNKNOWN_INSTANCE" | grep -q . \
   && ok "11 without a plan record the same instance is UNKNOWN_INSTANCE" || bad "11 discover unknown" "$(cat "$TMP/records") $(cat "$TMP/out")"
 
 # ---- 12 Round 13: HA refusal, operator backup schedules, FerretDB (D69 to D71)
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=true P_READ_REPLICAS=0 P_OPERATOR_VERSION=v4.5.0 \
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=true P_READ_REPLICAS=0 P_OPERATOR_VERSION=v4.5.0 \
   P_POSTGRES_VERSION=postgres-17.6 bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.git|FAILED|INVALID_INPUT" | grep -q "highAvailability=true needs readReplicas 1 or more" \
   && ok "12 highAvailability=true with readReplicas 0 is refused (a single node is highAvailability=false)" || bad "12 ha 0" "$(cat "$TMP/records")"
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_OPERATOR_VERSION=v4.5.0 \
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_OPERATOR_VERSION=v4.5.0 \
   P_POSTGRES_VERSION=postgres-17.6 P_FERRET=true P_FERRET_RO_REPLICAS=2 bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.git|FAILED|INVALID_INPUT" | grep -q "ferretReadOnlyReplicas 2 needs highAvailability=true" \
   && ok "12 read-only FerretDB proxies on a single node are refused" || bad "12 ferret ro" "$(cat "$TMP/records")"
 reset
-S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=true P_READ_REPLICAS=1 P_OPERATOR_VERSION=v4.5.0 \
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=true P_READ_REPLICAS=1 P_OPERATOR_VERSION=v4.5.0 \
   P_POSTGRES_VERSION=postgres-17.6 P_BACKUP_SCHEDULE=operator P_OPERATOR_FULL_SCHEDULE='0 1 * * 0' P_OPERATOR_INCR_SCHEDULE='' \
   P_FERRET=true P_FERRET_REPLICAS=2 P_FERRET_RO_REPLICAS=1 P_FERRET_EXPOSURE=internalLoadBalancer \
   bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
@@ -515,27 +601,27 @@ yq -P '.' "$TMP/planned.json" > "$REPO/clusters/fleet.yaml"
 out="$(instance_render_test() { C=c1 I=new-db yq '.clusters[strenv(C)] as $c | ($c.instances[strenv(I)] // {}) as $i
     | ($c | with_entries(select(.key != "instances" and .key != "operator")))
     * {"cluster": {"name": strenv(C)}, "backup": {"container": "pg-backups-c1"}} * $i * {"instance": {"name": strenv(I)}}' "$REPO/clusters/fleet.yaml" > "$TMP/vals.yaml"
-  helm template new-db "$REPO/charts/tpg-instance" -f "$REPO/clusters/_template/cluster.yaml" -f "$REPO/clusters/_template/instance.yaml" -f "$TMP/vals.yaml" -n pg-new-db; }; instance_render_test 2>&1)"
+  helm template new-db "$REPO/helm_artifacts/instance/tpg-instance" -f "$REPO/clusters/_template/cluster.yaml" -f "$REPO/clusters/_template/instance.yaml" -f "$TMP/vals.yaml" -n pg-new-db; }; instance_render_test 2>&1)"
 [[ "$(yq 'select(.kind == "PostgresBackupSchedule") | .metadata.name' <<<"$out")" == "new-db-backup-full" ]] \
   && [[ "$(yq 'select(.kind == "PostgresFerretDocumentDB") | .spec.readOnly.replicas' <<<"$out")" == "1" ]] \
   && ok "12 the planned entry renders one PostgresBackupSchedule and the FerretDB object" || bad "12 render" "$out"
 reset
 yq -i '.clusters.c1.instances["orders-db"].ferret = {"enabled": true} | .clusters.c1.instances["orders-db"].backup.operatorSchedules = {"full": "0 0 * * 0"} | .clusters.c1.instances["orders-db"].backup.scheduled = false' "$TMP/fleet.yaml"
-S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS=c1 P_INSTANCES=orders-db P_HA=true P_READ_REPLICAS=1 P_OPERATOR_VERSION=v4.5.0 \
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_HA=true P_READ_REPLICAS=1 P_OPERATOR_VERSION=v4.5.0 \
   P_POSTGRES_VERSION=postgres-17.6 bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 jq -e '.clusters.c1.instances["orders-db"] | .ferret.enabled == true and ((.backup // {}) | has("operatorSchedules") or has("scheduled") | not)' /tmp/fleet.json >/dev/null \
   && ok "12 a Day 0 re-run with the defaults keeps FerretDB (ferret empty) and returns to the CronWorkflows (backupSchedule fleet)" \
   || bad "12 re-run" "$(jq -c '.clusters.c1.instances["orders-db"]' /tmp/fleet.json)"
 reset
 yq -i '.clusters.c1.instances["orders-db"].ferret = {"enabled": true, "readOnlyReplicas": 1}' "$TMP/fleet.yaml"
-S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS=c1 P_INSTANCES=orders-db P_HA=false P_OPERATOR_VERSION=v4.5.0 \
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_HA=false P_OPERATOR_VERSION=v4.5.0 \
   P_POSTGRES_VERSION=postgres-17.6 bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rec "result.git|FAILED|INVALID_INPUT" | grep -q "runs 1 read-only proxies, which need highAvailability=true" \
   && ok "12 highAvailability=false with ferret empty is refused while the entry's FerretDB runs read-only proxies" \
   || bad "12 ferret kept ro" "$(cat "$TMP/records") $(tail -5 "$TMP/out")"
 reset
 yq -i '.clusters.c1.instances["orders-db"].ferret = {"enabled": true}' "$TMP/fleet.yaml"
-S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS=c1 P_INSTANCES=orders-db P_HA=true P_READ_REPLICAS=1 P_OPERATOR_VERSION=v4.5.0 \
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_HA=true P_READ_REPLICAS=1 P_OPERATOR_VERSION=v4.5.0 \
   P_POSTGRES_VERSION=postgres-17.6 P_FERRET=false bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 jq -e '.clusters.c1.instances["orders-db"] | has("ferret") | not' /tmp/fleet.json >/dev/null \
   && ok "12 ferret=false removes the ferret block" || bad "12 ferret false" "$(jq -c '.clusters.c1.instances["orders-db"]' /tmp/fleet.json)"
@@ -554,7 +640,7 @@ S_OPERATOR=ours S_TRACKED=yes S_APPRES=yes bash "$TMP/day0-precheck.sh" wf c1 > 
 rec "precheck.c1|MANAGED" | grep -q . && ok "12 FerretDB on postgres-17.6 with the CRD passes" || bad "12 ferret pass" "$(cat "$TMP/records")"
 # discover: a values patch file switches the scheduler; the inventory follows it
 reset
-printf 'backup:\n  scheduled: false\n  operatorSchedules: {full: "0 0 * * 0"}\nferret: {enabled: true}\n' > "$REPO/charts/tpg-instance/patches/sched.yaml"
+printf 'backup:\n  scheduled: false\n  operatorSchedules: {full: "0 0 * * 0"}\nferret: {enabled: true}\n' > "$REPO/helm_artifacts/instance/tpg-instance/patches/sched.yaml"
 cp "$TMP/fleet.base.yaml" "$REPO/clusters/fleet.yaml"
 yq -i '.clusters.c1.instances["orders-db"].patches.postgresValues.current = "patches/sched.yaml"' "$TMP/fleet.yaml"
 RC=0; P_FILTER=none bash "$TMP/discover.sh" wf c1 > "$TMP/out" 2>&1 || RC=$?
@@ -562,19 +648,298 @@ jq -e '.[0].instances[0] | .scheduledBackups == false and .backupMode == "operat
   && jq -e '.[0] | .cluster == "c1" and .scheduled == "false"' /tmp/instance-items.json >/dev/null \
   && ok "12 discover: a values patch that switches to operator schedules takes the instance out of the CronWorkflows" \
   || bad "12 discover patch" "$(cat /tmp/inventory.json) $(cat "$TMP/out")"
-rm -f "$REPO/charts/tpg-instance/patches/sched.yaml"
+rm -f "$REPO/helm_artifacts/instance/tpg-instance/patches/sched.yaml"
 # discover after a tpg-create-instance plan: the stored file exists only in the plan
 # step's clone; discover writes it from patchFiles (Round 14), so the scheduler follows it
 reset
 printf 'backup:\n  scheduled: false\n  operatorSchedules: {full: "0 0 * * 0"}\n' > "$TMP/sched-src.yaml"
 PF_SCHED="$(jq -cn --arg b "$(base64 < "$TMP/sched-src.yaml" | tr -d '\n')" '{"sched-src.yaml": $b}')"
-S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS=c1 P_INSTANCES=new-db P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
-  P_VALUES_OVERLAY_FILES=sched-src.yaml P_PATCH_FILES="$PF_SCHED" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
+  P_VALUES_OVERLAY_FILES='[sched-src.yaml]' P_PATCH_FILES="$PF_SCHED" bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
 rm -rf "$TMP/work/repo" "$TMP/work/patch-files.json"
-RC=0; P_PATCH_FILES="$PF_SCHED" P_FILTER=pairs P_INSTANCES=new-db bash "$TMP/discover.sh" wf c1 "$(cat /tmp/fleet.json)" > "$TMP/out" 2>&1 || RC=$?
+RC=0; P_PATCH_FILES="$PF_SCHED" P_FILTER=pairs P_INSTANCES='[new-db]' bash "$TMP/discover.sh" wf c1 "$(cat /tmp/fleet.json)" > "$TMP/out" 2>&1 || RC=$?
 jq -e '.[0].instances[] | select(.name == "new-db") | .backupMode == "operator" and .scheduledBackups == false' /tmp/inventory.json >/dev/null \
   && ok "12 discover writes the planned patch file of a new instance: its backup scheduler is seen" \
   || bad "12 discover materialize" "$(cat /tmp/inventory.json 2>/dev/null) $(cat "$TMP/out")"
+
+# ---- Round 23 phase 3: the instance namespace (locked decision 8)
+# default: a new instance is written with instance.namespace pg-<instance>; the declared orders-db
+# (no key) keeps its entry
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_INSTANCES='[new-db]' P_HA=false P_POSTGRES_VERSION=postgres-17.6 \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-db"].instance.namespace == "pg-new-db" and (.clusters.c1.instances["new-db"].instance | has("sharedSecretsOwner") | not)
+  and (.clusters.c1.instances["orders-db"].instance | has("namespace") | not)' /tmp/fleet.json >/dev/null \
+  && ok "23.3 namespace default: a new instance is written with instance.namespace pg-<instance> (and owns its Secrets); declared entries are not touched" \
+  || bad "ns default" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# clusterMap key namespace, in create mode and in tpg-day0
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    new-a: {postgresVersion: "17.6", highAvailability: false, namespace: team-db}
+    new-b: {postgresVersion: "17.6", highAvailability: false}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-a"].instance.namespace == "team-db" and .clusters.c1.instances["new-b"].instance.namespace == "pg-new-b"' /tmp/fleet.json >/dev/null \
+  && ok "23.3 clusterMap namespace: team-db is written as instance.namespace of that instance, the other keeps the default" \
+  || bad "ns clustermap" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_OPERATOR_VERSION=v4.5.0 P_CLUSTER_MAP='c1:
+  instances:
+    new-a: {postgresVersion: "17.6", highAvailability: false, namespace: team-db}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-a"].instance.namespace == "team-db"' /tmp/fleet.json >/dev/null \
+  && ok "23.3 tpg-day0 clusterMap namespace is written as well" || bad "ns day0" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# immutable: orders-db is declared in pg-orders-db; another namespace is refused, the same one (the
+# default spelled out) is not
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, namespace: other-ns}
+    new-a: {postgresVersion: "17.6", highAvailability: false}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "result.c1.orders-db|BLOCKED|NAMESPACE_IMMUTABLE" | grep -q "declared in namespace pg-orders-db on c1, the namespace key asks for other-ns" \
+  && jq -e '.clusters.c1.instances["orders-db"].instance | has("namespace") | not' /tmp/fleet.json >/dev/null \
+  && jq -e '.clusters.c1.instances["new-a"].instance.namespace == "pg-new-a"' /tmp/fleet.json >/dev/null \
+  && ok "23.3 create: a different namespace for a declared instance is BLOCKED NAMESPACE_IMMUTABLE and its entry is not changed; the other instance goes ahead" \
+  || bad "ns immutable create" "$(cat "$TMP/records") $(cat "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env P_CLUSTERS='[c1]' P_OPERATOR_VERSION=v4.5.0 P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, namespace: other-ns}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "block.c1|BLOCKED|NAMESPACE_IMMUTABLE" | grep -q "the namespace of an instance cannot change" \
+  && ok "23.3 tpg-day0: a different namespace for a declared instance blocks the cluster (NAMESPACE_IMMUTABLE), fleet.yaml is not changed for it" \
+  || bad "ns immutable day0" "$(cat "$TMP/records") $(cat "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, namespace: pg-orders-db}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "result.c1.orders-db|SUCCEEDED|ALREADY_EXISTS" | grep -q . \
+  && ok "23.3 the namespace that equals the declared one (here the default spelled out) is not a change: ALREADY_EXISTS" \
+  || bad "ns same" "$(cat "$TMP/records") $(cat "$TMP/out")"
+# an instance whose entry names a namespace keeps it, and the live check looks there
+reset
+yq -i '.clusters.c1.instances["orders-db"].instance.namespace = "team-orders"' "$TMP/fleet.yaml"
+S_OPERATOR=ours S_RUNNING="orders-db" S_NSMAP="orders-db=team-orders" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "result.c1.orders-db|SUCCEEDED|ALREADY_EXISTS" | grep -q . \
+  && jq -e '.clusters.c1.instances["orders-db"].instance.namespace == "team-orders"' /tmp/fleet.json >/dev/null \
+  && ok "23.3 a declared instance in a custom namespace is found there (not in pg-<instance>) and keeps it" \
+  || bad "ns custom live" "$(cat "$TMP/records") $(cat "$TMP/out")"
+# (a reserved namespace or one that is not a DNS label is refused by the validate step, tests/cluster-map)
+# shared namespace: two new instances in one run share one owner; the first (by name) owns the Secrets
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    app-b: {postgresVersion: "17.6", highAvailability: false, namespace: shared}
+    app-a: {postgresVersion: "17.6", highAvailability: false, namespace: shared}
+    app-c: {postgresVersion: "17.6", highAvailability: false, namespace: shared}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances as $i
+  | ([$i["app-a"], $i["app-b"], $i["app-c"]] | map(.instance.namespace) | unique) == ["shared"]
+  and ($i["app-a"].instance | has("sharedSecretsOwner") | not)
+  and $i["app-b"].instance.sharedSecretsOwner == false and $i["app-c"].instance.sharedSecretsOwner == false' /tmp/fleet.json >/dev/null \
+  && ok "23.3 three new instances in one namespace: exactly one owner (app-a); the others get sharedSecretsOwner false" \
+  || bad "ns shared new" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# joining the namespace of a declared instance: the declared one stays the owner
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    aaa-first: {postgresVersion: "17.6", highAvailability: false, namespace: pg-orders-db}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["aaa-first"].instance | .namespace == "pg-orders-db" and .sharedSecretsOwner == false' /tmp/fleet.json >/dev/null \
+  && jq -e '.clusters.c1.instances["orders-db"].instance | has("sharedSecretsOwner") | not' /tmp/fleet.json >/dev/null \
+  && ok "23.3 a new instance that joins the namespace of a declared one gets sharedSecretsOwner false even when it sorts first; the declared owner is untouched" \
+  || bad "ns shared join" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# a namespace without an owner (every entry false): the planned instance becomes the owner
+reset
+yq -i '.clusters.c1.instances["orders-db"].instance.namespace = "shared" | .clusters.c1.instances["orders-db"].instance.sharedSecretsOwner = false' "$TMP/fleet.yaml"
+S_OPERATOR=ours S_RUNNING="orders-db" S_NSMAP="orders-db=shared" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    new-a: {postgresVersion: "17.6", highAvailability: false, namespace: shared}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+jq -e '.clusters.c1.instances["new-a"].instance | has("sharedSecretsOwner") | not' /tmp/fleet.json >/dev/null \
+  && jq -e '.clusters.c1.instances["orders-db"].instance.sharedSecretsOwner == false' /tmp/fleet.json >/dev/null \
+  && ok "23.3 a namespace whose entries are all non-owners gets an owner: the instance this run plans" \
+  || bad "ns shared no owner" "$(jq -c '.clusters.c1.instances' /tmp/fleet.json) $(cat "$TMP/out")"
+# the planned entries of a shared namespace render once (chart, real helm)
+fleetrender() {  # fleetrender INSTANCE -> the chart rendered from /tmp/fleet.json like instance_render does
+  yq -P '.' /tmp/fleet.json > "$REPO/clusters/fleet.yaml"
+  ( source "$TMP/prelude.sh"; instance_render "$REPO" c1 "$1" )
+}
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    app-a: {postgresVersion: "17.6", highAvailability: false, namespace: shared}
+    app-b: {postgresVersion: "17.6", highAvailability: false, namespace: shared}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+pair="$( { fleetrender app-a; printf '\n---\n'; fleetrender app-b; } 2>&1)"
+[[ -z "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | grep -E '^[A-Za-z]+/' | sort | uniq -d)" \
+   && "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | grep -c -E '^VaultStaticSecret/regsecret$')" == 1 \
+   && "$(yq -N 'select(.kind == "PostgresBackupLocation") | .spec.storage.azure.repoPath' <<<"$pair" | sort | paste -sd,)" == "/shared/app-a,/shared/app-b" ]] \
+  && ok "23.3 the planned pair renders in the namespace 'shared': distinct objects, one regsecret, repoPath /shared/<instance>" \
+  || bad "ns shared render" "$(yq -r '.kind + "/" + .metadata.name' <<<"$pair" | sort | uniq -c) $(tail -3 <<<"$pair")"
+cp "$TMP/fleet.base.yaml" "$REPO/clusters/fleet.yaml"
+# discover records the namespace of every instance in the inventory
+reset
+yq -i '.clusters.c1.instances["orders-db"].instance.namespace = "team-orders"' "$TMP/fleet.yaml"
+RC=0; P_FILTER=none bash "$TMP/discover.sh" wf c1 > "$TMP/out" 2>&1 || RC=$?
+jq -e '.[0].instances[0] | .name == "orders-db" and .namespace == "team-orders"' /tmp/inventory.json >/dev/null \
+  && ok "23.3 discover: the inventory carries the namespace of each instance" || bad "ns inventory" "$(cat /tmp/inventory.json) $(cat "$TMP/out")"
+reset
+RC=0; P_FILTER=none bash "$TMP/discover.sh" wf c1 > "$TMP/out" 2>&1 || RC=$?
+jq -e '.[0].instances[0] | .name == "orders-db" and .namespace == "pg-orders-db"' /tmp/inventory.json >/dev/null \
+  && ok "23.3 discover: an entry without namespace is recorded as pg-<instance>" || bad "ns inventory default" "$(cat /tmp/inventory.json)"
+
+# ---- Round 23 review: a Secret the fleet does not manage in the namespace of an instance (NAMESPACE_SECRET_CONFLICT)
+# regsecret and backup-storage are created and overwritten by the VaultStaticSecrets of the owner of the namespace
+inv '[{"name":"orders-db","namespace":"team-db","secretsOwner":true,"postgresVersion":"postgres-17.6","highAvailability":false,"readReplicas":0,"enableSSL":false},{"name":"billing-db","namespace":"team-db","secretsOwner":false,"postgresVersion":"postgres-17.6","highAvailability":false,"readReplicas":0,"enableSSL":false}]'
+secret_check() {  # secret_check S_SECRETS -> precheck.c1 line in $TMP/records
+  rm -rf "$TMP/work"; : > "$TMP/records"   # no checkout in the step: the namespaces come from the inventory
+  S_OPERATOR=ours S_TRACKED=yes S_APPRES=yes S_SECRETS="$1" bash "$TMP/day0-precheck.sh" wf c1 > "$TMP/out" 2>&1 || true
+}
+secret_check "team-db/regsecret=foreign"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT:namespace team-db already has the Secret regsecret, which the fleet does not manage" | grep -q "rename that Secret or choose another namespace with the namespace key" \
+  && [[ "$(rec "precheck.c1|BLOCKED" | grep -o 'NAMESPACE_SECRET_CONFLICT' | wc -l | tr -d ' ')" == 1 ]] \
+  && ok "23 review: a regsecret nobody manages in the requested namespace blocks the cluster (NAMESPACE_SECRET_CONFLICT names the namespace and the Secret and the two ways out; one reason for the two instances of the namespace)" \
+  || bad "foreign regsecret" "$(cat "$TMP/records") $(cat "$TMP/out")"
+secret_check "team-db/backup-storage=foreign"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT:namespace team-db already has the Secret backup-storage" | grep -q . \
+  && ok "23 review: the same for backup-storage" || bad "foreign backup-storage" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=foreign team-db/backup-storage=foreign"
+[[ "$(rec "precheck.c1|BLOCKED" | grep -o 'NAMESPACE_SECRET_CONFLICT' | wc -l | tr -d ' ')" == 2 ]] \
+  && ok "23 review: both foreign Secrets are reported" || bad "both foreign" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=other-app"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT" | grep -q . \
+  && ok "23 review: a Secret tracked by an Argo CD Application that is not the fleet's is foreign" || bad "other app" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=vss-other"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT" | grep -q . \
+  && ok "23 review: a Secret created by a VaultStaticSecret of another name is foreign (the owner's VaultStaticSecret has the Secret's name)" || bad "other vss" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=vss team-db/backup-storage=vss"
+! rec "precheck.c1|BLOCKED" | grep -q . && rec "precheck.c1|MANAGED" | grep -q . \
+  && ok "23 review: Secrets created by a VaultStaticSecret (ownerReferences) are the fleet's: no conflict (an instance that exists, or a second instance joining its namespace)" || bad "vss managed" "$(cat "$TMP/records")"
+secret_check "team-db/regsecret=tracked team-db/backup-storage=tracked"
+! rec "precheck.c1|BLOCKED" | grep -q . \
+  && ok "23 review: Secrets with the tracking annotation of a fleet Application (tpg-<cluster>-*) are the fleet's: no conflict" || bad "tracked managed" "$(cat "$TMP/records")"
+secret_check ""
+! rec "precheck.c1|BLOCKED" | grep -q . && ok "23 review: no such Secret (a new namespace): no conflict" || bad "no secret" "$(cat "$TMP/records")"
+secret_check "other-ns/regsecret=foreign"
+! rec "precheck.c1|BLOCKED" | grep -q . && ok "23 review: a foreign Secret in a namespace no instance of the run uses is nobody's business" || bad "other namespace" "$(cat "$TMP/records")"
+# the Secret is read by its metadata; only NotFound means "no Secret" (Round 23 re-review)
+secret_check "team-db/regsecret=forbidden"
+rec "precheck.c1|BLOCKED|CLUSTER_API_ERROR:cannot read the Secret team-db/regsecret on c1: Error from server (Forbidden)" | grep -q . && ! rec "NAMESPACE_SECRET_CONFLICT" | grep -q . \
+  && ok "23 re-review: a Forbidden answer for the Secret blocks with CLUSTER_API_ERROR (it was read as 'no such Secret' and passed)" || bad "forbidden secret" "$(cat "$TMP/records") $(cat "$TMP/out")"
+secret_check "team-db/regsecret=vss-forbidden"
+rec "precheck.c1|BLOCKED|CLUSTER_API_ERROR:cannot read the VaultStaticSecret team-db/regsecret on c1" | grep -q . \
+  && ok "23 re-review: the same for the VaultStaticSecret that owns the Secret" || bad "forbidden vss" "$(cat "$TMP/records") $(cat "$TMP/out")"
+secret_check "team-db/regsecret=vss-untracked"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT:namespace team-db already has the Secret regsecret" | grep -q . \
+  && ok "23 re-review: a Secret owned by a VaultStaticSecret that no fleet Application tracks (applied by somebody else) is foreign" || bad "foreign vss" "$(cat "$TMP/records") $(cat "$TMP/out")"
+secret_check "team-db/regsecret=vss-gone"
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT" | grep -q . \
+  && ok "23 re-review: the owning VaultStaticSecret is gone (NotFound): the Secret is not kept by the fleet" || bad "gone vss" "$(cat "$TMP/records") $(cat "$TMP/out")"
+grep -q "jsonpath='{.metadata}'" "$ROOT/workflows/scripts/day0-precheck.sh" && ! grep -n "get secret.*-o json" "$ROOT/workflows/scripts/day0-precheck.sh" | grep -q . \
+  && ok "23 re-review: the pre-check reads the metadata of the Secret (jsonpath), never its data" || bad "metadata only"
+# tpg-create-instance runs the same pre-check
+: > "$TMP/records"
+rm -rf "$TMP/work"
+PRECHECK_MODE=create S_OPERATOR=ours S_TRACKED=yes S_APPRES=yes S_SECRETS="team-db/regsecret=foreign" bash "$TMP/day0-precheck.sh" wf c1 > "$TMP/out" 2>&1 || true
+rec "precheck.c1|BLOCKED|NAMESPACE_SECRET_CONFLICT" | grep -q . && ok "23 review: the create-instance mode blocks as well" || bad "create mode" "$(cat "$TMP/records")"
+
+# ---- Round 23 (tpg-restore, second revision): a restored instance (instance.restored true) is BLOCKED INSTANCE_RESTORED, that
+# instance only: tpg-day0 neither writes its entry nor deploys it; the other instances of the run go ahead
+reset
+yq -i '.clusters.c1.instances["restored-db"] = {"instance": {"postgresVersion": "postgres-17.6", "restored": true, "storageSize": "50Gi", "highAvailability": {"enabled": false, "readReplicas": 0}},
+  "restorePatch": {"current": "restore-patch/restored-db-restore-aaaaa.yaml", "mode": "base"}}' "$TMP/fleet.yaml"
+RESTORED_BEFORE="$(yq -o=json -I=0 '.clusters.c1.instances["restored-db"]' "$TMP/fleet.yaml")"
+restored_checks() {  # restored_checks LABEL: restored-db is BLOCKED and untouched in the plan, orders-db is planned, nothing blocks the cluster
+  local l="$1"
+  rec "result.c1.restored-db|BLOCKED|INSTANCE_RESTORED" | grep -q "tpg-scale-instance" && rec "result.c1.restored-db|BLOCKED|INSTANCE_RESTORED" | grep -q "tpg-upgrade component=postgres" \
+    && rec "result.c1.restored-db|BLOCKED|INSTANCE_RESTORED" | grep -q "tpg-patch" \
+    && ok "23 restored ($l): restored-db is BLOCKED INSTANCE_RESTORED and the detail names tpg-scale-instance, tpg-upgrade and tpg-patch" || bad "restored $l blocked" "$(cat "$TMP/records") $(cat "$TMP/out")"
+  [[ "$(jq -c '.clusters.c1.instances["restored-db"]' /tmp/fleet.json)" == "$RESTORED_BEFORE" ]] \
+    && ok "23 restored ($l): its entry is exactly what it was in the plan" || bad "restored $l entry" "$(jq -c '.clusters.c1.instances["restored-db"]' /tmp/fleet.json)"
+  jq -e '.clusters.c1.instances["orders-db"].instance.storageSize == "80Gi"' /tmp/fleet.json >/dev/null && ! rec "block.c1" | grep -q . && ! rec "FAILED" | grep -q . \
+    && ok "23 restored ($l): the other instance is planned (storageSize 80Gi) and the cluster is not blocked" || bad "restored $l others" "$(cat "$TMP/records") $(jq -c '.clusters.c1.instances' /tmp/fleet.json)"
+}
+S_OPERATOR=ours S_RUNNING="orders-db restored-db" env P_CLUSTERS='[c1]' P_INSTANCES='[orders-db, restored-db]' P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 \
+  P_READ_REPLICAS=1 P_STORAGE_SIZE=80Gi bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+restored_checks "instances input"
+reset
+yq -i '.clusters.c1.instances["restored-db"] = {"instance": {"postgresVersion": "postgres-17.6", "restored": true, "storageSize": "50Gi", "highAvailability": {"enabled": false, "readReplicas": 0}},
+  "restorePatch": {"current": "restore-patch/restored-db-restore-aaaaa.yaml", "mode": "base"}}' "$TMP/fleet.yaml"
+S_OPERATOR=ours S_RUNNING="orders-db restored-db" env P_CLUSTERS='[c1]' P_OPERATOR_VERSION=v4.5.0 P_CLUSTER_MAP='c1:
+  instances:
+    orders-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 1, storageSize: 80Gi}
+    restored-db: {postgresVersion: "17.6", highAvailability: true, readReplicas: 2, storageSize: 90Gi}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+restored_checks "clusterMap"
+# the run goes on to the commit: the restored entry is not in what is written, the other one is; a dry run pushes nothing
+cp /tmp/fleet.json "$TMP/planned.json"; cp /tmp/fleet-base.json "$TMP/base.json"
+: > "$TMP/records"; echo 'precheck.c1|PASSED||' >> "$TMP/records"; rm -f "$TMP/pushed.yaml"
+bash "$TMP/fleet-commit.sh" wf "$(cat "$TMP/planned.json")" "$(cat "$TMP/base.json")" > "$TMP/out" 2>&1 || true
+[[ "$(yq -o=json -I=0 '.clusters.c1.instances["restored-db"]' "$TMP/pushed.yaml")" == "$RESTORED_BEFORE" && "$(yq '.clusters.c1.instances["orders-db"].instance.storageSize' "$TMP/pushed.yaml")" == 80Gi ]] \
+  && ok "23 restored: what the commit writes leaves the restored entry as it was and carries the other instance's change" || bad "restored commit" "$(cat "$TMP/out") $(cat "$TMP/pushed.yaml" 2>/dev/null)"
+: > "$TMP/records"; echo 'precheck.c1|PASSED||' >> "$TMP/records"; rm -f "$TMP/pushed.yaml"
+P_DRY_RUN=true bash "$TMP/fleet-commit.sh" wf "$(cat "$TMP/planned.json")" "$(cat "$TMP/base.json")" > "$TMP/out" 2>&1 || true
+[[ ! -f "$TMP/pushed.yaml" ]] && rec "result.git|SUCCEEDED|DRY_RUN" | grep -q . && ok "23 restored: a dry run records the plan and pushes nothing" || bad "restored dry run" "$(cat "$TMP/records")"
+# the deployment (discover feeds day0-deploy) leaves it out; the gate fails the run
+: > "$TMP/records"
+S_OPERATOR=ours S_RUNNING="orders-db restored-db" env P_CLUSTERS='[c1]' P_INSTANCES='[orders-db, restored-db]' P_HA=true P_OPERATOR_VERSION=v4.5.0 P_POSTGRES_VERSION=postgres-17.6 \
+  P_READ_REPLICAS=1 P_STORAGE_SIZE=80Gi bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+RC=0; P_FILTER=none bash "$TMP/discover.sh" wf c1 "$(cat /tmp/fleet.json)" > "$TMP/out" 2>&1 || RC=$?
+[[ "$RC" -eq 0 ]] && jq -e '[.[0].instances[].name] == ["orders-db"]' /tmp/inventory.json >/dev/null && grep -q "c1/restored-db: restored by tpg-restore, blocked in the plan, left out" "$TMP/out" \
+  && ok "23 restored: discover leaves it out of the inventory, so it is not synced or verified" || bad "restored discover" "$(cat /tmp/inventory.json) $(cat "$TMP/out")"
+bash "$TMP/blocked-gate.sh" wf > "$TMP/out" 2>&1 && bad "restored gate" "$(cat "$TMP/out")" || { grep -q "c1.restored-db INSTANCE_RESTORED" "$TMP/out" && ok "23 restored: the gate fails the run and names the instance and the reason" || bad "restored gate text" "$(cat "$TMP/out")"; }
+# tpg-create-instance does not write a restored instance's entry either
+reset
+yq -i '.clusters.c1.instances["restored-db"] = {"instance": {"postgresVersion": "postgres-17.6", "restored": true, "storageSize": "50Gi"}, "restorePatch": {"current": "restore-patch/restored-db-restore-aaaaa.yaml", "mode": "base"}}' "$TMP/fleet.yaml"
+S_OPERATOR=ours S_RUNNING="orders-db restored-db" env FLEET_MODE=create P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1:
+  instances:
+    restored-db: {postgresVersion: "17.6", highAvailability: false, storageSize: 90Gi}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+rec "result.c1.restored-db|BLOCKED|INSTANCE_RESTORED" | grep -q "tpg-create-instance neither writes its entry" \
+  && [[ "$(jq -r '.clusters.c1.instances["restored-db"].instance.storageSize' /tmp/fleet.json)" == 50Gi ]] \
+  && ok "23 restored: tpg-create-instance blocks it as well and leaves the entry (storageSize 50Gi) alone" || bad "restored create" "$(cat "$TMP/records") $(cat "$TMP/out")"
+
+# Round 23 (after phase 8): a single-file key of a clusterMap (operatorValuesOverlayFilePath,
+# postgresValuesOverlayFilePath, backupCaBundleFile; each written [path]) reaches fleet-day0.sh
+# normalized to the bare path, and the second normalize of effective.raw.json refused it
+# ("'./op.yaml' is not a list; ... Did you mean [./op.yaml]?"): the whole run failed INVALID_INPUT
+printf 'resources:\n  limits: {cpu: 500m, memory: 300Mi}\n  requests: {cpu: 500m, memory: 300Mi}\n' > "$P/op.yaml"
+PF_OP="$(pf ./op.yaml op.yaml)"
+PF_CA2="$(jq -cn --arg b "$(base64 < "$TMP/ca2.pem" | tr -d '\n')" '{"ca2.pem": $b}')"
+PF_ALL="$(jq -cn --argjson a "$PF_OP" --argjson b "$PF_VALS" --argjson c "$PF_CA2" '$a + $b + $c')"
+h2="$(printf '%s' "$(cat "$TMP/ca2.pem")" | sha256sum | cut -c1-12)"
+# (no operator on the cluster yet: an operator overlay is refused on a running one, OVERLAY_USE_TPG_PATCH)
+reset
+S_OPERATOR=none S_RUNNING="" S_CA="$CA1" env P_CLUSTERS='[c1]' P_OPERATOR_VERSION=v4.5.0 P_PATCH_FILES="$PF_ALL" P_CLUSTER_MAP='c1:
+  operatorValuesOverlayFilePath: [./op.yaml]
+  backupCaBundleFile: [ca2.pem]
+  instances:
+    new-db: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: true, postgresValuesOverlayFilePath: [vals.yaml]}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+! rec "result.git|FAILED|INVALID_INPUT" | grep -q . \
+  && jq -e --arg ph "@ca:${h2}@" '.clusters.c1 as $c | $c.instances["new-db"] as $i
+    | ($c.operator.overlays.values.current | test("^helm_artifacts/operator/overlays/.*\\.yaml$"))
+    and ($i.overlays.postgresValues.current | test("^overlays/vals-[a-z0-9]{5}\\.yaml$"))
+    and $i.backup.caBundle == $ph' /tmp/fleet.json >/dev/null \
+  && ok "23 tpg-day0: single-file clusterMap keys (operator overlay, values overlay, CA bundle file) are stored and recorded" \
+  || bad "23 day0 single-file keys" "$(head -6 "$TMP/records") $(rec result.git | head -3) $(jq -c '.clusters.c1' /tmp/fleet.json) $(tail -5 "$TMP/out")"
+reset
+S_OPERATOR=ours S_RUNNING="orders-db" S_CA="$CA1" env FLEET_MODE=create P_CLUSTERS='[c1]' P_PATCH_FILES="$PF_ALL" P_CLUSTER_MAP='c1:
+  instances:
+    new-db: {postgresVersion: "17.6", highAvailability: false, backupEnableSSL: true, backupCaBundleFile: [ca2.pem], postgresValuesOverlayFilePath: [vals.yaml]}' \
+  bash "$TMP/fleet-day0.sh" wf '["c1"]' > "$TMP/out" 2>&1 || true
+! rec "result.git|FAILED|INVALID_INPUT" | grep -q . \
+  && jq -e --arg ph "@ca:${h2}@" '.clusters.c1.instances["new-db"] as $i
+    | ($i.overlays.postgresValues.current | test("^overlays/vals-[a-z0-9]{5}\\.yaml$")) and $i.backup.caBundle == $ph' /tmp/fleet.json >/dev/null \
+  && ok "23 tpg-create-instance: single-file clusterMap keys of an instance (values overlay, CA bundle file) are stored and recorded" \
+  || bad "23 create single-file keys" "$(rec 'result.git' | head -3) $(jq -c '.clusters.c1.instances["new-db"]' /tmp/fleet.json) $(tail -5 "$TMP/out")"
+rm -f "$P/op.yaml"
 
 echo
 echo "day0-plan: ${PASS} passed, ${FAIL} failed"

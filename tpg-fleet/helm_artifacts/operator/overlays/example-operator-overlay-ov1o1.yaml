@@ -1,0 +1,13 @@
+# Example operator values overlay (tpg-day0 operatorValuesOverlayFilePath), as the
+# workflow stores it: <name>-<uid>.yaml, referenced by clusters/fleet.example.yaml.
+# Same keys as an operator patch (see helm_artifacts/operator/patches/README.md and helm_artifacts/operator/overlays/README.md).
+# The workflow copies the current file of a cluster to
+# helm_artifacts/operator/overlays/clusters/<cluster>.yaml, which the tpg-operator Application reads
+# before the patch copy.
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

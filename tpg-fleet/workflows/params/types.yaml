@@ -10,8 +10,9 @@
 # no Workflow is created.
 #
 # tests/params/run.sh checks that this file, the WorkflowTemplates (names,
-# defaults, enums), the generated policy and the Type columns in
-# docs/workflow-commands.md agree.
+# defaults, enums), the generated policy and the Type, Mandatory, Default and
+# enum values of the input tables in docs/workflow-commands.md agree. The same
+# file generates the parameter-file schemas (workflows/params/params_schema.py).
 #
 # Mandatory inputs are still checked by the validate step of each workflow,
 # because some are mandatory only without clusterMap; so is the inside of
@@ -20,7 +21,27 @@
 #   type        a key of "types" below
 #   values      enum only
 #   allowEmpty  true: an empty value passes the type check (optional inputs, and
-#               mandatory ones whose absence the validate step reports)
+#               mandatory ones whose absence the validate step reports); a list
+#               given explicitly empty, [], is never accepted
+#   excludeAll  list types: all is a keyword, not a name, inside the brackets
+#               ([a, all] is refused)
+#   bare        list types: the one word valid without brackets (all); the
+#               pattern of "components" lets auto stand bare in the same way
+#   mandatory   absent: optional. always: the validate step refuses the run without it in
+#               every case (it has no default in the template), and the parameter-file schema
+#               lists it as required and does not accept an empty value for it (admission does,
+#               through allowEmpty; the validate step refuses it). conditional: mandatory in some cases only (without
+#               clusterMap, for one mode, ...), so the schema does not require it and the
+#               validate step decides. The Mandatory column of docs/workflow-commands.md says
+#               "yes" / "no" / the condition; tests/params checks the column against this.
+#
+# Lists are strict (Round 23): every list input is bracketed, even with one value,
+# [tpg-poc-01] or [a, b] (YAML flow) or ["a","b"] (JSON); a comma-separated string, [],
+# an empty element and a file entry "repo: x.yaml" (a space after the colon) are
+# refused. A single-file input (patchFile, caFile) is a list of exactly one path. The
+# patterns allow single or double quotes around an element; the validate step
+# (workflows/scripts/clustermap.py as_list, behind lib.sh list_items) checks the quotes
+# and every item. tests/regex-limits keeps these patterns RE2-safe and tests them.
 #
 # renamed (after templates): old input name -> new name, refused with the new name.
 #
@@ -33,9 +54,9 @@ types:
   name: {display: String (name), pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', describe: "a lowercase DNS label"}
   azureName: {display: String (Azure name), pattern: '^[A-Za-z0-9]([-A-Za-z0-9_.]{0,78}[A-Za-z0-9_])?$', describe: "an Azure resource name (letters, digits, hyphen, underscore, period; at most 80 characters)"}
   k8sName: {display: String (name), pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$', describe: "a Kubernetes object name"}
-  list: {display: List, pattern: '^\s*[a-z0-9]([-a-z0-9]*[a-z0-9])?(\s*,\s*[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\s*$', describe: "a List (comma-separated names)", excludeAll: true}
-  listOrAll: {display: List, pattern: '^\s*(all|[a-z0-9]([-a-z0-9]*[a-z0-9])?(\s*,\s*[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)\s*$', describe: "a List (comma-separated names, or all)"}
-  components: {display: List, pattern: '^\s*(auto|cert-manager|vso|monitoring)(\s*,\s*(cert-manager|vso|monitoring))*\s*$', describe: "a List of auto, cert-manager, vso, monitoring"}
+  list: {display: List, pattern: '^\s*\[\s*["\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?["\x27]?(\s*,\s*["\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?["\x27]?)*\s*\]\s*$', describe: "a List in brackets, for example [orders-db, billing-db] or [orders-db] (names, also with one value; a comma-separated string is not a list)", excludeAll: true}
+  listOrAll: {display: List, pattern: '^\s*(all|\[\s*["\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?["\x27]?(\s*,\s*["\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?["\x27]?)*\s*\])\s*$', describe: "a List in brackets, for example [aks-tpg-poc-01, aks-tpg-poc-02] (also with one value), or all", excludeAll: true, bare: all}
+  components: {display: List, pattern: '^\s*(auto|\[\s*["\x27]?(cert-manager|vso|monitoring)["\x27]?(\s*,\s*["\x27]?(cert-manager|vso|monitoring)["\x27]?)*\s*\])\s*$', describe: "auto, or a List in brackets of cert-manager, vso, monitoring, for example [cert-manager, vso]"}
   boolean: {display: Boolean, pattern: '^(true|false)$', describe: "a Boolean (true or false)"}
   integer: {display: Integer, pattern: '^[0-9]+$', describe: "an Integer (0 or more)"}
   posint: {display: Integer, pattern: '^[1-9][0-9]*$', describe: "an Integer (1 or more)"}
@@ -48,24 +69,28 @@ types:
   lsn: {display: String (LSN), pattern: '^[0-9A-Fa-f]+/[0-9A-Fa-f]+$', describe: "a log sequence number such as 0/3000060"}
   map: {display: Map, pattern: '^\s*(\{|[^\s:#][^:]*:)', describe: "a Map (YAML or JSON)"}
   jsonMap: {display: Map (JSON), pattern: '^\s*\{', describe: "a JSON object"}
-  cidrList: {display: List (CIDRs), pattern: '^\s*[0-9A-Fa-f:.]+/[0-9]{1,3}(\s*,\s*[0-9A-Fa-f:.]+/[0-9]{1,3})*\s*$', describe: "a List of CIDRs such as 10.20.0.0/16"}
-  fqdnList: {display: List (host names), pattern: '^\s*(\*\.)?[a-z0-9.-]+\.[a-z]{2,}(\s*,\s*(\*\.)?[a-z0-9.-]+\.[a-z]{2,})*\s*$', describe: "a List of host names such as db.example.com or *.example.com"}
+  pairList: {display: List (pairs), pattern: '^\s*(\[|-\s)', describe: "a List of restore pairs (YAML or JSON), [{sourceClusterConfig: {..}, targetClusterConfig: {..}}] or - sourceClusterConfig: ..."}
+  # not an input type: the PostgresVersion names of the lite flavour, read by the restore matrix (a standard
+  # version cannot be restored into a lite one: RESTORE_FLAVOUR_UNSUPPORTED). One pattern, here.
+  liteVersion: {display: String (version), pattern: '-lite$', describe: "a PostgresVersion name that ends in -lite"}
+  cidrList: {display: List (CIDRs), pattern: '^\s*\[\s*["\x27]?[0-9A-Fa-f:.]+/[0-9]{1,3}["\x27]?(\s*,\s*["\x27]?[0-9A-Fa-f:.]+/[0-9]{1,3}["\x27]?)*\s*\]\s*$', describe: "a List of CIDRs in brackets, for example [10.20.0.0/16] or [10.20.0.0/16, 10.30.0.0/24]"}
+  fqdnList: {display: List (host names), pattern: '^\s*\[\s*["\x27]?(\*\.)?[a-z0-9.-]+\.[a-z]{2,}["\x27]?(\s*,\s*["\x27]?(\*\.)?[a-z0-9.-]+\.[a-z]{2,}["\x27]?)*\s*\]\s*$', describe: "a List of host names in brackets, for example [db.example.com, *.example.com]"}
   cron: {display: String (cron), pattern: '^\s*[0-9*/,A-Za-z-]+(\s+[0-9*/,A-Za-z-]+){4}\s*$', describe: "a cron schedule of 5 fields such as 0 0 * * 0"}
-  patchFile: {display: String (file path), pattern: '^(repo:)?(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml$', describe: "the path of one .yaml or .yml file: on the submitting machine (absolute or relative), or repo:<path> in the fleet repository"}
-  patchFileList: {display: List (file paths), pattern: '^\s*(repo:)?(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml(\s*,\s*(repo:)?(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml)*\s*$', describe: "a List of .yaml or .yml files (comma-separated): on the submitting machine (absolute or relative), or repo:<path> in the fleet repository"}
+  patchFile: {display: List (one file path), pattern: '^\s*\[\s*["\x27]?(repo:)?(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml["\x27]?\s*\]\s*$', describe: "a List of exactly one .yaml or .yml file in brackets, [./values.yaml] or [repo:<path>]: a path on the submitting machine (absolute or relative) or repo:<file path> in the fleet repository; repo:<file path> \"check for white spaces in between\""}
+  patchFileList: {display: List (file paths), pattern: '^\s*\[\s*["\x27]?(repo:)?(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml["\x27]?(\s*,\s*["\x27]?(repo:)?(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.ya?ml["\x27]?)*\s*\]\s*$', describe: "a List of .yaml or .yml files in brackets, for example [./a.yaml, repo:<path>]: each a path on the submitting machine (absolute or relative) or repo:<file path> in the fleet repository; repo:<file path> \"check for white spaces in between\""}
   vaultToken: {display: String (Vault token), pattern: '^[A-Za-z0-9._-]{16,512}$', describe: "a Vault wrapping token (tpg-aks-infra scripts/vault-secret.sh wrap prints it)"}
-  caFile: {display: String (file path), pattern: '^(repo:)?(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.(pem|crt|cer)$', describe: "the path of one PEM file (.pem, .crt or .cer): on the submitting machine (absolute or relative), or repo:ca-bundles/<file> in the fleet repository"}
-  kindList: {display: List (kinds), pattern: '^\s*(all|(Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues|operatorValues)(\s*,\s*(Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues|operatorValues))*)\s*$', describe: "a List of Postgres, PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB, postgresValues, operatorValues, or all"}
+  caFile: {display: List (one file path), pattern: '^\s*\[\s*["\x27]?(repo:)?(/|~/)?((\.\.?|[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*)/)*[A-Za-z0-9_@+][A-Za-z0-9_.@+-]*\.(pem|crt|cer)["\x27]?\s*\]\s*$', describe: "a List of exactly one PEM file (.pem, .crt or .cer) in brackets, [./ca.pem] or [repo:ca-bundles/<file>]: a path on the submitting machine or repo:<file path> in the fleet repository; repo:<file path> \"check for white spaces in between\""}
+  kindList: {display: List (kinds), pattern: '^\s*(all|\[\s*["\x27]?(Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues|operatorValues)["\x27]?(\s*,\s*["\x27]?(Postgres|PostgresBackupLocation|PostgresBackupSchedule|PostgresFerretDocumentDB|postgresValues|operatorValues)["\x27]?)*\s*\])\s*$', describe: "a List in brackets of Postgres, PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB, postgresValues, operatorValues, for example [Postgres, postgresValues], or all (all stands alone, without brackets: clearKinds=all)"}
 
 templates:
   tpg-day0:
-    clusters: {type: listOrAll, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: listOrAll, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    highAvailability: {type: boolean, allowEmpty: true}
-    operatorVersion: {type: operatorVersion, allowEmpty: true}
-    postgresVersion: {type: postgresVersion, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    highAvailability: {type: boolean, allowEmpty: true, mandatory: conditional}
+    operatorVersion: {type: operatorVersion, allowEmpty: true, mandatory: conditional}
+    postgresVersion: {type: postgresVersion, allowEmpty: true, mandatory: conditional}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     readReplicas: {type: integer, allowEmpty: true}
     storageSize: {type: quantity, allowEmpty: true}
     walStorageSize: {type: quantity, allowEmpty: true}
@@ -107,19 +132,19 @@ templates:
     postgresOverlayFilePath: {type: patchFileList, allowEmpty: true}
     postgresValuesOverlayFilePath: {type: patchFile, allowEmpty: true}
     operatorValuesOverlayFilePath: {type: patchFile, allowEmpty: true}
-    patchFiles: {type: jsonMap, allowEmpty: true}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     dryRun: {type: boolean}
     syncTimeoutSeconds: {type: posint}
     prTimeoutSeconds: {type: posint}
     toolsImage: {type: string}
 
   tpg-create-instance:
-    clusters: {type: list, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    highAvailability: {type: boolean, allowEmpty: true}
-    postgresVersion: {type: postgresVersion, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    highAvailability: {type: boolean, allowEmpty: true, mandatory: conditional}
+    postgresVersion: {type: postgresVersion, allowEmpty: true, mandatory: conditional}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     readReplicas: {type: integer, allowEmpty: true}
     storageSize: {type: quantity, allowEmpty: true}
     walStorageSize: {type: quantity, allowEmpty: true}
@@ -155,7 +180,7 @@ templates:
     egressToFqdns: {type: fqdnList, allowEmpty: true}
     postgresOverlayFilePath: {type: patchFileList, allowEmpty: true}
     postgresValuesOverlayFilePath: {type: patchFile, allowEmpty: true}
-    patchFiles: {type: jsonMap, allowEmpty: true}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     maxParallel: {type: posint}
     rolloutMode: {type: enum, values: [canary, batches, all]}
     dryRun: {type: boolean}
@@ -164,11 +189,11 @@ templates:
     toolsImage: {type: string}
 
   tpg-upgrade:
-    component: {type: enum, values: [operator, postgres], allowEmpty: true}
-    targetVersion: {type: version, allowEmpty: true}
-    clusters: {type: listOrAll, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
-    instances: {type: listOrAll, allowEmpty: true}
+    component: {type: enum, values: [operator, postgres], allowEmpty: true, mandatory: conditional}
+    targetVersion: {type: version, allowEmpty: true, mandatory: conditional}
+    clusters: {type: listOrAll, allowEmpty: true, mandatory: conditional}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
+    instances: {type: listOrAll, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
     preUpgradeBackup: {type: boolean}
     allowMajor: {type: boolean}
@@ -180,18 +205,18 @@ templates:
     toolsImage: {type: string}
 
   tpg-patch:
-    clusters: {type: listOrAll, allowEmpty: true}
-    instances: {type: listOrAll, allowEmpty: true}
+    clusters: {type: listOrAll, allowEmpty: true, mandatory: conditional}
+    instances: {type: listOrAll, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    postgresPatchFilePath: {type: patchFileList, allowEmpty: true}
-    postgresValuesPatchFilePath: {type: patchFile, allowEmpty: true}
-    operatorValuesPatchFilePath: {type: patchFile, allowEmpty: true}
-    patchFiles: {type: jsonMap, allowEmpty: true}
+    postgresPatchFilePath: {type: patchFileList, allowEmpty: true, mandatory: conditional}
+    postgresValuesPatchFilePath: {type: patchFile, allowEmpty: true, mandatory: conditional}
+    operatorValuesPatchFilePath: {type: patchFile, allowEmpty: true, mandatory: conditional}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     patchMode: {type: enum, values: [apply, clear]}
-    clearKinds: {type: kindList, allowEmpty: true}
-    backupCaBundleFile: {type: caFile, allowEmpty: true}
-    backupCaBundleVaultSecret: {type: k8sName, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    clearKinds: {type: kindList, allowEmpty: true, mandatory: conditional}
+    backupCaBundleFile: {type: caFile, allowEmpty: true, mandatory: conditional}
+    backupCaBundleVaultSecret: {type: k8sName, allowEmpty: true, mandatory: conditional}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     maxParallel: {type: posint}
     rolloutMode: {type: enum, values: [canary, batches, all]}
     dryRun: {type: boolean}
@@ -200,12 +225,12 @@ templates:
     toolsImage: {type: string}
 
   tpg-scale-instance:
-    clusters: {type: list, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    replicas: {type: integer, allowEmpty: true}
+    replicas: {type: integer, allowEmpty: true, mandatory: conditional}
     maxReadReplicas: {type: posint, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     enableHAIfNeeded: {type: boolean}
     maxParallel: {type: posint}
     rolloutMode: {type: enum, values: [canary, batches, all]}
@@ -224,28 +249,30 @@ templates:
     toolsImage: {type: string}
 
   tpg-delete-instance:
-    clusters: {type: list, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    confirm: {type: list, allowEmpty: true}
+    confirm: {type: list, allowEmpty: true, mandatory: always}
     finalBackup: {type: enum, values: ["true", "false", required]}
     forceDeleteStuckApps: {type: boolean}
     purgePvcs: {type: boolean}
     purgeNamespace: {type: boolean}
+    purgeBackups: {type: boolean}
     pushMode: {type: enum, values: [direct, pr]}
     timeoutSeconds: {type: posint}
     prTimeoutSeconds: {type: posint}
     toolsImage: {type: string}
 
   tpg-delete-apps:
-    clusters: {type: list, allowEmpty: true}
-    apps: {type: jsonMap, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    apps: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    confirm: {type: list, allowEmpty: true}
+    confirm: {type: list, allowEmpty: true, mandatory: always}
     dryRun: {type: boolean}
-    purgePvcs: {type: boolean, allowEmpty: true}
-    purgeNamespace: {type: boolean, allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    purgePvcs: {type: boolean, allowEmpty: true, mandatory: conditional}
+    purgeNamespace: {type: boolean, allowEmpty: true, mandatory: conditional}
+    purgeBackups: {type: boolean}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     force: {type: boolean}
     forceDeleteStuckApps: {type: boolean}
     finalBackup: {type: enum, values: ["true", "false", required]}
@@ -253,46 +280,48 @@ templates:
     prTimeoutSeconds: {type: posint}
     toolsImage: {type: string}
 
+  tpg-backup-expire:
+    clusterMap: {type: map, allowEmpty: true, mandatory: always}
+    dryRun: {type: boolean}
+    confirm: {type: list, allowEmpty: true, mandatory: conditional}
+    timeoutSeconds: {type: posint}
+    toolsImage: {type: string}
+
   tpg-helm-addons:
-    clusters: {type: listOrAll, allowEmpty: true}
+    clusters: {type: listOrAll, allowEmpty: true, mandatory: always}
     components: {type: components}
     existingAddons: {type: enum, values: [skip, upgrade]}
     dryRun: {type: boolean}
     toolsImage: {type: string}
 
   tpg-restore:
-    sourceCluster: {type: name, allowEmpty: true}
-    instance: {type: name, allowEmpty: true}
-    mode: {type: enum, values: [time, latest, backup, lsn, xid], allowEmpty: true}
-    targetTime: {type: timestamp, allowEmpty: true}
-    backupName: {type: k8sName, allowEmpty: true}
-    lsn: {type: lsn, allowEmpty: true}
-    xid: {type: integer, allowEmpty: true}
-    targetCluster: {type: name, allowEmpty: true}
-    targetInstance: {type: name, allowEmpty: true}
-    confirm: {type: name, allowEmpty: true}
+    clusterMap: {type: pairList, allowEmpty: true, mandatory: always}
+    rolloutMode: {type: enum, values: [canary, batches, all]}
     pushMode: {type: enum, values: [direct, pr]}
-    bestEffort: {type: boolean}
+    dryRun: {type: boolean}
+    maxParallel: {type: posint}
     restoreTimeoutSeconds: {type: posint}
     prTimeoutSeconds: {type: posint}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
+    keepSourceLocation: {type: boolean}
     toolsImage: {type: string}
 
   tpg-rotate-credential:
     secretType: {type: enum, values: [broadcom-registry, backup-storage, git-push, git-read, monitoring-remote-write, ca-bundle, custom]}
-    secretName: {type: k8sName, allowEmpty: true}
-    wrappingToken: {type: vaultToken, allowEmpty: true}
+    secretName: {type: k8sName, allowEmpty: true, mandatory: conditional}
+    wrappingToken: {type: vaultToken, allowEmpty: true, mandatory: conditional}
     caBundleFile: {type: caFile, allowEmpty: true}
-    patchFiles: {type: jsonMap, allowEmpty: true}
+    patchFiles: {type: jsonMap, allowEmpty: true, mandatory: conditional}
     clusters: {type: listOrAll}
     maxParallel: {type: posint}
     toolsImage: {type: string}
 
   tpg-network-policy:
-    clusters: {type: list, allowEmpty: true}
-    instances: {type: list, allowEmpty: true}
+    clusters: {type: list, allowEmpty: true, mandatory: conditional}
+    instances: {type: list, allowEmpty: true, mandatory: conditional}
     clusterMap: {type: map, allowEmpty: true}
-    mode: {type: enum, values: [apply, update, remove], allowEmpty: true}
-    pushMode: {type: enum, values: [direct, pr], allowEmpty: true}
+    mode: {type: enum, values: [apply, update, remove], allowEmpty: true, mandatory: always}
+    pushMode: {type: enum, values: [direct, pr], allowEmpty: true, mandatory: always}
     ingressFromNamespaces: {type: list, allowEmpty: true}
     ingressFromPodLabels: {type: map, allowEmpty: true}
     ingressFromCidrs: {type: cidrList, allowEmpty: true}
@@ -319,3 +348,8 @@ rules:
     - when: {highAvailability: "false", ferretReadOnlyReplicas: "0*[1-9][0-9]*"}
       message: "ferretReadOnlyReplicas above 0 needs highAvailability=true (the read-only FerretDB proxies connect to the standby)"
   tpg-create-instance: *instanceRules
+  # Round 23: a final backup is a backup the purge expires and deletes at once
+  tpg-delete-instance: &purgeRules
+    - when: {purgeBackups: "true", finalBackup: "true|required"}
+      message: "purgeBackups=true needs finalBackup=false (a final backup would be expired and its blobs deleted at once)"
+  tpg-delete-apps: *purgeRules

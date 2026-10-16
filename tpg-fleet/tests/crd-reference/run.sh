@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# charts/crd-reference and the zero-default rule (design decisions D69, D73):
+# helm_artifacts/instance/crd-reference and the zero-default rule (design decisions D69, D73):
 #   generator    tools/crd-defaults/generate.py --check: the registry, the
 #                reference templates, the _prune.tpl copy and the JSON schemas
-#                match charts/crd-reference/source-crds and defaults-overlay.yaml
+#                match helm_artifacts/instance/crd-reference/source-crds and defaults-overlay.yaml
 #   registry     fields whose default is not zero are never skipped
 #                (enableSSL, backupSync, backupIntegrityValidation,
 #                dedicatedWalLogVolume); required fields without a default are
@@ -11,10 +11,17 @@
 #                required objects kept; FerretDB readOnly {replicas: 0} dropped
 #                whole; the Postgres spec embedded in PostgresRestore
 #   parity       the objects the workflow scripts write inline (backup-instance.sh,
-#                postgres-upgrade.sh, restore.sh) equal what the reference template
-#                renders for the same spec: they carry no zero default
+#                postgres-upgrade.sh) equal what the reference template renders for the
+#                same spec: they carry no zero default. restore-pair.sh writes none inline:
+#                it renders the PostgresRestore and the location copy through this chart
+#                (checked below; tests/restore checks the rendered objects)
 #   schemas      every reference render and inline object passes kubeconform
 #                -strict against the live CRD schemas (when kubeconform is installed)
+#   restore      the PostgresRestore and the location copy that restore-pair.sh renders for every pair
+#                shape (a new instance on another cluster, in another namespace of the cluster, in the
+#                source namespace, in place) x a named backup and each PITR type x with and without a
+#                spec file pass kubeconform -strict, the embedded targetInstance.spec included. The
+#                objects are captured from tests/restore (RESTORE_RENDER_DIR, section 0), not rendered again here
 # Requires: helm, yq (mikefarah), python3 with PyYAML; skipped without them.
 # shellcheck disable=SC2015,SC2016
 set -euo pipefail
@@ -27,8 +34,8 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 PASS=0; FAIL=0
 ok()  { printf 'ok   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL %s\n' "$1"; [[ -z "${2:-}" ]] || printf '%s\n' "$2" | sed 's/^/       | /' | tail -15; FAIL=$((FAIL + 1)); }
-REF="$ROOT/charts/crd-reference"
-REG="$ROOT/charts/tpg-instance/files/zero-defaults.yaml"
+REF="$ROOT/helm_artifacts/instance/crd-reference"
+REG="$ROOT/helm_artifacts/instance/tpg-instance/files/zero-defaults.yaml"
 SCHEMAS="$REF/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
 
 # ---- generator
@@ -113,7 +120,7 @@ postgresVersion: {enabled: true, name: x, spec: {dbVersion: "17.6", instanceImag
   || bad "other kinds" "$OUT"
 refrender ''
 ! grep -q '[^[:space:]]' <<<"$OUT" && ok "every kind is off by default: the reference chart renders nothing" || bad "default render" "$OUT"
-# every kind with its example (charts/crd-reference/examples): kubeconform against the CRD schemas
+# every kind with its example (helm_artifacts/instance/crd-reference/examples): kubeconform against the CRD schemas
 args=(); for f in "$REF"/examples/*.yaml; do args+=(-f "$f"); done
 helm template ref "$REF" "${args[@]}" > "$TMP/all.yaml"
 [[ "$(yq '.kind' "$TMP/all.yaml" | grep -vc '^---')" == "9" ]] && ok "the 9 examples render" || bad "examples" "$(cat "$TMP/all.yaml")"
@@ -123,6 +130,43 @@ if command -v kubeconform >/dev/null; then
   printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: PostgresBackup\nmetadata: {name: x}\nspec: {sourceInstance: {name: i}, typo: full}\n' > "$TMP/typo.yaml"
   kubeconform -strict -schema-location "$SCHEMAS" "$TMP/typo.yaml" >/dev/null 2>&1 && bad "a misspelled field must fail the schema" \
     || ok "a misspelled spec field fails kubeconform -strict (the schemas are closed)"
+fi
+
+# ---- the objects restore-pair.sh renders for every pair shape: captured from tests/restore (its dry-run matrix), checked against the CRD schemas
+if command -v kubeconform >/dev/null; then
+  if [[ ! -f "$ROOT/tests/restore/run.sh" ]]; then bad "restore render: tests/restore/run.sh is missing"
+  else
+    RD="$TMP/restore-shapes"; mkdir -p "$RD"
+    RC=0; RLOG="$(RESTORE_RENDER_DIR="$RD" bash "$ROOT/tests/restore/run.sh" 2>&1)" || RC=$?
+    nr="$(find "$RD" -name '*.restore.yaml' | wc -l | tr -d ' ')"; nl="$(find "$RD" -name '*.location.yaml' | wc -l | tr -d ' ')"
+    if [[ "$RC" -ne 0 ]]; then bad "restore render: tests/restore in render-only mode failed" "$RLOG"
+    elif [[ "$nr" -eq 0 ]] && grep -q '^SKIP' <<<"$RLOG"; then echo "SKIP the restore shapes: $(grep '^SKIP' <<<"$RLOG" | head -1)"
+    elif [[ "$nr" != 40 || "$nl" != 20 ]]; then bad "restore render: expected 40 PostgresRestore and 20 location copies (4 shapes x 5 recovery points x 2 spec files; 2 shapes copy the location), got ${nr} and ${nl}" "$(ls "$RD")"
+    else
+      kc_group() {  # kc_group LABEL GLOB...: the captured objects matching the globs all pass kubeconform -strict
+        local label="$1" files=() g f n
+        shift
+        for g in "$@"; do for f in "$RD"/$g; do [[ -f "$f" ]] && files+=("$f"); done; done
+        n="${#files[@]}"
+        [[ "$n" -gt 0 ]] || { bad "restore render ${label}: no object matches"; return; }
+        kubeconform -strict -summary -schema-location "$SCHEMAS" "${files[@]}" >"$TMP/kc" 2>&1 && grep -q "Valid: ${n}, Invalid: 0, Errors: 0" "$TMP/kc" \
+          && ok "restore render, ${label}: ${n} objects pass kubeconform -strict against the CRD schemas" || bad "restore render ${label}" "$(cat "$TMP/kc")"
+      }
+      kc_group "a new instance on another cluster" 'newcluster-*'
+      kc_group "a new instance in another namespace of the cluster" 'othernamespace-*'
+      kc_group "a new instance in the source namespace" 'samenamespace-*'
+      kc_group "in place" 'inplace-*'
+      kc_group "a named backup" '*-backup-*'
+      for k in latest time lsn transaction; do kc_group "pitr ${k}" "*-${k}-*"; done
+      kc_group "without a spec file" '*-nospec.*'
+      kc_group "with a spec file (the embedded targetInstance.spec)" '*-spec.*'
+      # the embedded Postgres spec is checked as well: a misspelled field in it fails
+      yq '.spec.targetInstance.spec.noSuchField = 1' "$RD/newcluster-latest-spec.restore.yaml" > "$TMP/typo-restore.yaml"
+      kubeconform -strict -schema-location "$SCHEMAS" "$TMP/typo-restore.yaml" >/dev/null 2>&1 \
+        && bad "an unknown field in the embedded targetInstance.spec must fail the schema" \
+        || ok "an unknown field in the embedded targetInstance.spec fails kubeconform -strict (the schema reaches into it)"
+    fi
+  fi
 fi
 
 # ---- parity: the objects the workflow scripts write inline (D69, hand-applied skip rule)
@@ -157,25 +201,13 @@ heredoc postgres-upgrade.sh 'apply -f - >/dev/null <<YAML || { ifail CREATE_FAIL
 [[ -s "$TMP/pvu.tpl" ]] || bad "postgres-upgrade.sh: the PostgresVersionUpgrade heredoc was not found"
 name=orders-db-upgrade WF=tpg-upgrade-abc i=orders-db TARGET=postgres-18.1 expand "$TMP/pvu.tpl" > "$TMP/pvu.yaml"
 parity "postgres-upgrade.sh" postgresVersionUpgrade "$TMP/pvu.yaml"
-heredoc restore.sh 'tk -n "$DST_NS" apply -f - >/dev/null <<YAML || fail SOURCE_LOCATION_FAILED' > "$TMP/srcbl.tpl"
-for SSL in false true; do
-  SRC_BL=restore-src-c1-orders-db DST_NS=pg-orders-copy SRC_C=c1 I=orders-db WF=tpg-restore-abc SRC_CONTAINER=pg-backups-c1 \
-    SRC_REPO_PATH=/pg-orders-db SRC_ENDPOINT=blob.core.windows.net SRC_SSL="$SSL" expand "$TMP/srcbl.tpl" > "$TMP/srcbl.yaml"
-  parity "restore.sh source backup location (enableSSL ${SSL})" postgresBackupLocation "$TMP/srcbl.yaml"
-done
-# the PostgresRestore block of restore.sh, run with the variables of each mode
-awk '/^NAME="\$\{T\}-restore-/ {on=1} on {print} on && /^\} > "\$WORK\/restore.yaml"$/ {exit}' "$ROOT/workflows/scripts/restore.sh" \
-  | sed 's#> "$WORK/restore.yaml"#> "$OUTFILE"#' > "$TMP/restore-block.sh"
-grep -q 'OUTFILE' "$TMP/restore-block.sh" || bad "restore.sh: the PostgresRestore block was not found"
-printf 'cluster: {name: c2}\ninstance: {name: t, postgresVersion: postgres-17.6, highAvailability: {enabled: false, readReplicas: 0}}\nbackup: {container: pg-backups-c2}\n' > "$TMP/tv.yaml"
-helm template t "$ROOT/charts/tpg-instance" -f "$ROOT/clusters/_template/cluster.yaml" -f "$ROOT/clusters/_template/instance.yaml" -f "$TMP/tv.yaml" -n pg-t > "$TMP/target-render.yaml"
-mkdir -p "$TMP/work"; cp "$TMP/target-render.yaml" "$TMP/work/target-render.yaml"
-for row in "time 2026-09-20T08:00:00Z false c1" "latest - true c2" "lsn 0/3000060 false c2" "xid 791 true c1" "backup orders-db-full-1 false c1"; do
-  read -r MODE TARGET BEST DST_C <<<"$row"; [[ "$TARGET" != "-" ]] || TARGET=""
-  ( T=t WF=tpg-restore-abc MODE="$MODE" TARGET="$TARGET" BEST="$BEST" SRC_BL=bl STANZA=pg-orders-db-0000 TARGET_EXISTS=false \
-    SRC_C=c1 DST_C="$DST_C" PGV=postgres-17.6 WORK="$TMP/work" OUTFILE="$TMP/restore.yaml" bash "$TMP/restore-block.sh" )
-  parity "restore.sh PostgresRestore (mode ${MODE}, bestEffort ${BEST}, $( [[ "$DST_C" == c1 ]] && echo same cluster || echo other cluster))" postgresRestore "$TMP/restore.yaml"
-done
+# restore-pair.sh (tpg-restore) has no inline object: it renders the PostgresRestore and the copy of the source
+# backup location through this reference chart, so tpg.prune is the one place that leaves zero defaults out
+RP="$ROOT/workflows/scripts/restore-pair.sh"
+[[ "$(grep -c 'helm template ref "\$REPO/helm_artifacts/instance/crd-reference"' "$RP")" -ge 1 ]] \
+  && grep -q 'render_obj PostgresRestore' "$RP" && grep -q 'render_obj PostgresBackupLocation' "$RP" \
+  && ok "restore-pair.sh renders the PostgresRestore and the source location copy through the reference chart" || bad "restore-pair.sh does not render through crd-reference"
+! grep -qE '^kind: (PostgresRestore|PostgresBackupLocation)' "$RP" && ok "restore-pair.sh writes no PostgresRestore or PostgresBackupLocation inline" || bad "restore-pair.sh still writes an inline object"
 
 echo
 echo "crd-reference: ${PASS} passed, ${FAIL} failed"

@@ -15,14 +15,26 @@
 #   clusters.<cluster>.cluster.maxReadReplicas          maxReadReplicas
 #   clusters.<cluster>.instances.<instance>.instance.*  postgresVersion, highAvailability,
 #                                                       readReplicas, sizing, storageClass,
-#                                                       exposure (service type and annotations)
+#                                                       exposure (service type and annotations),
+#                                                       namespace and sharedSecretsOwner (Round 23)
 #   clusters.<cluster>.instances.<instance>.backup.*    enableSSL, caBundle (from a file, Vault or
 #                                                       tpg-settings), fullRetention, fullRetentionType,
 #                                                       backupSchedule (scheduled,
 #                                                       operatorSchedules with operator, D70)
 #   clusters.<cluster>.instances.<instance>.ferret.*    ferret and its keys (D71; false removes the block)
 #   clusters.<cluster>.instances.<instance>.network.*   networkPolicy and its rules
-# Existing entries keep their other settings.
+# Existing entries keep their other settings. An instance that tpg-restore restored (instance.restored: true in its entry) is
+# BLOCKED INSTANCE_RESTORED, that instance only (Round 23): its entry is not written, discover.sh leaves it out of the deployment,
+# the other instances of the run go ahead; tpg-scale-instance, tpg-upgrade (postgres) and tpg-patch are the workflows that change it.
+#
+# Namespace (Round 23, locked decision 8): the clusterMap key namespace, default pg-<instance>,
+# is written as instance.namespace for a new instance and is immutable: a different value for
+# an instance that is declared is refused (NAMESPACE_IMMUTABLE: tpg-day0 blocks the cluster,
+# tpg-create-instance the instance); a reserved namespace is refused by the clusterMap check
+# (cluster-map-keys.yaml, reserved). Instances may share a namespace; the plan keeps exactly one
+# of them the owner of the Secrets the chart names the same in every instance
+# (instance.sharedSecretsOwner, ns_owner_plan): an instance that joins a namespace which has an
+# owner gets sharedSecretsOwner: false.
 #
 # Versions (design decision D49): the cluster decides, not clusters/fleet.yaml.
 #   - The operator (or an instance) does not run on the target yet: the input wins
@@ -61,6 +73,9 @@
 # bundles are recorded as ca.<hash>), so the parameters stay under the 128 KiB
 # limit of one container argument.
 # Notes (FLEET_OVERRIDDEN, blocked clusters) are recorded as plan.git.
+# The list inputs (P_INSTANCES, P_ALLOWED_SOURCE_RANGES, P_INGRESS_FROM_*, P_EGRESS_TO_*, the overlay
+# file paths) are bracketed, [a, b]; lib.sh list_items turns them into the JSON arrays the
+# clusterMap rules check. A single-file input is [path].
 # Inputs (environment): P_CLUSTER_MAP P_INSTANCES P_HA P_OPERATOR_VERSION
 #   P_POSTGRES_VERSION P_READ_REPLICAS P_STORAGE_SIZE P_WAL_STORAGE_SIZE
 #   P_STORAGE_CLASS P_CPU P_MEMORY P_BACKUP_SCHEDULE P_BACKUP_ENABLE_SSL
@@ -76,6 +91,7 @@ source /scripts/lib.sh
 patch_group overlays                # tpg-day0 and tpg-create-instance take overlay files (Round 22)
 MODE="${FLEET_MODE:-day0}"          # day0 | create (tpg-create-instance)
 WF_ID="day0"; [[ "$MODE" == "create" ]] && WF_ID="create-instance"
+WF_NAME="tpg-day0"; [[ "$MODE" == "create" ]] && WF_NAME="tpg-create-instance"
 result_guard result.git
 
 REPO="$WORK/repo"
@@ -92,7 +108,7 @@ if cmap_set; then
   cmap_load
   cp "$WORK/cmap.json" "$WORK/targets.json"
 else
-  jq -cn --argjson cl "$CLUSTERS_JSON" --arg inst "$(split_list "${P_INSTANCES:-}" | paste -sd,)" '
+  jq -cn --argjson cl "$CLUSTERS_JSON" --arg inst "$(list_csv instances "${P_INSTANCES:-}")" '
     ($inst | split(",") | map(select(length > 0))) as $il
     | reduce $cl[] as $c ({}; .[$c] = {instances: (reduce $il[] as $i ({}; .[$i] = {}))})' > "$WORK/targets.json"
 fi
@@ -102,23 +118,33 @@ map_flag() {  # map_flag TEXT -> the YAML or JSON mapping as compact JSON ("" wh
   [[ -n "$(tr -d '[:space:]' <<<"${1:-}")" ]] || { printf ''; return; }
   printf '%s\n' "$1" | yq -o=json -I=0 '.' 2>/dev/null || printf '%s' "$1"
 }
+f_asr="$(list_flag allowedSourceRanges "${P_ALLOWED_SOURCE_RANGES:-}")" || exit 1
+f_ifn="$(list_flag ingressFromNamespaces "${P_INGRESS_FROM_NAMESPACES:-}")" || exit 1
+f_ifc="$(list_flag ingressFromCidrs "${P_INGRESS_FROM_CIDRS:-}")" || exit 1
+f_etc="$(list_flag egressToCidrs "${P_EGRESS_TO_CIDRS:-}")" || exit 1
+f_etf="$(list_flag egressToFqdns "${P_EGRESS_TO_FQDNS:-}")" || exit 1
+f_pof="$(list_flag postgresOverlayFilePath "${P_POSTGRES_OVERLAY_FILES:-}" --files)" || exit 1
+f_pvo="$(list_flag postgresValuesOverlayFilePath "${P_VALUES_OVERLAY_FILES:-}" --files --one)" || exit 1
+f_ovo="$(list_flag operatorValuesOverlayFilePath "${P_OPERATOR_VALUES_OVERLAY_FILE:-}" --files --one)" || exit 1
 jq -cn --arg operatorVersion "$opv_flag" --arg postgresVersion "$pgv_flag" --arg highAvailability "${P_HA:-}" \
   --arg readReplicas "${P_READ_REPLICAS:-}" --arg storageSize "${P_STORAGE_SIZE:-}" \
   --arg walStorageSize "${P_WAL_STORAGE_SIZE:-}" --arg storageClass "${P_STORAGE_CLASS:-}" \
   --arg cpu "${P_CPU:-}" --arg memory "${P_MEMORY:-}" --arg backupSchedule "${P_BACKUP_SCHEDULE:-fleet}" \
   --arg backupEnableSSL "${P_BACKUP_ENABLE_SSL:-false}" \
-  --arg disableInitialBackup "$( [[ "${P_DISABLE_INITIAL_BACKUP:-false}" == true ]] && echo true || true )" \
+  --arg disableInitialBackup "$(if [[ "${P_DISABLE_INITIAL_BACKUP:-false}" == true ]]; then echo true; fi)" \
   --arg backupFullRetention "${P_BACKUP_FULL_RETENTION:-}" --arg backupFullRetentionType "${P_BACKUP_FULL_RETENTION_TYPE:-}" \
   --arg exposure "${P_EXPOSURE:-}" --arg serviceAnnotations "$(map_flag "${P_SERVICE_ANNOTATIONS:-}")" \
   --arg readOnlyExposure "${P_READ_ONLY_EXPOSURE:-}" \
   --arg readOnlyServiceAnnotations "$(map_flag "${P_READ_ONLY_SERVICE_ANNOTATIONS:-}")" \
-  --arg allowedSourceRanges "${P_ALLOWED_SOURCE_RANGES:-}" --arg internalLoadBalancerSubnet "${P_INTERNAL_LB_SUBNET:-}" \
-  --arg networkPolicy "${P_NETWORK_POLICY:-}" --arg ingressFromNamespaces "${P_INGRESS_FROM_NAMESPACES:-}" \
+  --argjson allowedSourceRanges "$f_asr" --arg internalLoadBalancerSubnet "${P_INTERNAL_LB_SUBNET:-}" \
+  --arg networkPolicy "${P_NETWORK_POLICY:-}" --argjson ingressFromNamespaces "$f_ifn" \
   --arg ingressFromPodLabels "$(map_flag "${P_INGRESS_FROM_POD_LABELS:-}")" \
-  --arg ingressFromCidrs "${P_INGRESS_FROM_CIDRS:-}" --arg egressToCidrs "${P_EGRESS_TO_CIDRS:-}" \
-  --arg egressToFqdns "${P_EGRESS_TO_FQDNS:-}" \
-  --arg postgresOverlayFilePath "${P_POSTGRES_OVERLAY_FILES:-}" --arg postgresValuesOverlayFilePath "${P_VALUES_OVERLAY_FILES:-}" \
-  --arg operatorValuesOverlayFilePath "${P_OPERATOR_VALUES_OVERLAY_FILE:-}" \
+  --argjson ingressFromCidrs "$f_ifc" \
+  --argjson egressToCidrs "$f_etc" \
+  --argjson egressToFqdns "$f_etf" \
+  --argjson postgresOverlayFilePath "$f_pof" \
+  --argjson postgresValuesOverlayFilePath "$f_pvo" \
+  --argjson operatorValuesOverlayFilePath "$f_ovo" \
   --arg operatorFullSchedule "${P_OPERATOR_FULL_SCHEDULE-0 0 * * 0}" \
   --arg operatorIncrementalSchedule "${P_OPERATOR_INCR_SCHEDULE-0 0 * * 1-6}" \
   --arg ferret "${P_FERRET:-}" --arg ferretReplicas "${P_FERRET_REPLICAS:-1}" \
@@ -142,8 +168,9 @@ jq -c --arg w "$WF_ID" --slurpfile keys "$WORK/keys.json" --slurpfile flags "$WO
     with_entries(.value |= (fill($k.cluster; .)
       | .instances = ((.instances // {}) | with_entries(.value |= fill($k.instance; .)))))
 ' "$WORK/targets.json" > "$WORK/effective.raw.json"
-# Lists and maps given as inputs are checked and normalized like clusterMap values
-if ! errs="$(python3 "$TPG_LIB_DIR/clustermap.py" normalize --map "$WORK/effective.raw.json" \
+# Lists and maps given as inputs are checked and normalized like clusterMap values. The clusterMap values
+# in the effective targets are what validate wrote (a single-file key is the bare path): --normalized
+if ! errs="$(python3 "$TPG_LIB_DIR/clustermap.py" normalize --normalized --map "$WORK/effective.raw.json" \
       --keys "$WORK/keys.json" --out "$WORK/effective.json")"; then
   record result.git FAILED INVALID_INPUT "$(tr '\n' ';' <<<"$errs")"
   exit 1
@@ -161,10 +188,43 @@ live_operator() {
   if [[ "$tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then norm_operator_version "$tag"; else echo unknown; fi
 }
 live_postgres() {
-  # live_postgres INSTANCE -> "none" or the spec.postgresVersion.name of the running instance (use_cluster first)
+  # live_postgres INSTANCE NAMESPACE -> "none" or the spec.postgresVersion.name of the running instance (use_cluster first)
   local v
-  v="$(tk -n "pg-$1" get postgres "$1" -o jsonpath='{.spec.postgresVersion.name}' 2>/dev/null || true)"
-  if tk -n "pg-$1" get postgres "$1" >/dev/null 2>&1; then printf '%s' "${v:-unknown}"; else echo none; fi
+  v="$(tk -n "$2" get postgres "$1" -o jsonpath='{.spec.postgresVersion.name}' 2>/dev/null || true)"
+  if tk -n "$2" get postgres "$1" >/dev/null 2>&1; then printf '%s' "${v:-unknown}"; else echo none; fi
+}
+plan_namespace() {
+  # plan_namespace CLUSTER INSTANCE REQUESTED -> NS_PLAN: the namespace this run uses and
+  # NS_WRITE ("true": the plan writes instance.namespace). A declared instance keeps the namespace
+  # of its entry (instance_ns); asking for another one fails with NS_REASON NAMESPACE_IMMUTABLE
+  # and NS_DETAIL (return 1). A new instance gets REQUESTED, else pg-<instance>
+  local c="$1" i="$2" want="$3" cur
+  NS_REASON=""; NS_DETAIL=""; NS_WRITE=false
+  if fleet_has_instance_file "$F" "$c" "$i"; then
+    cur="$(instance_ns "$c" "$i")" || { NS_REASON=FLEET_UNREADABLE; NS_DETAIL="$FLEET_UNREADABLE_DETAIL"; return 1; }
+    NS_PLAN="$cur"
+    if [[ -n "$want" && "$want" != "$cur" ]]; then
+      NS_REASON=NAMESPACE_IMMUTABLE
+      NS_DETAIL="${i} is declared in namespace ${cur} on ${c}, the namespace key asks for ${want}; the namespace of an instance cannot change (leave the key out, or delete the instance and create it again)"
+      return 1
+    fi
+  else
+    NS_PLAN="${want:-pg-$i}"; NS_WRITE=true
+  fi
+}
+ns_owner_plan() {
+  # ns_owner_plan CLUSTER INSTANCE NAMESPACE: exactly one instance of a namespace renders the
+  # shared Secrets (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage).
+  # When another instance of the namespace owns them, this one gets instance.sharedSecretsOwner
+  # false; otherwise it is the owner (the key is removed: the chart default is true)
+  local c="$1" i="$2" ns="$3" others
+  others="$(fleet_ns_owners "$REPO" "$c" "$ns" | grep -vFx -- "$i" || true)"
+  if [[ -n "$others" ]]; then
+    C="$c" I="$i" yq -i '.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner = false' "$F"
+    NOTES+=("NAMESPACE_SHARED ${c}/${i} joins namespace ${ns}; the shared Secrets stay with $(head -n1 <<<"$others")")
+  else
+    C="$c" I="$i" yq -i 'del(.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner)' "$F"
+  fi
 }
 newer() { [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]; }   # A newer than B
 block() {  # block CLUSTER REASON DETAIL: the cluster keeps its fleet.yaml entry; the pre-check reports it
@@ -192,7 +252,7 @@ entry_value() {  # entry_value JSON KEY -> string value, or compact JSON for a l
   jq -r --arg k "$2" '.[$k] // "" | if type == "string" then . else tojson end' <<<"$1"
 }
 ACNS="$(setting acnsEnabled 2>/dev/null || true)"
-CHART_PREFIX="charts/tpg-instance/"
+CHART_PREFIX="helm_artifacts/instance/tpg-instance/"
 
 # ---- patch files at creation (design decision D60, creation rules; Round 15, D83)
 # The same files as tpg-patch, with the rules of a new target: sizes, the storage
@@ -291,7 +351,7 @@ create_render_check() {  # create_render_check CLUSTER INSTANCE -> 0, or 1 with 
   printf '%s\n' "$out" > "$WORK/render-$1-$2.yaml"
   [[ -z "${IP_POSTGRES:-}" ]] || patch_unrendered_warnings "$WORK/render-$1-$2.yaml" "$REPO/$IP_POSTGRES" "$1" "$2"
   # Server-side dry run of the Postgres object through the operator's admission
-  # webhooks (the pg-<instance> namespace does not exist yet: the object is sent
+  # webhooks (the instance namespace does not exist yet: the object is sent
   # to the default namespace under a probe name, without its backup location)
   pg="$(yq 'select(.kind == "Postgres") | del(.spec.backupLocation) | .metadata.namespace = "default"
         | .metadata.name = "tpg-create-probe" | del(.metadata.annotations)' "$WORK/render-$1-$2.yaml")"
@@ -350,10 +410,25 @@ for c in $(jq -r 'keys[]' "$WORK/effective.json"); do
   stop=""
   declare -A RUNNING=()
   for i in $(jq -r '.instances | keys[]' <<<"$entry"); do
+    # an instance tpg-restore restored (instance.restored, Round 23) is rendered from its restore-patch and changed by three
+    # workflows only: it is BLOCKED here (that instance only, its entry is not touched, nothing syncs it) and the others go ahead
+    if [[ "$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.restored // false' "$F" 2>/dev/null)" == "true" ]]; then
+      jq -cn --arg i "$i" --arg r "INSTANCE_RESTORED" --arg d "${i} on ${c} was restored by tpg-restore (instance.restored in ${FLEET_REL}): its Postgres is rendered from its restore-patch, so ${WF_NAME:-this workflow} neither writes its entry nor syncs it; change it with tpg-scale-instance (read replicas), tpg-upgrade component=postgres (version) or tpg-patch (patch files)" \
+        '{instance:$i, reason:$r, detail:$d}' >> "$WORK/instance-blocks.$c"
+      continue
+    fi
     pgv="$(jq -r --arg i "$i" '.instances[$i].postgresVersion // ""' <<<"$entry")"
     [[ -n "$pgv" ]] || { FAILED+=("${c}/${i}: postgresVersion is required"); continue; }
     cur_pgv="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.postgresVersion // ""' "$F")"
-    lpg="none"; [[ "$live" == "none" ]] || lpg="$(live_postgres "$i")"
+    # the namespace is immutable: a declared instance keeps its own (Round 23)
+    if ! plan_namespace "$c" "$i" "$(jq -r --arg i "$i" '.instances[$i].namespace // ""' <<<"$entry")"; then
+      if [[ "$MODE" == "create" ]]; then
+        jq -cn --arg i "$i" --arg r "$NS_REASON" --arg d "$NS_DETAIL" '{instance:$i, reason:$r, detail:$d}' >> "$WORK/instance-blocks.$c"
+        continue
+      fi
+      stop="${NS_REASON} ${NS_DETAIL}"; break
+    fi
+    lpg="none"; [[ "$live" == "none" ]] || lpg="$(live_postgres "$i" "$NS_PLAN")"
     [[ "$lpg" == none ]] || RUNNING[$i]=1
     if [[ "$MODE" == "create" ]]; then
       # An instance that already runs is compared with the request after the
@@ -462,12 +537,18 @@ for c in $(jq -r 'keys[]' "$WORK/effective.json"); do
       FAILED+=("${c}/${i}: a CA bundle source (backupCaBundleFile or backupCaBundleVaultSecret) needs backupEnableSSL=true"); continue
     fi
     cp "$F" "$WORK/fleet.pre-$c-$i.yaml"
+    plan_namespace "$c" "$i" "$(jq -r '.namespace // ""' <<<"$ientry")" \
+      || { FAILED+=("${c}/${i}: ${NS_REASON} ${NS_DETAIL}"); continue; }
     while IFS=$'\t' read -r key fmt paths; do
       v="$(entry_value "$ientry" "$key")"
       [[ -n "$v" ]] || continue
       [[ "$key" != disableInitialBackup || -z "${RUNNING[$i]:-}" ]] || continue   # new instances only
+      [[ "$key" != namespace ]] || continue   # written below: new instances only, default pg-<instance>
       for p in $paths; do write_value '.clusters[strenv(C)].instances[strenv(I)]' "$p" "$fmt" "$v"; done
     done < <(key_rows instance)
+    # the namespace (Round 23) and who owns the shared Secrets of it
+    [[ "$NS_WRITE" != true ]] || write_value '.clusters[strenv(C)].instances[strenv(I)]' .instance.namespace string "$NS_PLAN"
+    ns_owner_plan "$c" "$i" "$NS_PLAN"
     # patch files (Round 14 create-instance, Round 15 day0, D83): checked with the
     # creation rules and made current; a running instance keeps an identical file
     old_pg="$(patch_ref "$F" "$c" "$i" postgres 2>/dev/null)" || old_pg=""
@@ -538,7 +619,7 @@ for c in $(jq -r 'keys[]' "$WORK/effective.json"); do
       # Idempotent create: a declared instance that already runs is left alone
       # when the request matches its entry, and refused when it differs.
       declared=false; fleet_has_instance_file "$WORK/fleet.pre-$c-$i.yaml" "$c" "$i" && declared=true
-      running=false; [[ "$(live_postgres "$i")" != "none" ]] && running=true
+      running=false; [[ "$(live_postgres "$i" "$NS_PLAN")" != "none" ]] && running=true
       same=false
       C="$c" I="$i" yq -e '.clusters[strenv(C)].instances[strenv(I)]' "$WORK/fleet.pre-$c-$i.yaml" > "$WORK/a.yaml" 2>/dev/null || true
       C="$c" I="$i" yq -e '.clusters[strenv(C)].instances[strenv(I)]' "$F" > "$WORK/b.yaml" 2>/dev/null || true

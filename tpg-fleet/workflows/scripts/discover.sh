@@ -2,8 +2,9 @@
 # discover.sh WORKFLOW_NAME CLUSTERS [FLEET_JSON]
 # Build the run inventory from the registered clusters (Secret argo/kubeconfig-<cluster>,
 # wave from its tpg.fleet/wave label) and clusters/fleet.yaml in tpg-fleet.
-# CLUSTERS is "all" (registered clusters that have an entry in fleet.yaml) or a
-# comma-separated list. FLEET_JSON, when set, replaces fleet.yaml (tpg-day0 dry runs).
+# CLUSTERS is "all" (registered clusters that have an entry in fleet.yaml) or the
+# comma-separated cluster names the validate step wrote to /tmp/selection (an internal
+# value; the clusters input itself is a bracketed list, parsed by validate-params.sh). FLEET_JSON, when set, replaces fleet.yaml (tpg-day0 dry runs).
 # Instance selection (environment), for the workflows that act on chosen instances:
 #   P_FILTER       none (default): every declared instance of the selected clusters
 #                  off:   the same, also with clusterMap (tpg-day0)
@@ -15,12 +16,18 @@
 #                  any:   only the selected instances, each declared on at least one
 #                         selected cluster (tpg-backup)
 #   P_CLUSTER_MAP  clusterMap: the instances of each cluster (always checked as pairs)
-#   P_INSTANCES    otherwise: comma-separated instances, or all / empty for every one
+#   P_INSTANCES    otherwise: the instances input, a bracketed list [a, b] (lib.sh list_items),
+#                  or all / empty for every one
+#   P_PURGE_BACKUPS  tpg-delete-instance (Round 23): purgeBackups, the default of every instance (the clusterMap
+#                  key purgeBackups of an instance overrides it). With pairs and purgeBackups=true an instance
+#                  that is no longer declared is accepted when it has an audit copy in clusters/deleted that
+#                  records its backup repository (deleted.backupLocation): the re-run of a delete whose blob
+#                  purge failed, after the Postgres, the entry and the location are gone
 # A selected instance that is not declared fails the run here, before anything
 # changes, with UNKNOWN_INSTANCE and the instances that are declared.
 # Outputs:
 #   /tmp/inventory.json       [{name, wave, maxReadReplicas, operatorVersion, instances:[{name,
-#                             postgresVersion, highAvailability, readReplicas, scheduledBackups,
+#                             namespace, secretsOwner, postgresVersion, highAvailability, readReplicas, scheduledBackups,
 #                             backupMode (fleet|none|operator), ferret, ferretReadOnlyReplicas,
 #                             enableSSL, egressToFqdns, networkPolicy}]}]
 #   /tmp/instance-items.json  [{cluster, instance, scheduled}]
@@ -60,6 +67,7 @@ if [[ "$FILTER" != "none" && -z "$(cmap_set && echo map)" ]] && [[ -z "${P_INSTA
 fi
 unknown=0
 declare -A seen_anywhere=()
+declare -A gone_rerun=()   # "<cluster>/<instance>": no longer declared, accepted for the blob purge of a re-run
 # What the plan of this run (tpg-day0, tpg-create-instance: fleet-day0.sh) already
 # blocked: a blocked cluster or instance is left out here without failing the run,
 # and its BLOCKED record stays what the report and the gate show.
@@ -69,8 +77,10 @@ plan_block() {  # plan_block KEY -> "REASON|DETAIL" of a BLOCKED record, or noth
 }
 
 inv="[]"
-for c in $wanted; do
-  if ! grep -qx "$c" <<<"$registered"; then
+mapfile -t wanted_list <<<"$wanted"      # (not word-split: a name is never a glob pattern)
+for c in ${wanted_list[@]+"${wanted_list[@]}"}; do
+  [[ -n "$c" ]] || continue
+  if ! grep -Fqx -- "$c" <<<"$registered"; then
     record "result.${c}" FAILED NOT_REGISTERED "Secret argo/kubeconfig-${c} is missing; registered clusters: $(paste -sd, <<<"$registered")"
     continue
   fi
@@ -90,7 +100,7 @@ for c in $wanted; do
     chosen="$declared"
     if [[ "$CHECK_ONLY" == "true" ]]; then
       for i in $(cmap_instances "$c"); do
-        grep -qx "$i" <<<"$declared" && continue
+        grep -Fqx -- "$i" <<<"$declared" && continue
         record "result.${c}.${i}" FAILED UNKNOWN_INSTANCE \
           "no clusters.${c}.instances.${i} in ${FLEET_REL}; declared on ${c}: $(paste -sd, <<<"$declared")"
         unknown=1
@@ -99,10 +109,14 @@ for c in $wanted; do
   else
     chosen=""
     for i in $(selected_instances "$REPO" "$c"); do
-      if grep -qx "$i" <<<"$declared"; then
+      if grep -Fqx -- "$i" <<<"$declared"; then
         chosen="$(printf '%s\n%s' "$chosen" "$i")"; seen_anywhere[$i]=1
       elif [[ -n "$cblock" || -n "$(plan_block "result.${c}.${i}")" ]]; then
         log "${c}/${i}: blocked in the plan, left out"
+      elif [[ "$FILTER" == "pairs" && "$(cmap_ival "$c" "$i" purgeBackups "${P_PURGE_BACKUPS:-false}")" == "true" ]] && deleted_backup_repo "$REPO" "$c" "$i"; then
+        # the re-run of a delete with purgeBackups=true that stopped at the blobs: only the audit copy is left
+        chosen="$(printf '%s\n%s' "$chosen" "$i")"; seen_anywhere[$i]=1; gone_rerun["$c/$i"]=1
+        log "${c}/${i}: no longer declared in ${FLEET_REL}, but its audit copy in clusters/deleted/${c} records the backup repository: accepted to finish the blob purge (purgeBackups=true)"
       elif [[ "$FILTER" == "pairs" ]]; then
         record "result.${c}.${i}" FAILED UNKNOWN_INSTANCE \
           "no clusters.${c}.instances.${i} in ${FLEET_REL}; declared on ${c}: $(paste -sd, <<<"$declared")"
@@ -112,6 +126,19 @@ for c in $wanted; do
   fi
   instances="[]"
   for i in $chosen; do
+    if [[ "$(plan_block "result.${c}.${i}")" == INSTANCE_RESTORED\|* ]]; then
+      # restored by tpg-restore: the plan blocked it (INSTANCE_RESTORED) and the deployment leaves it alone
+      log "${c}/${i}: restored by tpg-restore, blocked in the plan, left out"
+      continue
+    fi
+    if [[ -n "${gone_rerun["$c/$i"]:-}" ]]; then
+      # nothing of it is declared any more: the namespace of the audit copy, no deployment, no schedule
+      obj="$(jq -cn --arg n "$i" --arg ns "$(instance_ns_known "$REPO" "$c" "$i")" \
+        '{name:$n, namespace:$ns, secretsOwner:false, postgresVersion:"", highAvailability:false, readReplicas:0, scheduledBackups:false, backupMode:"none",
+          enableSSL:false, egressToFqdns:[], networkPolicy:"none", ferret:false, ferretReadOnlyReplicas:0, deleted:true}')"
+      instances="$(jq -c --argjson o "$obj" '. + [$o]' <<<"$instances")"
+      continue
+    fi
     ha="$(fleet_instance_value "$REPO" "$c" "$i" '.instance.highAvailability.enabled' true)"
     rr="$(fleet_instance_value "$REPO" "$c" "$i" '.instance.highAvailability.readReplicas' 0)"
     [[ "$ha" == "true" ]] || rr=0
@@ -132,10 +159,14 @@ for c in $wanted; do
     [[ "$ssl" == "true" ]] || ssl=false
     fqdns="$(C="$c" I="$i" yq -o=json -I=0 '.clusters[strenv(C)].instances[strenv(I)].network.egressToFqdns // []' "$REPO/$FLEET_REL")"
     npol="$(C="$c" I="$i" yq -r '.clusters[strenv(C)].instances[strenv(I)].network.policy // "none"' "$REPO/$FLEET_REL")"
-    obj="$(jq -cn --arg n "$i" --arg v "$(fleet_instance_value "$REPO" "$c" "$i" '.instance.postgresVersion' '')" \
+    # the namespace (Round 23): instance.namespace, default pg-<instance>; the steps after this one read it
+    # from the inventory (lib.sh instance_ns) when they have no clone of the fleet repository
+    ns="$(instance_ns_in "$REPO" "$c" "$i")"
+    own="$(instance_effective "$REPO" "$c" "$i" '.instance.sharedSecretsOwner' true)"; [[ "$own" == false ]] || own=true
+    obj="$(jq -cn --arg n "$i" --arg ns "$ns" --argjson own "$own" --arg v "$(fleet_instance_value "$REPO" "$c" "$i" '.instance.postgresVersion' '')" \
       --argjson ha "$ha" --argjson rr "$rr" --argjson s "$sched" --argjson ssl "$ssl" \
       --argjson fq "${fqdns:-[]}" --arg np "$npol" --arg bm "$bmode" --argjson fe "$fer" --argjson fro "$fro" \
-      '{name:$n, postgresVersion:$v, highAvailability:$ha, readReplicas:$rr, scheduledBackups:$s, backupMode:$bm,
+      '{name:$n, namespace:$ns, secretsOwner:$own, postgresVersion:$v, highAvailability:$ha, readReplicas:$rr, scheduledBackups:$s, backupMode:$bm,
         enableSSL:$ssl, egressToFqdns:$fq, networkPolicy:$np, ferret:$fe, ferretReadOnlyReplicas:$fro}')"
     instances="$(jq -c --argjson o "$obj" '. + [$o]' <<<"$instances")"
   done
@@ -149,7 +180,7 @@ for c in $wanted; do
 done
 
 if [[ "$FILTER" == "any" ]]; then
-  for i in $(split_list "${P_INSTANCES:-}"); do
+  for i in $(list_items instances "${P_INSTANCES:-}"); do
     [[ -n "${seen_anywhere[$i]:-}" ]] && continue
     record "result.${i}" FAILED UNKNOWN_INSTANCE "${i} is not declared on any selected cluster in ${FLEET_REL}"
     unknown=1

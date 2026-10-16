@@ -35,7 +35,7 @@ python3 "$CHECK" "${HERE}/fixtures" --expect-only \
 
 echo
 echo "== tpg-fleet"
-scan=("$ROOT/bootstrap" "$ROOT/charts" "$ROOT/clusters" "$ROOT/docs" "$ROOT/monitoring"
+scan=("$ROOT/bootstrap" "$ROOT/helm_artifacts" "$ROOT/clusters" "$ROOT/docs" "$ROOT/monitoring"
       "$ROOT/platform" "$ROOT/scripts" "$ROOT/vault" "$ROOT/workflows" "$ROOT/README.md")
 python3 "$CHECK" "${scan[@]}" "${AGAINST[@]}"
 

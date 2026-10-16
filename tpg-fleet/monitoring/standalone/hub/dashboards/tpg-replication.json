@@ -154,7 +154,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{cluster=~\"$cluster\", namespace=~\"pg-($instance)\"})",
+          "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_status_replicas_ready{cluster=~\"$cluster\"} and on (cluster, namespace, statefulset) label_replace(label_replace(max by (cluster, instance_namespace, instance_name) (tanzu_postgres_instance_state{cluster=~\"$cluster\", instance_name=~\"$instance\"}), \"namespace\", \"$1\", \"instance_namespace\", \"(.*)\"), \"statefulset\", \"$1\", \"instance_name\", \"(.*)\"))",
           "legendFormat": "ready",
           "instant": true,
           "range": false
@@ -165,7 +165,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_replicas{cluster=~\"$cluster\", namespace=~\"pg-($instance)\"})",
+          "expr": "max by (cluster, namespace, statefulset) (kube_statefulset_replicas{cluster=~\"$cluster\"} and on (cluster, namespace, statefulset) label_replace(label_replace(max by (cluster, instance_namespace, instance_name) (tanzu_postgres_instance_state{cluster=~\"$cluster\", instance_name=~\"$instance\"}), \"namespace\", \"$1\", \"instance_namespace\", \"(.*)\"), \"statefulset\", \"$1\", \"instance_name\", \"(.*)\"))",
           "legendFormat": "desired",
           "instant": true,
           "range": false
@@ -416,7 +416,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (cluster, pod) (increase(kube_pod_container_status_restarts_total{cluster=~\"$cluster\", namespace=~\"pg-($instance)\"}[24h]))",
+          "expr": "sum by (cluster, pod) (increase(kube_pod_container_status_restarts_total{cluster=~\"$cluster\"}[24h]) and on (cluster, namespace, pod) max by (cluster, namespace, pod) (up{cluster=~\"$cluster\", postgres_instance=~\"$instance\"}))",
           "legendFormat": "{{cluster}}/{{pod}}",
           "instant": true,
           "range": false

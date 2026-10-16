@@ -1758,6 +1758,7 @@
     "scheduled": "scalar"
    },
    "cluster": {
+    "allowInPlaceRestore": "scalar",
     "maxReadReplicas": "scalar",
     "name": "scalar"
    },
@@ -1779,11 +1780,14 @@
     },
     "internalLoadBalancerSubnet": "scalar",
     "name": "scalar",
+    "namespace": "scalar",
     "postgresVersion": "scalar",
     "readOnlyExposure": "scalar",
     "readOnlyServiceAnnotations": "*",
     "resources": "*",
+    "restored": "scalar",
     "serviceAnnotations": "*",
+    "sharedSecretsOwner": "scalar",
     "storageClassName": "scalar",
     "storageSize": "scalar",
     "walStorageSize": "scalar"

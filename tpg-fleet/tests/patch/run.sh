@@ -35,11 +35,11 @@ bad() { printf 'FAIL %s\n' "$1"; [[ -z "${2:-}" ]] || printf '%s\n' "$2" | sed '
 
 # ---- the fleet repository: a git repository, so previous.commit can be found
 REPO="$TMP/repo"
-mkdir -p "$REPO/clusters" "$REPO/patches/operator"
-cp -r "$ROOT/charts" "$REPO/"
+mkdir -p "$REPO/clusters" "$REPO/helm_artifacts/operator/patches"
+cp -r "$ROOT/helm_artifacts/instance" "$REPO/helm_artifacts/"
 cp -r "$ROOT/clusters/_template" "$REPO/clusters/"
-rm -f "$REPO"/charts/tpg-instance/patches/example-*
-printf 'backup:\n  fullRetention: 9\n' > "$REPO/charts/tpg-instance/patches/old-ab12c.yaml"
+rm -f "$REPO"/helm_artifacts/instance/tpg-instance/patches/example-* "$REPO"/helm_artifacts/instance/tpg-instance/restore-patch/example-*
+printf 'backup:\n  fullRetention: 9\n' > "$REPO/helm_artifacts/instance/tpg-instance/patches/old-ab12c.yaml"
 cat > "$REPO/clusters/fleet.yaml" <<'YAML'
 clusters:
   c1:
@@ -190,11 +190,11 @@ calls() { cat "$TMP/calls"; }
 # ==== patch-plan.sh
 echo "== 1 plan: apply through the inputs"
 PF="$(pack ./mem.yaml retention.yaml)"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_POSTGRES_PATCH=./mem.yaml P_VALUES_PATCH=retention.yaml P_PATCH_FILES="$PF"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_POSTGRES_PATCH='[./mem.yaml]' P_VALUES_PATCH='[retention.yaml]' P_PATCH_FILES="$PF"
 names="$(rec "patch.names|SET" | cut -d'|' -f4-)"
-jq -e '(keys == ["retention.yaml"]) and (.["retention.yaml"] | test("^charts/tpg-instance/patches/retention-[a-z0-9]{5}\\.yaml$"))' <<<"$names" >/dev/null \
+jq -e '(keys == ["retention.yaml"]) and (.["retention.yaml"] | test("^helm_artifacts/instance/tpg-instance/patches/retention-[a-z0-9]{5}\\.yaml$"))' <<<"$names" >/dev/null \
   && ok "1 a values file gets its stored name <name>-<uid>.yaml" || bad "1 names" "$names $OUT"
-grep -qE "c1/orders-db: postgres patch file charts/tpg-instance/patches/orders-db-postgres-[0-9a-f]{5}\.yaml \(documents: Postgres\)" <<<"$OUT" \
+grep -qE "c1/orders-db: postgres patch file helm_artifacts/instance/tpg-instance/patches/orders-db-postgres-[0-9a-f]{5}\.yaml \(documents: Postgres\)" <<<"$OUT" \
   && ok "1 the postgres patch is stored combined as <instance>-postgres-<hash>.yaml" || bad "1 combined name" "$OUT"
 rec "precheck.c1|PASSED" | grep -q "to sync: orders-db" && rec "plan.c1|PLANNED" | grep -q '"instances":\["orders-db"\]' \
   && ok "1 the cluster passes and is planned with its changed instance" || bad "1 precheck" "$(cat "$TMP/records") $OUT"
@@ -209,15 +209,15 @@ jq -e '.items[] | select(.kind == "Postgres") | .metadata.annotations["argocd.ar
   && ok "1 nothing is committed by the plan" || bad "1 no commit" "$(calls)"
 
 echo "== 2 plan: no difference"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_VALUES_PATCH=retention.yaml P_PATCH_FILES="$(pack retention.yaml)" S_DIFF=0
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[retention.yaml]' P_PATCH_FILES="$(pack retention.yaml)" S_DIFF=0
 rec "precheck.c1|NO_CHANGE" | grep -q . && rec "result.c1.orders-db|SUCCEEDED|NO_CHANGE" | grep -q . && ! rec "plan.c1" | grep -q . \
   && ok "2 no difference: NO_CHANGE, the cluster is not planned" || bad "2 no change" "$(cat "$TMP/records")"
 
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_VALUES_PATCH=sched.yaml P_PATCH_FILES="$(pack sched.yaml)" S_DIFF=0
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[sched.yaml]' P_PATCH_FILES="$(pack sched.yaml)" S_DIFF=0
 rec "precheck.c1|PASSED" | grep -q "to commit only (nothing changes on the cluster): orders-db" && rec "plan.c1|PLANNED" | grep -q . \
   && ! rec "result.c1.orders-db|SUCCEEDED|NO_CHANGE" | grep -q . \
   && ok "2 only backup.scheduled changes (read by the workflows, not rendered): planned to commit, not NO_CHANGE" || bad "2 hub only" "$(cat "$TMP/records") $OUT"
-cluster P_PUSH_MODE=direct P_VALUES_PATCH=sched.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack sched.yaml)" S_DIFF=0
+cluster P_PUSH_MODE=direct P_VALUES_PATCH='[sched.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack sched.yaml)" S_DIFF=0
 calls | grep -q "^commit .* patch c1: orders-db (wf)" && ! calls | grep -q "^sync " \
   && rec "result.c1.orders-db|SUCCEEDED" | grep -q "nothing to sync: only values the workflows read changed (backup.scheduled=false)" \
   && ok "2 it is committed and not synced" || bad "2 hub only commit" "$(calls) $(cat "$TMP/records") $OUT"
@@ -226,6 +226,11 @@ want="$(yq -o=json -I=0 '[.spec.template.spec.ignoreDifferences[] | {(.kind): [.
 got="$(bash -c "source '$ROOT/workflows/scripts/patch-lib.sh' 2>/dev/null; printf '%s' \"\$PATCH_IGNORED_PATHS\"" | jq -c .)"
 [[ -n "$want" ]] && [[ "$(jq -cS . <<<"$want")" == "$(jq -cS . <<<"$got")" ]] \
   && ok "2 the diff ignores the fields the tpg-instances ApplicationSet ignores" || bad "2 ignored paths" "want $want got $got"
+# the tpg-operator ApplicationSet reads the per-cluster copies the scripts write: the overlays group, then the patches group
+want="$(bash -c "source '$ROOT/workflows/scripts/lib.sh' 2>/dev/null; for g in overlays patches; do patch_group \"\$g\"; operator_effective_rel c1; echo; done")"
+got="$(grep -o 'printf "\$fleet/[^"]*"' "$ROOT/bootstrap/appsets/tpg-operator.yaml" | sed -e 's#^printf "\$fleet/##' -e 's#"$##' -e 's#%s#c1#')"
+[[ -n "$got" ]] && [[ "$got" == "$want" ]] \
+  && ok "2 the tpg-operator ApplicationSet valueFiles are the per-cluster copies the scripts write (overlays, then patches)" || bad "2 operator valueFiles" "want $want got $got"
 list='{"apiVersion":"v1","kind":"List","items":[{"kind":"PostgresBackupLocation","metadata":{"name":"b"},"spec":{"storage":{"azure":{"enableSSL":false,"container":"x"}}}},{"kind":"Postgres","metadata":{"name":"p"},"spec":{"postgresVersion":{"name":"postgres-17.6"},"storageSize":"5Gi"}}]}'
 got="$(bash -c "source '$ROOT/workflows/scripts/patch-lib.sh' 2>/dev/null
   tk() { case \"\$*\" in *PostgresBackupLocation*) echo '{\"spec\":{\"storage\":{\"azure\":{\"container\":\"x\"}}}}' ;; *Postgres*) echo '{\"spec\":{\"postgresVersion\":{\"name\":\"postgres-17.7\"}}}' ;; esac; }
@@ -234,51 +239,51 @@ got="$(bash -c "source '$ROOT/workflows/scripts/patch-lib.sh' 2>/dev/null
   && ok "2 an ignored field takes the live value, or goes when the live object has none" || bad "2 patch_ignore_live" "$got"
 
 echo "== 3 plan: refusals that need the fleet or the cluster"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_POSTGRES_PATCH=ha.yaml P_PATCH_FILES="$(pack ha.yaml)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_POSTGRES_PATCH='[ha.yaml]' P_PATCH_FILES="$(pack ha.yaml)"
 r="$(rec "precheck.c1|BLOCKED|PATCH_REFUSED")"
 grep -q "ha.yaml: Postgres spec.highAvailability is changed by tpg-scale-instance" <<<"$r" \
   && rec "result.c1.orders-db|FAILED|PATCH_REFUSED" | grep -q . \
   && ok "3 fields other workflows own are refused" || bad "3 guarded" "$r $OUT"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_POSTGRES_PATCH=shrink.yaml P_PATCH_FILES="$(pack shrink.yaml)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_POSTGRES_PATCH='[shrink.yaml]' P_PATCH_FILES="$(pack shrink.yaml)"
 rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "orders-db: Postgres spec.storageSize 10Gi is smaller than the current 50Gi; a volume cannot shrink (the rendered instance after the patch)" \
   && ok "3 a smaller volume is refused (rendered before and after)" || bad "3 shrink" "$(cat "$TMP/records") $OUT"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_VALUES_PATCH=ignored.yaml P_PATCH_FILES="$(pack ignored.yaml)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[ignored.yaml]' P_PATCH_FILES="$(pack ignored.yaml)"
 rec "precheck.c1|BLOCKED" | grep -q "backup.additionalParameters is ignored by Argo CD on a running instance" \
   && ok "3 a value tpg-instances ignores on a running instance is refused" || bad "3 ignored" "$(cat "$TMP/records")"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_VALUES_PATCH=retention.yaml P_PATCH_FILES='{}'
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[retention.yaml]' P_PATCH_FILES='{}'
 rec "precheck.c1|BLOCKED" | grep -q "retention.yaml: the file was not received (patchFiles)" \
   && ok "3 a file without contents is refused" || bad "3 no contents" "$(cat "$TMP/records") $OUT"
-plan P_CLUSTERS=c1 P_OPERATOR_VALUES_PATCH=op-bad.yaml P_PATCH_FILES="$(pack op-bad.yaml)"
+plan P_CLUSTERS='[c1]' P_OPERATOR_VALUES_PATCH='[op-bad.yaml]' P_PATCH_FILES="$(pack op-bad.yaml)"
 r="$(rec "precheck.c1|BLOCKED")"
 grep -q "operatorImage tag v4.6.0 differs from the operator version v4.5.0 of c1" <<<"$r" \
   && grep -q "dockerRegistrySecretName acr-pull: no Secret tanzu-postgres-operator/acr-pull on c1" <<<"$r" \
   && ok "3 operator: another version in operatorImage, a pull Secret that does not exist" || bad "3 operator" "$r $OUT"
-plan P_CLUSTERS=c1 P_OPERATOR_VALUES_PATCH=op-image.yaml P_PATCH_FILES="$(pack op-image.yaml)"
+plan P_CLUSTERS='[c1]' P_OPERATOR_VALUES_PATCH='[op-image.yaml]' P_PATCH_FILES="$(pack op-image.yaml)"
 rec "precheck.c1|PASSED" | grep -q "to sync: operator" \
   && ok "3 operator: operatorImage from another registry with the running tag passes" || bad "3 registry" "$(cat "$TMP/records") $OUT"
 
 echo "== 4 plan: patchMode=clear and the version guard"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_CLEAR_KINDS=postgresValues P_PATCH_MODE=clear
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_CLEAR_KINDS='[postgresValues]' P_PATCH_MODE=clear
 rec "precheck.c1|PASSED" | grep -q . && ! rec "patch.names" | grep -q . \
   && ok "4 clearKinds postgresValues is planned; no file is stored" || bad "4 clear" "$(cat "$TMP/records") $OUT"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_CLEAR_KINDS=Postgres P_PATCH_MODE=clear S_DIFF=0
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_CLEAR_KINDS='[Postgres]' P_PATCH_MODE=clear S_DIFF=0
 rec "precheck.c1|NO_CHANGE" | grep -q . \
   && ok "4 clearing a kind the instance has no patch for changes nothing (NO_CHANGE)" || bad "4 clear none" "$(cat "$TMP/records") $OUT"
-plan P_CLUSTER_MAP='c1: {instances: {billing-db: {postgresVersion: "16.9", postgresValuesPatchFilePath: retention.yaml}}}' P_PATCH_FILES="$(pack retention.yaml)" S_INV=billing-db
+plan P_CLUSTER_MAP='c1: {instances: {billing-db: {postgresVersion: "16.9", postgresValuesPatchFilePath: [retention.yaml]}}}' P_PATCH_FILES="$(pack retention.yaml)" S_INV=billing-db
 rec "result.c1.billing-db|SKIPPED_VERSION_MISMATCH" | grep -q "postgres-16.9" && ! rec "plan.c1" | grep -q . \
   && ok "4 an instance that runs another version is skipped" || bad "4 guard" "$(cat "$TMP/records") $OUT"
 
 # ==== patch-cluster.sh
 echo "== 5 cluster: pushMode=direct"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_VALUES_PATCH=retention.yaml P_PATCH_FILES="$(pack retention.yaml)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[retention.yaml]' P_PATCH_FILES="$(pack retention.yaml)"
 stored="$(rec "patch.names|SET" | cut -d'|' -f4- | jq -r '.["retention.yaml"]')"
-cluster P_PUSH_MODE=direct P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)"
+cluster P_PUSH_MODE=direct P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)"
 W="$TMP/work/repo"
 sha="$(git -C "$W" log -1 --format=%H)"
 calls | grep -q "^commit ${sha} patch c1: orders-db (wf)" \
   && git -C "$W" show --name-only --format= HEAD | grep -qx "$stored" \
   && ok "5 one commit on the fleet branch with the stored file and clusters/fleet.yaml" || bad "5 commit" "$(calls) $OUT"
-[[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgresValues.current' "$W/clusters/fleet.yaml")" == "${stored#charts/tpg-instance/}" ]] \
+[[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgresValues.current' "$W/clusters/fleet.yaml")" == "${stored#helm_artifacts/instance/tpg-instance/}" ]] \
   && [[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgresValues.previous.path' "$W/clusters/fleet.yaml")" == "patches/old-ab12c.yaml" ]] \
   && [[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgresValues.previous.commit' "$W/clusters/fleet.yaml")" == "$BASE_SHA" ]] \
   && ok "5 current is the new file; previous is the file before it with the commit that added it" || bad "5 refs" "$(yq '.clusters.c1.instances["orders-db"].patches' "$W/clusters/fleet.yaml")"
@@ -287,7 +292,7 @@ calls | grep -q "^sync tpg-c1-orders-db 600 --revision ${sha} .*--prune" && ! ca
   && ok "5 the instance is synced at the commit (prune) and SUCCEEDED" || bad "5 sync" "$(calls) $(cat "$TMP/records")"
 
 echo "== 6 cluster: pushMode=direct, the sync fails: a revert commit"
-cluster P_PUSH_MODE=direct P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_SYNC_FAIL=orders-db
+cluster P_PUSH_MODE=direct P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_SYNC_FAIL=orders-db
 rsha="$(git -C "$TMP/work/repo" log -1 --format=%H)"
 git -C "$TMP/work/repo" log -1 --format=%s | grep -q '^Revert "patch c1: orders-db (wf)"' \
   && calls | grep -q "^push-head ${rsha}" \
@@ -301,19 +306,19 @@ calls | grep -q "^sync tpg-c1-orders-db 600 --revision ${rsha}" && rec "result.c
 cat > "$TMP/shared.sh" <<'SH'
 set -e
 d="$(mktemp -d)"; git clone -q "$ORIGIN" "$d/r"; cd "$d/r"
-f="$(git show --name-only --format= HEAD | grep '^charts/tpg-instance/patches/retention-')"
-F="${f#charts/tpg-instance/}" yq -i '.clusters = ({"c2": {"instances": {"orders-db": {"patches": {"postgresValues": {"current": strenv(F)}}}}}} + .clusters)' clusters/fleet.yaml
+f="$(git show --name-only --format= HEAD | grep '^helm_artifacts/instance/tpg-instance/patches/retention-')"
+F="${f#helm_artifacts/instance/tpg-instance/}" yq -i '.clusters = ({"c2": {"instances": {"orders-db": {"patches": {"postgresValues": {"current": strenv(F)}}}}}} + .clusters)' clusters/fleet.yaml
 git -c user.email=t@t -c user.name=t commit -qam "patch c2: orders-db (wf)"; git push -q origin HEAD:main
 SH
-cluster P_PUSH_MODE=direct P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_SYNC_FAIL=orders-db S_SHARED=yes ORIGIN="$TMP/origin.git"
+cluster P_PUSH_MODE=direct P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_SYNC_FAIL=orders-db S_SHARED=yes ORIGIN="$TMP/origin.git"
 g="$TMP/shared-check"; rm -rf "$g"; git clone -q "$TMP/origin.git" "$g"
 f="$(yq -r '.clusters.c2.instances["orders-db"].patches.postgresValues.current' "$g/clusters/fleet.yaml")"
-git -C "$g" log -1 --format=%s | grep -q '^Revert "patch c1: orders-db (wf)"' && [[ -f "$g/charts/tpg-instance/$f" ]] \
+git -C "$g" log -1 --format=%s | grep -q '^Revert "patch c1: orders-db (wf)"' && [[ -f "$g/helm_artifacts/instance/tpg-instance/$f" ]] \
   && [[ "$(yq -o=json -I=0 '.clusters.c1.instances["orders-db"].patches.postgresValues' "$g/clusters/fleet.yaml")" == '{"current":"patches/old-ab12c.yaml"}' ]] \
   && ok "6 the revert keeps a stored file another cluster of the run still names" || bad "6 shared file" "$(git -C "$g" show --stat HEAD) $(cat "$g/clusters/fleet.yaml") f=$f"
 
 echo "== 7 cluster: pushMode=pr, merged"
-cluster P_PUSH_MODE=pr P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_PR=merged
+cluster P_PUSH_MODE=pr P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_PR=merged
 psha="$(calls | awk '/^pr-open/ {print $3}')"
 calls | grep -q "^pr-open tpg/patch/wf/c1 " && calls | grep -q "^sync tpg-c1-orders-db 600 --revision ${psha} .*--off-branch" \
   && ok "7 a branch and pull request per cluster; the instance is synced at the branch commit before the merge" || bad "7 pr sync" "$(calls) $OUT"
@@ -325,25 +330,25 @@ grep -q "synced to the cluster from this branch before the merge" "$TMP/pr-body"
   && ok "7 sync, then the merge, then Synced at the fleet branch head without a second sync" || bad "7 order" "$(calls) $(cat "$TMP/records")"
 
 echo "== 8 cluster: pushMode=pr, closed or not merged in time"
-cluster P_PUSH_MODE=pr P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_PR=closed
+cluster P_PUSH_MODE=pr P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_PR=closed
 calls | grep -q "^sync tpg-c1-orders-db 600 --revision prev-tpg-c1-orders-db .*--off-branch" \
   && calls | grep -q "^pr-close 7" && calls | grep -q "^branch-delete tpg/patch/wf/c1" \
   && rec "result.c1.orders-db|FAILED|PR_NOT_MERGED" | grep -q "closed without merging" \
   && ok "8 closed: synced back at the commit it ran before, pull request closed, branch deleted" || bad "8 closed" "$(calls) $(cat "$TMP/records")"
-cluster P_PUSH_MODE=pr P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_PR=timeout P_PR_TIMEOUT=5
+cluster P_PUSH_MODE=pr P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_PR=timeout P_PR_TIMEOUT=5
 rec "result.c1.orders-db|FAILED|PR_NOT_MERGED" | grep -q "not merged within 5s" && calls | grep -q "^branch-delete" \
   && ok "8 not merged in time: the same revert" || bad "8 timeout" "$(calls) $(cat "$TMP/records")"
-cluster P_PUSH_MODE=pr P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_SYNC_FAIL=orders-db
+cluster P_PUSH_MODE=pr P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_SYNC_FAIL=orders-db
 ! calls | grep -q "^pr-wait" && calls | grep -q "^branch-delete" && rec "result.c1.orders-db|FAILED|SYNC_FAILED" | grep -q . \
   && ok "8 a failed sync reverts at once; nobody is asked to merge" || bad "8 sync fail" "$(calls) $(cat "$TMP/records")"
-cluster P_PUSH_MODE=pr P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_EXPECT=drift
+cluster P_PUSH_MODE=pr P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_EXPECT=drift
 rec "result.c1.orders-db|FAILED|MERGED_CONTENT_DIFFERS" | grep -q "stays OutOfSync" && ! calls | grep -q "^branch-delete" \
   && ok "8 merged but the fleet branch renders other objects: FAILED, nothing reverted" || bad "8 drift" "$(calls) $(cat "$TMP/records")"
 
-cluster P_PUSH_MODE=pr P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_PR=closed S_APP_SYNC=Synced
+cluster P_PUSH_MODE=pr P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_PR=closed S_APP_SYNC=Synced
 calls | grep -q "^sync tpg-c1-orders-db 600 --revision ${BASE_SHA} .*--off-branch" \
   && ok "8 an Application that was Synced goes back to the fleet branch head, not to its history" || bad "8 back to BASE" "$(calls)"
-cluster P_PUSH_MODE=pr P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_SYNC_FAIL=orders-db S_MERGED_EARLY=yes
+cluster P_PUSH_MODE=pr P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_SYNC_FAIL=orders-db S_MERGED_EARLY=yes
 psha="$(calls | awk '/^pr-open/ {print $3}')"
 head="$(git -C "$TMP/origin.git" rev-parse main)"
 [[ "$(calls | grep -n '' | grep -E 'pr-close|push-head' | cut -d: -f2 | awk '{print $1}' | paste -sd' ')" == "pr-close push-head" ]] \
@@ -354,19 +359,19 @@ head="$(git -C "$TMP/origin.git" rev-parse main)"
   && ok "8 merged before the failure: closed first, then the merge is reverted on the fleet branch and synced" || bad "8 merged early" "$(calls) $OUT"
 
 echo "== 9 cluster: the operator"
-plan P_CLUSTERS=c1 P_OPERATOR_VALUES_PATCH=op.yaml P_PATCH_FILES="$(pack op.yaml)"
-cluster P_PUSH_MODE=pr P_OPERATOR_VALUES_PATCH=op.yaml P_CLUSTERS=c1 P_PATCH_FILES="$(pack op.yaml)"
+plan P_CLUSTERS='[c1]' P_OPERATOR_VALUES_PATCH='[op.yaml]' P_PATCH_FILES="$(pack op.yaml)"
+cluster P_PUSH_MODE=pr P_OPERATOR_VALUES_PATCH='[op.yaml]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack op.yaml)"
 W="$TMP/work/repo"; cur="$(yq -r '.clusters.c1.operator.patches.values.current' "$W/clusters/fleet.yaml")"
-[[ "$cur" =~ ^patches/operator/op-[a-z0-9]{5}\.yaml$ ]] \
-  && [[ "$(yq -o=json -I=0 . "$W/patches/operator/clusters/c1.yaml")" == "$(yq -o=json -I=0 . "$W/$cur")" ]] \
-  && git -C "$W" show --name-only --format= HEAD | grep -qx "patches/operator/clusters/c1.yaml" \
-  && ok "9 the stored file is current and its copy patches/operator/clusters/c1.yaml is committed with it" || bad "9 effective" "$(git -C "$W" show --stat HEAD) $OUT"
+[[ "$cur" =~ ^helm_artifacts/operator/patches/op-[a-z0-9]{5}\.yaml$ ]] \
+  && [[ "$(yq -o=json -I=0 . "$W/helm_artifacts/operator/patches/clusters/c1.yaml")" == "$(yq -o=json -I=0 . "$W/$cur")" ]] \
+  && git -C "$W" show --name-only --format= HEAD | grep -qx "helm_artifacts/operator/patches/clusters/c1.yaml" \
+  && ok "9 the stored file is current and its copy helm_artifacts/operator/patches/clusters/c1.yaml is committed with it" || bad "9 effective" "$(git -C "$W" show --stat HEAD) $OUT"
 psha="$(calls | awk '/^pr-open/ {print $3}')"
 calls | grep -q "^sync tpg-c1-operator 600 --revisions 2 ${psha} --pods tanzu-postgres-operator  --ready-fn _operator_ready --off-branch" \
   && ok "9 the operator Application is synced with its fleet source (position 2) at the branch commit" || bad "9 operator sync" "$(calls)"
 
 echo "== 9b the diff leaves the scope of every kind to kubectl (no list of cluster-scoped kinds)"
-plan P_CLUSTERS=c1 P_OPERATOR_VALUES_PATCH=op.yaml P_PATCH_FILES="$(pack op.yaml)" S_OP_EXTRA=yes
+plan P_CLUSTERS='[c1]' P_OPERATOR_VALUES_PATCH='[op.yaml]' P_PATCH_FILES="$(pack op.yaml)" S_OP_EXTRA=yes
 own_args="$(grep -l '^diff ' "$TMP"/diff-call-*.args 2>/dev/null | head -n1)"
 rest_args="$(grep -l '^-n tanzu-postgres-operator diff ' "$TMP"/diff-call-*.args 2>/dev/null | head -n1)"
 [[ -n "$own_args" && -n "$rest_args" ]] \
@@ -380,30 +385,30 @@ jq -e 'all(.items[]; .metadata.namespace == null)' "${rest_args%.args}.json" >/d
   && ok "9b the operator diff no longer fails on an object outside its namespace" || bad "9b diff failed" "$OUT"
 
 echo "== 10 cluster: no difference any more on the fleet branch head"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_VALUES_PATCH=retention.yaml P_PATCH_FILES="$(pack retention.yaml)"
-cluster P_PUSH_MODE=direct P_VALUES_PATCH=retention.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack retention.yaml)" S_DIFF=0
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[retention.yaml]' P_PATCH_FILES="$(pack retention.yaml)"
+cluster P_PUSH_MODE=direct P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_DIFF=0
 ! calls | grep -qE "^(commit|pr-open|sync)" && rec "result.c1.orders-db|SUCCEEDED|NO_CHANGE" | grep -q . \
   && ok "10 nothing committed or synced when the step finds no difference" || bad "10 no change" "$(calls) $(cat "$TMP/records")"
 
 echo "== 11 clear, and a fleet entry of the Round 14 shape"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_CLEAR_KINDS=postgresValues P_PATCH_MODE=clear
-cluster P_PUSH_MODE=direct P_CLEAR_KINDS=postgresValues P_PATCH_MODE=clear P_INSTANCES=orders-db P_CLUSTERS=c1
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_CLEAR_KINDS='[postgresValues]' P_PATCH_MODE=clear
+cluster P_PUSH_MODE=direct P_CLEAR_KINDS='[postgresValues]' P_PATCH_MODE=clear P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]'
 W="$TMP/work/repo"
 [[ "$(yq -o=json -I=0 '.clusters.c1.instances["orders-db"].patches.postgresValues' "$W/clusters/fleet.yaml")" == "{\"previous\":{\"path\":\"patches/old-ab12c.yaml\",\"commit\":\"${BASE_SHA}\"}}" ]] \
   && rec "result.c1.orders-db|SUCCEEDED" | grep -q . \
   && ok "11 clear: no current file any more, the cleared one is previous; committed and synced" || bad "11 clear" "$(yq '.clusters.c1.instances["orders-db"].patches' "$W/clusters/fleet.yaml") $(cat "$TMP/records")"
 cp "$REPO/clusters/fleet.yaml" "$TMP/fleet.saved"
 yq -i '.clusters.c1.instances["orders-db"].patches = {"values": ["patches/old-ab12c.yaml"]}' "$REPO/clusters/fleet.yaml"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_VALUES_PATCH=retention.yaml P_PATCH_FILES="$(pack retention.yaml)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[retention.yaml]' P_PATCH_FILES="$(pack retention.yaml)"
 cp "$TMP/fleet.saved" "$REPO/clusters/fleet.yaml"
 yq -i '.clusters.c1.instances["orders-db"].patches.postgresValues = ["patches/old-ab12c.yaml"]' "$REPO/clusters/fleet.yaml"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_VALUES_PATCH=retention.yaml P_PATCH_FILES="$(pack retention.yaml)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[retention.yaml]' P_PATCH_FILES="$(pack retention.yaml)"
 rec "precheck.c1|BLOCKED" | grep -q "c1/orders-db: patches.postgresValues is not {current, previous}: a fleet repository written before Round 15; start a new one" \
   && ok "11 an entry that is not {current, previous} is refused (no migration, Round 15)" || bad "11 old shape" "$(cat "$TMP/records")"
 cp "$TMP/fleet.saved" "$REPO/clusters/fleet.yaml"
 
 echo "== 12 Round 15: several kinds, carry-over, clearKinds, repo: files, overrides (1c, 1d, 2iii)"
-pgfile() { sed -nE 's#.*c1/orders-db: postgres patch file charts/tpg-instance/(patches/orders-db-postgres-[0-9a-f]+\.yaml).*#\1#p' <<<"$OUT" | tail -n1; }
+pgfile() { sed -nE 's#.*c1/orders-db: postgres patch file helm_artifacts/instance/tpg-instance/(patches/orders-db-postgres-[0-9a-f]+\.yaml).*#\1#p' <<<"$OUT" | tail -n1; }
 advance() {  # the fleet repository follows the pushed commit (the next run starts there)
   git -C "$REPO" fetch -q "$TMP/origin.git" main && git -C "$REPO" reset -q --hard FETCH_HEAD
   BASE_SHA="$(git -C "$REPO" rev-parse HEAD)"
@@ -414,64 +419,64 @@ BASE_SAVED="$BASE_SHA"
 yq -i '.clusters.c1.instances["orders-db"].backup = {"scheduled": false, "operatorSchedules": {"full": "0 1 * * 0"}}' "$REPO/clusters/fleet.yaml"
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -qam "operator schedules"
 BASE_SHA="$(git -C "$REPO" rev-parse HEAD)"; git -C "$REPO" push -qf "$TMP/origin.git" HEAD:main
-F3='mem.yaml,sched-full.yaml,two.yaml'
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_POSTGRES_PATCH="$F3" P_PATCH_FILES="$(pack mem.yaml sched-full.yaml two.yaml)"
+F3='[mem.yaml, sched-full.yaml, two.yaml]'
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_POSTGRES_PATCH="$F3" P_PATCH_FILES="$(pack mem.yaml sched-full.yaml two.yaml)"
 pcur="$(pgfile)"
-grep -q "c1/orders-db: postgres patch file charts/tpg-instance/${pcur} (documents: Postgres,PostgresBackupSchedule,PostgresBackupSchedule)" <<<"$OUT" \
+grep -q "c1/orders-db: postgres patch file helm_artifacts/instance/tpg-instance/${pcur} (documents: Postgres,PostgresBackupSchedule,PostgresBackupSchedule)" <<<"$OUT" \
   && yq -e 'select(.kind == "PostgresBackupSchedule" and .metadata.name == "orders-db-backup-full") | .spec.schedule == "0 3 * * 6"' "$TMP/dryrun.yaml" >/dev/null \
   && ok "12 three files, four documents: one stored file, one document per object; the schedule patch reaches the render" || bad "12 combine" "$pcur $OUT $(cat "$TMP/dryrun.yaml")"
 rec "warning.c1.orders-db.schedule-incremental-patch|WARNING|PATCH_TARGET_NOT_RENDERED" | grep -q "applies when the instance has operator backup schedules" \
   && ! rec "warning.c1.orders-db.schedule-full-patch" | grep -q . \
   && ok "12 a schedule patch for a schedule the instance does not render: warning PATCH_TARGET_NOT_RENDERED" || bad "12 not rendered" "$(cat "$TMP/records")"
-cluster P_PUSH_MODE=direct P_POSTGRES_PATCH="$F3" P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack mem.yaml sched-full.yaml two.yaml)"
+cluster P_PUSH_MODE=direct P_POSTGRES_PATCH="$F3" P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack mem.yaml sched-full.yaml two.yaml)"
 W="$TMP/work/repo"
 [[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgres.current' "$W/clusters/fleet.yaml")" == "$pcur" ]] \
-  && [[ "$(kinds_of "$W/charts/tpg-instance/$pcur")" == '["Postgres/","PostgresBackupSchedule/orders-db-backup-full","PostgresBackupSchedule/orders-db-backup-incremental"]' ]] \
-  && [[ "$(yq ea -r 'select(.kind == "Postgres") | .spec.logLevel' "$W/charts/tpg-instance/$pcur")" == Debug ]] \
-  && git -C "$W" show --name-only --format= HEAD | grep -qx "charts/tpg-instance/$pcur" \
+  && [[ "$(kinds_of "$W/helm_artifacts/instance/tpg-instance/$pcur")" == '["Postgres/","PostgresBackupSchedule/orders-db-backup-full","PostgresBackupSchedule/orders-db-backup-incremental"]' ]] \
+  && [[ "$(yq ea -r 'select(.kind == "Postgres") | .spec.logLevel' "$W/helm_artifacts/instance/tpg-instance/$pcur")" == Debug ]] \
+  && git -C "$W" show --name-only --format= HEAD | grep -qx "helm_artifacts/instance/tpg-instance/$pcur" \
   && ok "12 the cluster step commits the same file (named by its contents); the later file wins for the same object" || bad "12 same name" "$(git -C "$W" show --stat HEAD 2>&1) $OUT"
 advance
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_POSTGRES_PATCH=loc.yaml P_PATCH_FILES="$(pack loc.yaml)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_POSTGRES_PATCH='[loc.yaml]' P_PATCH_FILES="$(pack loc.yaml)"
 rec "WARNING|PATCH_OVERRIDES_VALUE" | grep -q "the PostgresBackupLocation patch sets spec.retentionPolicy.fullRetention.number to 12, which overrides the chart value backup.fullRetention (9)" \
   && ok "12 the current values patch sets backup.fullRetention 9: warning PATCH_OVERRIDES_VALUE names both values" || bad "12 overrides values patch" "$(cat "$TMP/records")"
-cluster P_PUSH_MODE=direct P_POSTGRES_PATCH=loc.yaml P_INSTANCES=orders-db P_CLUSTERS=c1 P_PATCH_FILES="$(pack loc.yaml)"
+cluster P_PUSH_MODE=direct P_POSTGRES_PATCH='[loc.yaml]' P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack loc.yaml)"
 W="$TMP/work/repo"; p2="$(yq -r '.clusters.c1.instances["orders-db"].patches.postgres.current' "$W/clusters/fleet.yaml")"
-[[ "$(kinds_of "$W/charts/tpg-instance/$p2")" == '["Postgres/","PostgresBackupLocation/","PostgresBackupSchedule/orders-db-backup-full","PostgresBackupSchedule/orders-db-backup-incremental"]' ]] \
+[[ "$(kinds_of "$W/helm_artifacts/instance/tpg-instance/$p2")" == '["Postgres/","PostgresBackupLocation/","PostgresBackupSchedule/orders-db-backup-full","PostgresBackupSchedule/orders-db-backup-incremental"]' ]] \
   && [[ "$p2" != "$pcur" ]] && [[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgres.previous.path' "$W/clusters/fleet.yaml")" == "$pcur" ]] \
-  && ok "12 a run with one kind carries the other kinds of the current file over (D81); previous is the file before" || bad "12 carry-over" "$p2 $(kinds_of "$W/charts/tpg-instance/$p2") $OUT"
+  && ok "12 a run with one kind carries the other kinds of the current file over (D81); previous is the file before" || bad "12 carry-over" "$p2 $(kinds_of "$W/helm_artifacts/instance/tpg-instance/$p2") $OUT"
 advance
 yq -i '.clusters.c1.instances["orders-db"].backup.fullRetention = 4' "$REPO/clusters/fleet.yaml"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_POSTGRES_PATCH=loc.yaml P_PATCH_FILES="$(pack loc.yaml)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_POSTGRES_PATCH='[loc.yaml]' P_PATCH_FILES="$(pack loc.yaml)"
 grep -q "PATCH_OVERRIDES_VALUE" <<<"$OUT$(cat "$TMP/records")" && grep -q "backup.fullRetention" <<<"$OUT$(cat "$TMP/records")" \
   && yq -e 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number == 12' "$TMP/dryrun.yaml" >/dev/null \
   && ok "12 a kind patch over a chart value: warning PATCH_OVERRIDES_VALUE, the kind patch wins (12 over the value 4)" || bad "12 overrides" "$OUT $(cat "$TMP/records")"
 git -C "$REPO" checkout -q -- clusters/fleet.yaml
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_CLEAR_KINDS=PostgresBackupSchedule P_PATCH_MODE=clear
-cluster P_PUSH_MODE=direct P_CLEAR_KINDS=PostgresBackupSchedule P_PATCH_MODE=clear P_INSTANCES=orders-db P_CLUSTERS=c1
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_CLEAR_KINDS='[PostgresBackupSchedule]' P_PATCH_MODE=clear
+cluster P_PUSH_MODE=direct P_CLEAR_KINDS='[PostgresBackupSchedule]' P_PATCH_MODE=clear P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]'
 W="$TMP/work/repo"; p3="$(yq -r '.clusters.c1.instances["orders-db"].patches.postgres.current' "$W/clusters/fleet.yaml")"
-[[ "$(kinds_of "$W/charts/tpg-instance/$p3")" == '["Postgres/","PostgresBackupLocation/"]' ]] \
+[[ "$(kinds_of "$W/helm_artifacts/instance/tpg-instance/$p3")" == '["Postgres/","PostgresBackupLocation/"]' ]] \
   && ok "12 clearKinds PostgresBackupSchedule drops both schedule documents and keeps the others" || bad "12 clear kind" "$p3 $OUT"
 advance
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_CLEAR_KINDS=all P_PATCH_MODE=clear
-cluster P_PUSH_MODE=direct P_CLEAR_KINDS=all P_PATCH_MODE=clear P_INSTANCES=orders-db P_CLUSTERS=c1
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_CLEAR_KINDS=all P_PATCH_MODE=clear
+cluster P_PUSH_MODE=direct P_CLEAR_KINDS=all P_PATCH_MODE=clear P_INSTANCES='[orders-db]' P_CLUSTERS='[c1]'
 W="$TMP/work/repo"
 [[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgres.current // "none"' "$W/clusters/fleet.yaml")" == none ]] \
   && [[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgresValues.current // "none"' "$W/clusters/fleet.yaml")" == none ]] \
   && grep -q "c1/orders-db: no postgres patch file any more" <<<"$OUT" \
   && ok "12 clearKinds all removes every current file of the instance" || bad "12 clear all" "$(yq '.clusters.c1.instances["orders-db"].patches' "$W/clusters/fleet.yaml" 2>&1) $OUT $(cat "$TMP/records")"
 advance
-printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  resources:\n    data:\n      limits: {memory: 6Gi}\n' > "$REPO/charts/tpg-instance/patches/team-logging.yaml"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  resources:\n    data:\n      limits: {memory: 6Gi}\n' > "$REPO/helm_artifacts/instance/tpg-instance/patches/team-logging.yaml"
 git -C "$REPO" add -A && git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm "team file"
 BASE_SHA="$(git -C "$REPO" rev-parse HEAD)"; git -C "$REPO" push -qf "$TMP/origin.git" HEAD:main
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_POSTGRES_PATCH=repo:charts/tpg-instance/patches/team-logging.yaml
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_POSTGRES_PATCH='[repo:helm_artifacts/instance/tpg-instance/patches/team-logging.yaml]'
 yq -e 'select(.kind == "Postgres") | .spec.resources.data.limits.memory == "6Gi"' "$TMP/dryrun.yaml" >/dev/null && ! rec "patch.names" | grep -q . \
   && ok "12 2iii: a repo: file is read from the fleet branch (no patchFiles)" || bad "12 repo" "$OUT $(cat "$TMP/records")"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_POSTGRES_PATCH=repo:charts/tpg-instance/patches/missing.yaml
-rec "precheck.c1|BLOCKED" | grep -q "repo:charts/tpg-instance/patches/missing.yaml: no such file on the fleet branch" \
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_POSTGRES_PATCH='[repo:helm_artifacts/instance/tpg-instance/patches/missing.yaml]'
+rec "precheck.c1|BLOCKED" | grep -q "repo:helm_artifacts/instance/tpg-instance/patches/missing.yaml: no such file on the fleet branch" \
   && ok "12 2iii: a repo: file missing on the fleet branch is refused" || bad "12 repo missing" "$(cat "$TMP/records")"
 mkdir -p "$HOME_T"; cp "$L/loc.yaml" "$HOME_T/loc.yaml"
 # shellcheck disable=SC2088 # a literal ~/ path, as the user writes it
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_POSTGRES_PATCH="$L/sched-full.yaml,~/loc.yaml,sub/../up.yaml" P_PATCH_FILES="$(pack "$L/sched-full.yaml" "~/loc.yaml" sub/../up.yaml)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_POSTGRES_PATCH="[$L/sched-full.yaml, ~/loc.yaml, sub/../up.yaml]" P_PATCH_FILES="$(pack "$L/sched-full.yaml" "~/loc.yaml" sub/../up.yaml)"
 rec "precheck.c1|PASSED" | grep -q . && yq -e 'select(.kind == "Postgres") | .spec.resources.data.limits.memory == "7Gi"' "$TMP/dryrun.yaml" >/dev/null \
   && yq -e 'select(.kind == "PostgresBackupLocation") | .spec.retentionPolicy.fullRetention.number == 12' "$TMP/dryrun.yaml" >/dev/null \
   && ok "12 1d: absolute, ~/ and ../ paths are read from patchFiles under the path as given" || bad "12 paths" "$OUT $(cat "$TMP/records")"
@@ -484,22 +489,41 @@ git -C "$REPO" checkout -q "$BASE_SAVED" -- clusters/fleet.yaml
 yq -i '.clusters.c1.instances["orders-db"].backup = {"enableSSL": true, "caBundle": "old"}' "$REPO/clusters/fleet.yaml"
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -qam "enableSSL"
 BASE_SHA="$(git -C "$REPO" rev-parse HEAD)"; git -C "$REPO" push -qf "$TMP/origin.git" HEAD:main
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_BACKUP_CA_FILE=storage-ca.pem P_PATCH_FILES="$(pack storage-ca.pem)"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_BACKUP_CA_FILE='[storage-ca.pem]' P_PATCH_FILES="$(pack storage-ca.pem)"
 [[ "$(yq 'select(.kind == "PostgresBackupLocation") | .spec.storage.azure.caBundle' "$TMP/dryrun.yaml")" == "$(cat "$L/storage-ca.pem")" ]] \
   && grep -q "c1/orders-db: the backup CA bundle from file storage-ca.pem" <<<"$OUT" \
   && ok "13 3.i: a local PEM file replaces the bundle of a running enableSSL instance" || bad "13 file" "$OUT $(cat "$TMP/records")"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_BACKUP_CA_VAULT=azure-storage
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_BACKUP_CA_VAULT=azure-storage
 [[ "$(yq 'select(.kind == "PostgresBackupLocation") | .spec.storage.azure.caBundle' "$TMP/dryrun.yaml")" == "$(cat "$TMP/ca2.pem")" ]] \
   && grep -q "the backup CA bundle from Vault tpg/ca-bundles/azure-storage" <<<"$OUT" \
   && ok "13 3.ii: a named bundle is read from Vault tpg/ca-bundles/<name>" || bad "13 vault" "$OUT $(cat "$TMP/records")"
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_BACKUP_CA_VAULT=nope
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_BACKUP_CA_VAULT=nope
 rec "precheck.c1|BLOCKED" | grep -q "backupCaBundleVaultSecret nope: tpg/ca-bundles/nope: no such secret" \
   && ok "13 3.ii: a Vault secret that does not exist is refused" || bad "13 vault missing" "$(cat "$TMP/records")"
-plan P_CLUSTER_MAP='c1: {backupCaBundleVaultSecret: azure-storage, instances: {orders-db: {backupCaBundleFile: storage-ca.pem}}}' P_PATCH_FILES="$(pack storage-ca.pem)"
+plan P_CLUSTER_MAP='c1: {backupCaBundleVaultSecret: azure-storage, instances: {orders-db: {backupCaBundleFile: [storage-ca.pem]}}}' P_PATCH_FILES="$(pack storage-ca.pem)"
 [[ "$(yq 'select(.kind == "PostgresBackupLocation") | .spec.storage.azure.caBundle' "$TMP/dryrun.yaml")" == "$(cat "$L/storage-ca.pem")" ]] \
   && ok "13 the instance source wins over the cluster source" || bad "13 precedence" "$OUT $(cat "$TMP/records")"
+# Round 23 (after phase 8): the single-file keys of tpg-patch (operatorValuesPatchFilePath,
+# postgresValuesPatchFilePath, backupCaBundleFile), each written [path] in a clusterMap, are planned,
+# stored and recorded: validate hands them over as the bare path and the patch scripts read that
+# form directly (nothing normalizes it a second time, as fleet-day0.sh does)
+plan P_CLUSTER_MAP='c1: {operatorValuesPatchFilePath: [op.yaml], backupCaBundleFile: [storage-ca.pem], instances: {orders-db: {postgresValuesPatchFilePath: [retention.yaml]}}}' \
+  P_PATCH_FILES="$(pack op.yaml retention.yaml storage-ca.pem)"
+! rec "precheck.c1|BLOCKED" | grep -q . && ! rec "INVALID_INPUT" | grep -q . \
+  && rec "patch.names|SET" | grep -q '"op.yaml":"helm_artifacts/operator/patches/op-' \
+  && rec "patch.names|SET" | grep -q '"retention.yaml":"helm_artifacts/instance/tpg-instance/patches/retention-' \
+  && ok "23 tpg-patch: operatorValuesPatchFilePath, postgresValuesPatchFilePath and backupCaBundleFile as clusterMap [path] values are planned and stored" \
+  || bad "23 patch single-file keys plan" "$(cat "$TMP/records") $OUT"
+cluster P_PUSH_MODE=direct P_CLUSTERS='[c1]' P_CLUSTER_MAP='c1: {operatorValuesPatchFilePath: [op.yaml], instances: {orders-db: {postgresValuesPatchFilePath: [retention.yaml]}}}' \
+  P_PATCH_FILES="$(pack op.yaml retention.yaml)"
+W="$TMP/work/repo"
+[[ "$(yq -r '.clusters.c1.operator.patches.values.current' "$W/clusters/fleet.yaml")" =~ ^helm_artifacts/operator/patches/op-[a-z0-9]{5}\.yaml$ ]] \
+  && [[ "$(yq -r '.clusters.c1.instances["orders-db"].patches.postgresValues.current' "$W/clusters/fleet.yaml")" =~ ^patches/retention-[a-z0-9]{5}\.yaml$ ]] \
+  && ok "23 tpg-patch: the clusterMap single-file keys are recorded as current files of the operator and the instance in clusters/fleet.yaml" \
+  || bad "23 patch single-file keys cluster" "$(yq '.clusters.c1' "$W/clusters/fleet.yaml") $OUT"
+
 git -C "$REPO" checkout -q "$BASE_SAVED" -- clusters/fleet.yaml
-plan P_CLUSTERS=c1 P_INSTANCES=orders-db P_BACKUP_CA_VAULT=azure-storage
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_BACKUP_CA_VAULT=azure-storage
 rec "precheck.c1|BLOCKED" | grep -q "a CA bundle source needs backup.enableSSL true" \
   && ok "13 an instance without enableSSL is refused" || bad "13 no ssl" "$(cat "$TMP/records")"
 git -C "$REPO" checkout -q -- clusters/fleet.yaml
@@ -508,7 +532,7 @@ BASE_SHA="$BASE_SAVED"
 echo "== 14 review: documents carried over from creation, and sizes against the rendered instance"
 # billing-db was created with a postgres file that holds what creation allows and a
 # running instance may not change: storageClassName, forcePathStyle, and 80Gi
-cat > "$REPO/charts/tpg-instance/patches/billing-db-postgres-aaaaa.yaml" <<'YAML'
+cat > "$REPO/helm_artifacts/instance/tpg-instance/patches/billing-db-postgres-aaaaa.yaml" <<'YAML'
 apiVersion: sql.tanzu.vmware.com/v1
 kind: Postgres
 spec:
@@ -528,32 +552,116 @@ printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: PostgresBackupSchedule\nmetad
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  logLevel: Debug\n' > "$L/b-log.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageClassName: tpg-data-retain\n  storageSize: 60Gi\n' > "$L/b-60.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  storageClassName: managed-csi\n  storageSize: 80Gi\n' > "$L/b-class.yaml"
-plan P_CLUSTERS=c1 P_INSTANCES=billing-db P_POSTGRES_PATCH=b-sched.yaml P_PATCH_FILES="$(pack b-sched.yaml)" S_INV=billing-db
+plan P_CLUSTERS='[c1]' P_INSTANCES='[billing-db]' P_POSTGRES_PATCH='[b-sched.yaml]' P_PATCH_FILES="$(pack b-sched.yaml)" S_INV=billing-db
 ! rec "precheck.c1|BLOCKED" | grep -q . && grep -q "documents: Postgres,PostgresBackupLocation,PostgresBackupSchedule" <<<"$OUT" \
   && ok "14 a new kind next to documents carried over from creation passes (they are unchanged)" || bad "14 carried" "$(cat "$TMP/records") $OUT"
-plan P_CLUSTERS=c1 P_INSTANCES=billing-db P_POSTGRES_PATCH=b-log.yaml P_PATCH_FILES="$(pack b-log.yaml)" S_INV=billing-db
+plan P_CLUSTERS='[c1]' P_INSTANCES='[billing-db]' P_POSTGRES_PATCH='[b-log.yaml]' P_PATCH_FILES="$(pack b-log.yaml)" S_INV=billing-db
 rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "billing-db: Postgres spec.storageSize 20Gi is smaller than the current 80Gi" \
   && ok "14 a Postgres document that drops storageSize would shrink the volume: refused" || bad "14 dropped size" "$(cat "$TMP/records") $OUT"
-plan P_CLUSTERS=c1 P_INSTANCES=billing-db P_POSTGRES_PATCH=b-60.yaml P_PATCH_FILES="$(pack b-60.yaml)" S_INV=billing-db
+plan P_CLUSTERS='[c1]' P_INSTANCES='[billing-db]' P_POSTGRES_PATCH='[b-60.yaml]' P_PATCH_FILES="$(pack b-60.yaml)" S_INV=billing-db
 r="$(rec "precheck.c1|BLOCKED|PATCH_REFUSED")"
 grep -q "spec.storageSize 60Gi is smaller than the current 80Gi" <<<"$r" && ! grep -q "storageClassName cannot change" <<<"$r" \
   && ok "14 sizes compare with the current patch, and the same storageClassName is no change" || bad "14 60Gi" "$r $OUT"
-plan P_CLUSTERS=c1 P_INSTANCES=billing-db P_POSTGRES_PATCH=b-class.yaml P_PATCH_FILES="$(pack b-class.yaml)" S_INV=billing-db
+plan P_CLUSTERS='[c1]' P_INSTANCES='[billing-db]' P_POSTGRES_PATCH='[b-class.yaml]' P_PATCH_FILES="$(pack b-class.yaml)" S_INV=billing-db
 rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "b-class.yaml: Postgres spec.storageClassName cannot change on a running instance" \
   && ok "14 another storageClassName is refused" || bad "14 class" "$(cat "$TMP/records") $OUT"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  resources:\n    data:\n      limits: {memory: 4Gi, cpu: "2"}\n      requests: {memory: 2Gi, cpu: "1"}\n' > "$L/b-same.yaml"
-plan P_CLUSTERS=c1 P_INSTANCES=billing-db P_POSTGRES_PATCH=b-same.yaml P_PATCH_FILES="$(pack b-same.yaml)" S_INV=billing-db
+plan P_CLUSTERS='[c1]' P_INSTANCES='[billing-db]' P_POSTGRES_PATCH='[b-same.yaml]' P_PATCH_FILES="$(pack b-same.yaml)" S_INV=billing-db
 ! rec "PATCH_OVERRIDES_VALUE" | grep -q "spec.resources" \
   && ok "14 the same resources in another key order are no override" || bad "14 key order" "$(cat "$TMP/records")"
 # a new Postgres document that leaves out the class of the current one falls back to
 # the chart's class: the rendered class would change (review)
-yq -i '(select(.kind == "Postgres") | .spec.storageClassName) = "premium-retain"' "$REPO/charts/tpg-instance/patches/billing-db-postgres-aaaaa.yaml"
+yq -i '(select(.kind == "Postgres") | .spec.storageClassName) = "premium-retain"' "$REPO/helm_artifacts/instance/tpg-instance/patches/billing-db-postgres-aaaaa.yaml"
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -qam "billing-db on premium-retain"
-plan P_CLUSTERS=c1 P_INSTANCES=billing-db P_POSTGRES_PATCH=b-log.yaml P_PATCH_FILES="$(pack b-log.yaml)" S_INV=billing-db
+plan P_CLUSTERS='[c1]' P_INSTANCES='[billing-db]' P_POSTGRES_PATCH='[b-log.yaml]' P_PATCH_FILES="$(pack b-log.yaml)" S_INV=billing-db
 rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "billing-db: Postgres spec.storageClassName cannot change on a running instance: premium-retain before the patch, tpg-data-retain after it" \
   && ok "14 a document that drops the current class (the chart's class would render) is refused" || bad "14 dropped class" "$(cat "$TMP/records") $OUT"
 git -C "$REPO" reset -q --hard "$BASE_SAVED"
 unset S_INV
+
+# ---- Round 23: a values patch cannot move the namespace or the owner of the shared Secrets
+echo "== 23 plan: instance.namespace and instance.sharedSecretsOwner in a values patch"
+printf 'instance:\n  namespace: other-ns\n' > "$L/v-ns.yaml"
+printf 'instance:\n  sharedSecretsOwner: false\n' > "$L/v-owner.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-ns.yaml]' P_PATCH_FILES="$(pack v-ns.yaml)" S_DIFF=0
+rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "v-ns.yaml: instance.namespace cannot be set by a values patch" \
+  && ok "23 a values patch with instance.namespace is refused (the namespace is immutable)" || bad "23 namespace patch" "$(cat "$TMP/records") $OUT"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-owner.yaml]' P_PATCH_FILES="$(pack v-owner.yaml)" S_DIFF=0
+rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "v-owner.yaml: instance.sharedSecretsOwner cannot be set by a values patch" \
+  && ok "23 a values patch with instance.sharedSecretsOwner is refused (the workflows move the owner)" || bad "23 owner patch" "$(cat "$TMP/records") $OUT"
+
+# ---- Round 23 (tpg-restore): a patch on a restored instance. tpg-patch never retires or touches its restore-patch (it also patches other
+# kinds); the chart applies the Postgres patch file after the restore-patch and the entry's later changes
+echo "== 24 restored instance: tpg-patch leaves the restore-patch alone (no retirement)"
+BASE_SAVED2="$(git -C "$REPO" rev-parse HEAD)"
+RPD="$REPO/helm_artifacts/instance/tpg-instance/restore-patch"
+mkdir -p "$RPD"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  storageSize: 50Gi\n  logLevel: Debug\n' > "$RPD/restored-db-restore-aaaaa.yaml"
+printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  postgresVersion:\n    name: postgres-17.6\n  logLevel: Info\n' > "$RPD/restored-db-restore-zzzzz.yaml"
+yq -i '.clusters.c1.instances["restored-db"] = {"instance": {"postgresVersion": "postgres-17.6", "storageSize": "50Gi", "restored": true, "highAvailability": {"enabled": false, "readReplicas": 0}}, "restorePatch": {"current": "restore-patch/restored-db-restore-aaaaa.yaml", "mode": "base", "previous": {"path": "restore-patch/restored-db-restore-zzzzz.yaml", "commit": "abc123"}}}' "$REPO/clusters/fleet.yaml"
+git -C "$REPO" -c user.email=t@t -c user.name=t add -A && git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm "restored-db restored"
+RSHA="$(git -C "$REPO" rev-parse HEAD)"
+rpyaml() { yq -o=json -I=0 '.clusters.c1.instances["restored-db"].restorePatch' "$TMP/work/repo/clusters/fleet.yaml"; }
+RP_BEFORE="$(yq -o=json -I=0 '.clusters.c1.instances["restored-db"].restorePatch' "$REPO/clusters/fleet.yaml")"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_VALUES_PATCH='[retention.yaml]' P_PATCH_FILES="$(pack retention.yaml)" S_INV=restored-db
+! rec "precheck.c1|BLOCKED" | grep -q . && ! grep -q "RESTORE_PATCH_RETIRED" "$TMP/records" \
+  && ok "24 a values patch on a restored instance is planned without a restore-patch warning (nothing is retired any more)" || bad "24 plan values" "$(cat "$TMP/records") $OUT"
+cluster P_PUSH_MODE=direct P_VALUES_PATCH='[retention.yaml]' P_INSTANCES='[restored-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack retention.yaml)" S_INV=restored-db
+W="$TMP/work/repo"
+[[ "$(rpyaml)" == "$RP_BEFORE" ]] && ok "24 restorePatch (current, previous, mode) is as it was after a values patch" || bad "24 refs" "$(rpyaml) $OUT"
+[[ -f "$W/helm_artifacts/instance/tpg-instance/restore-patch/restored-db-restore-aaaaa.yaml" && -f "$W/helm_artifacts/instance/tpg-instance/restore-patch/restored-db-restore-zzzzz.yaml" ]] \
+  && ! git -C "$W" show --name-status --format= HEAD | grep -q 'restore-patch/' \
+  && ok "24 both restore-patch files exist and the commit does not touch the restore-patch folder" || bad "24 files" "$(git -C "$W" show --name-status --format= HEAD)"
+[[ "$(yq '.clusters.c1.instances["restored-db"].instance.restored' "$W/clusters/fleet.yaml")" == true ]] && ok "24 instance.restored stays true" || bad "24 restored flag"
+git -C "$REPO" reset -q --hard "$RSHA"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_POSTGRES_PATCH='[mem.yaml]' P_PATCH_FILES="$(pack mem.yaml)" S_INV=restored-db
+! rec "precheck.c1|BLOCKED" | grep -q . \
+  && yq -e 'select(.kind == "Postgres") | .spec.resources.data.limits.memory == "8Gi" and .spec.logLevel == "Debug" and .spec.storageSize == "50Gi"' "$TMP/dryrun.yaml" >/dev/null \
+  && ok "24 a Postgres patch on a restored instance: the dry run carries the patch over the restore-patch (limits 8Gi) and the restore-patch's own fields (logLevel Debug, storageSize 50Gi)" || bad "24 postgres plan" "$(cat "$TMP/records") $(yq 'select(.kind == "Postgres") | .spec' "$TMP/dryrun.yaml")"
+cluster P_PUSH_MODE=direct P_POSTGRES_PATCH='[mem.yaml]' P_INSTANCES='[restored-db]' P_CLUSTERS='[c1]' P_PATCH_FILES="$(pack mem.yaml)" S_INV=restored-db
+[[ "$(rpyaml)" == "$RP_BEFORE" && "$(yq -r '.clusters.c1.instances["restored-db"].patches.postgres.current' "$W/clusters/fleet.yaml")" =~ ^patches/restored-db-postgres- ]] \
+  && ok "24 …recorded as the instance's patch; restorePatch untouched (the patch does not retire it)" || bad "24 postgres patch" "$(rpyaml) $OUT"
+git -C "$REPO" reset -q --hard "$RSHA"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_CLEAR_KINDS='[postgresValues]' P_PATCH_MODE=clear S_INV=restored-db
+cluster P_PUSH_MODE=direct P_CLEAR_KINDS='[postgresValues]' P_PATCH_MODE=clear P_INSTANCES='[restored-db]' P_CLUSTERS='[c1]' S_INV=restored-db
+[[ "$(rpyaml)" == "$RP_BEFORE" ]] \
+  && ok "24 patchMode=clear does not touch the restore-patch" || bad "24 clear" "$(rpyaml) $OUT"
+# Round 23, third revision: a values patch that sets instance: keys reaching the Postgres CR (templates/postgres.yaml, tpg.services:
+# storageSize, walStorageSize, resources, exposure, readOnlyExposure, serviceAnnotations, readOnlyServiceAnnotations, allowedSourceRanges,
+# internalLoadBalancerSubnet) for a restored instance is refused RESTORED_VALUES_PATCH: tpg-scale-instance, tpg-upgrade and postgres patch
+# files are the ways to change a restored instance. Keys that do not reach the CR stay allowed
+git -C "$REPO" reset -q --hard "$RSHA"
+for kv in 'storageSize: 60Gi' 'walStorageSize: 20Gi' $'resources:\n    data:\n      limits:\n        memory: 8Gi' 'exposure: loadBalancer' 'readOnlyExposure: internalLoadBalancer' \
+          $'serviceAnnotations:\n    a: b' $'readOnlyServiceAnnotations:\n    a: b' $'allowedSourceRanges:\n    - 10.0.0.0/8' 'internalLoadBalancerSubnet: snet-db'; do
+  key="${kv%%:*}"
+  printf 'instance:\n  %s\n' "$kv" > "$L/v-rvp.yaml"
+  plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_VALUES_PATCH='[v-rvp.yaml]' P_PATCH_FILES="$(pack v-rvp.yaml)" S_INV=restored-db S_DIFF=0
+  R="$(rec "precheck.c1|BLOCKED|PATCH_REFUSED")"
+  grep -q "v-rvp.yaml: RESTORED_VALUES_PATCH: instance.${key} " <<<"$R" && grep -q "tpg-scale-instance" <<<"$R" && grep -q "tpg-upgrade" <<<"$R" && grep -q "postgres patch file" <<<"$R" \
+    && ok "24 a values patch with instance.${key} on a restored instance: RESTORED_VALUES_PATCH naming tpg-scale-instance, tpg-upgrade and the postgres patch files" || bad "24 restored values ${key}" "$(cat "$TMP/records") $OUT"
+  [[ "$(rec "result.c1.restored-db|FAILED|PATCH_REFUSED" | wc -l)" -ge 1 ]] || bad "24 restored values result ${key}" "$(cat "$TMP/records")"
+done
+printf 'instance:\n  storageSize: 60Gi\n  exposure: loadBalancer\nbackup:\n  fullRetention: 6\n' > "$L/v-rvp.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_VALUES_PATCH='[v-rvp.yaml]' P_PATCH_FILES="$(pack v-rvp.yaml)" S_INV=restored-db S_DIFF=0
+R="$(rec "precheck.c1|BLOCKED|PATCH_REFUSED")"
+grep -q "instance.storageSize " <<<"$R" && grep -q "instance.exposure " <<<"$R" && ! grep -q "backup.fullRetention" <<<"$R" \
+  && ok "24 …a file with several keys: every instance key that reaches the CR is named, the key that does not (backup.fullRetention) is not" || bad "24 restored values several" "$R"
+printf 'backup:\n  fullRetention: 6\nnetwork:\n  policy: baseline\nferret:\n  replicas: 2\n' > "$L/v-rvp.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[restored-db]' P_VALUES_PATCH='[v-rvp.yaml]' P_PATCH_FILES="$(pack v-rvp.yaml)" S_INV=restored-db
+! rec "precheck.c1|BLOCKED" | grep -q . && ok "24 …a values patch whose keys do not reach the Postgres CR (backup, network, ferret) stays allowed on a restored instance" || bad "24 restored values allowed" "$(cat "$TMP/records") $OUT"
+printf 'instance:\n  exposure: loadBalancer\n' > "$L/v-rvp.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-rvp.yaml]' P_PATCH_FILES="$(pack v-rvp.yaml)" S_DIFF=0
+! grep -q "RESTORED_VALUES_PATCH" "$TMP/records" && ok "24 …the same instance: key on an instance that was not restored is not refused for that reason" || bad "24 not restored" "$(cat "$TMP/records")"
+git -C "$REPO" reset -q --hard "$BASE_SAVED2"
+printf 'restorePatch:\n  current: restore-patch/x.yaml\n' > "$L/v-rp.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-rp.yaml]' P_PATCH_FILES="$(pack v-rp.yaml)" S_DIFF=0
+rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "v-rp.yaml: restorePatch cannot be set by a values patch" \
+  && ok "24 a values patch with restorePatch is refused (only tpg-restore writes it)" || bad "24 values restorePatch" "$(cat "$TMP/records") $OUT"
+printf 'instance:\n  restored: true\n' > "$L/v-restored.yaml"
+plan P_CLUSTERS='[c1]' P_INSTANCES='[orders-db]' P_VALUES_PATCH='[v-restored.yaml]' P_PATCH_FILES="$(pack v-restored.yaml)" S_DIFF=0
+rec "precheck.c1|BLOCKED|PATCH_REFUSED" | grep -q "v-restored.yaml: instance.restored cannot be set by a values patch" \
+  && ok "24 a values patch with instance.restored is refused (only tpg-restore writes it)" || bad "24 values restored" "$(cat "$TMP/records") $OUT"
+
 echo
 echo "tests/patch: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

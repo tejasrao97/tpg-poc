@@ -1,0 +1,8 @@
+# Example of the restore-patch file before the current one (restorePatch.previous in
+# clusters/fleet.example.yaml); not applied.
+apiVersion: sql.tanzu.vmware.com/v1
+kind: Postgres
+spec:
+  postgresVersion:
+    name: postgres-17.6
+  storageSize: 80Gi

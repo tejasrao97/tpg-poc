@@ -10,7 +10,7 @@
 # carries the tag of the running version: the version commit stores a copy of that
 # file with the new tag under a new UID name and makes it current (the old file,
 # never changed, becomes previous with its commit), and rewrites the effective copy
-# patches/operator/clusters/<cluster>.yaml. A tag that is not the running version
+# helm_artifacts/operator/patches/clusters/<cluster>.yaml. A tag that is not the running version
 # stops the upgrade before anything changes (OPERATOR_IMAGE_PINNED).
 # P_DRY_RUN=true records the plan and changes nothing.
 WF="$1"; C="$2"; TIMEOUT="$4"
@@ -40,7 +40,8 @@ fi
 # An instance that exists must be Running (design decision D61).
 PRESENT=()
 for i in $(inventory_instances "$C"); do
-  if ! gerr="$(tk -n "pg-$i" get postgres "$i" -o name 2>&1 >/dev/null)"; then
+  ns="$(instance_ns "$C" "$i")" || fail FLEET_UNREADABLE "${i}: ${FLEET_UNREADABLE_DETAIL}"
+  if ! gerr="$(tk -n "$ns" get postgres "$i" -o name 2>&1 >/dev/null)"; then
     # Only NotFound means absent; any other error (API timeout, RBAC) stops the run
     grep -qiE 'NotFound|not found' <<<"$gerr" \
       || fail CLUSTER_API_ERROR "${i}: cannot read the Postgres object on ${C}: $(head -c 300 <<<"$gerr")"

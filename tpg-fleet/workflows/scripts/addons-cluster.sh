@@ -2,8 +2,8 @@
 # addons-cluster.sh WORKFLOW_NAME CLUSTER COMPONENTS DRY_RUN [RESULT_KEY] [EXISTING]
 # Install or upgrade the Helm add-on releases on one target cluster with helm-addons.sh.
 # COMPONENTS: auto (cert-manager and vso, plus monitoring when tpg-settings
-# monitoringOption is standalone) or a comma-separated list of cert-manager, vso
-# and monitoring.
+# monitoringOption is standalone) or a bracketed list of cert-manager, vso and
+# monitoring, [cert-manager, vso]; helm-addons.sh takes them comma-separated.
 # EXISTING: skip (default) or upgrade, for releases that already exist with a
 # different chart version or values (helm-addons.sh pre-check; never downgrades).
 # MONITORING_OPTION in the environment overrides tpg-settings monitoringOption.
@@ -24,6 +24,8 @@ option="${MONITORING_OPTION:-}"; [[ -n "$option" ]] || option="$(setting monitor
 if [[ "$COMPONENTS" == "auto" ]]; then
   COMPONENTS="cert-manager,vso"
   [[ "$option" == "standalone" ]] && COMPONENTS="cert-manager,vso,monitoring"
+else
+  COMPONENTS="$(list_csv components "$COMPONENTS")" || fail INVALID_INPUT "components is not auto or a bracketed list"
 fi
 args=(--cluster "$C" --role target --components "$COMPONENTS" --kubeconfig "/tmp/kube/${C}" --existing "$EXISTING")
 if [[ ",${COMPONENTS}," == *",monitoring,"* ]]; then

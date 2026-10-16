@@ -58,7 +58,7 @@ if ! patch_materialize "$REPO" > "$WORK/stored-files.txt"; then
   record result.git FAILED UNEXPECTED_ERROR "a patch file the plan stored could not be written; nothing was committed"
   exit 1
 fi
-patch_group overlays   # tpg-day0 stores the operator values overlay (Round 22): its effective copy is overlays/operator/clusters/<c>.yaml
+patch_group overlays   # tpg-day0 stores the operator values overlay (Round 22): its effective copy is helm_artifacts/operator/overlays/clusters/<c>.yaml
 for c in "${written[@]+"${written[@]}"}"; do
   operator_effective_write "$REPO" "$c"
   eff="$(operator_effective_rel "$c")"

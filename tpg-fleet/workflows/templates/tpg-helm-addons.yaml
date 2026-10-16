@@ -34,11 +34,11 @@ spec:
     parameters:
     # ---- mandatory
     - name: clusters
-      description: "Comma-separated registered clusters, or all"
+      description: "List: registered clusters in brackets, [aks-tpg-poc-01, aks-tpg-poc-02] (also with one value), or all"
       value: ""
     # ---- optional
     - name: components
-      description: "auto (cert-manager and vso, plus monitoring when tpg-settings monitoringOption=standalone), or a comma-separated list of cert-manager, vso, monitoring"
+      description: "auto (cert-manager and vso, plus monitoring when tpg-settings monitoringOption=standalone), or a list in brackets of cert-manager, vso, monitoring, for example [cert-manager, vso]"
       value: "auto"
     - name: existingAddons
       description: "Releases that already exist with a different chart version or values: skip (report SKIPPED_EXISTS) or upgrade"
