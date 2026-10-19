@@ -285,11 +285,22 @@ tk() {
           fi ;;
         postgresbackuplocation)
           if [[ "$(jq -r '.metadata.annotations["tpg.fleet/created-by"] // empty' "$CLD/$CLUSTER/$k/$nsx/$nm.json")" != "" && -s "$FLAGS/sync.names" ]]; then
-            local bn
+            # the operator names the synced backups after the pgBackRest label, not after the source backups:
+            # sync-<label lowercase>-<first 8 characters of the stanza uuid>, with the fields the source reports
+            # (restoreLabel, stanzaName, type, sourceInstance) and the location they were listed from. sync.names
+            # lists source backups; one the source cluster does not have is another backup of the repository.
+            local bn src f
             for bn in $(cat "$FLAGS/sync.names"); do
               case "$(flagval sync.mode)" in never) continue ;; failed) phase=Failed ;; running) phase=Running ;; *) phase=Succeeded ;; esac
+              src=""; for f in "$CLD"/*/postgresbackup/*/"$bn.json"; do [[ -f "$f" ]] && { src="$f"; break; }; done
               mkdir -p "$CLD/$CLUSTER/postgresbackup/$nsx"
-              jq -cn --arg n "$bn" --arg ns "$nsx" --arg p "$phase" '{kind: "PostgresBackup", metadata: {name: $n, namespace: $ns, labels: {"sql.tanzu.vmware.com/recovered-from-backuplocation": "true"}}, status: {phase: $p}}' > "$CLD/$CLUSTER/postgresbackup/$nsx/$bn.json"
+              if [[ -n "$src" ]]; then lab="$(jq -r '.status.restoreLabel // ""' "$src")"; else lab="20190101-000000F"; fi
+              jq -cn --arg ns "$nsx" --arg p "$phase" --arg loc "$nm" --arg lab "$lab" --slurpfile s "${src:-/dev/null}" '($s[0] // {}) as $o
+                | {kind: "PostgresBackup", metadata: {name: ("sync-" + ($lab | ascii_downcase) + "-e8854c1b"), namespace: $ns,
+                    labels: {"source-namespace": ($o.metadata.namespace // "pg-orders"), "sql.tanzu.vmware.com/recovered-from-backuplocation": "true"}},
+                   spec: {expire: false, sourceInstance: {name: ($o.spec.sourceInstance.name // "orders-db")}, type: ($o.spec.type // "full")},
+                   status: {phase: $p, restoreLabel: $lab, stanzaName: ($o.status.stanzaName // "pg-orders-orders-db-0000"), backupLocation: $loc}}' \
+                > "$CLD/$CLUSTER/postgresbackup/$nsx/sync-$(tr 'A-Z' 'a-z' <<<"$lab")-e8854c1b.json"
             done
           fi ;;
       esac ;;
@@ -403,13 +414,14 @@ shape_pair() {  # shape_pair SHAPE RECOVERY SPEC(spec|nospec): PJ, T (cluster, n
   IFS=/ read -ra T <<<"${SH_TGT[$1]}"; RK="${T[0]}.${T[2]}"; RKP="$RK"
 }
 shape_check() {  # shape_check TAG SHAPE RECOVERY SPEC Y C: the rendered PostgresRestore (Y) and location copy (C) say what the shape and the recovery point say
-  local tag="$1" shape="$2" kind="$3" spec="$4" y="$5" c="$6" why="" want_loc="$COPYN" p
+  local tag="$1" shape="$2" kind="$3" spec="$4" y="$5" c="$6" why="" want_loc="$COPYN" p want_sb
   case "$shape" in samenamespace|inplace) want_loc=orders-db-backup-location ;; esac
   [[ "$(yq '.kind' <<<"$y")" == PostgresRestore && "$(yq '.spec.targetInstance.name' <<<"$y")" == "${T[2]}" ]] || why+=" kind or targetInstance.name;"
   [[ "$(yq '.spec.targetInstance | has("spec")' <<<"$y")" == "$([[ "$spec" == spec ]] && echo true || echo false)" ]] || why+=" targetInstance.spec only with a spec file;"
   if [[ "$spec" == spec ]]; then [[ "$(yq '.spec.targetInstance.spec.storageSize' <<<"$y")" == 50Gi ]] || why+=" the spec file's storageSize;"; fi
   if [[ "$kind" == backup ]]; then
-    [[ "$(yq '.spec.sourceBackup.name' <<<"$y")" == orders-full-1 && "$(yq '.spec | has("pitr")' <<<"$y")" == false ]] || why+=" spec.sourceBackup.name without pitr;"
+    want_sb=orders-full-1; case "$shape" in newcluster|othernamespace) want_sb='@synced:20200101-000000F@' ;; esac   # resolved after backupSync (restoreLabel of the source backup)
+    [[ "$(yq '.spec.sourceBackup.name' <<<"$y")" == "$want_sb" && "$(yq '.spec | has("pitr")' <<<"$y")" == false ]] || why+=" spec.sourceBackup.name ($want_sb) without pitr;"
   else
     p='.spec.pitr'
     [[ "$(yq "$p.type" <<<"$y")" == "$kind" && "$(yq '.spec | has("sourceBackup")' <<<"$y")" == false \
@@ -476,7 +488,7 @@ snap="$(snapshot)"; run "$PJ"
 expect "a named backup onto another cluster: SUCCEEDED/DRY_RUN" SUCCEEDED DRY_RUN "would restore c1/pg-orders/orders-db into c2/pg-dr/orders-dr"
 nothing_changed "another cluster" "$snap"
 D="$(cat "$TMP/rec/plan.restore.c2.orders-dr.detail")"
-grep -q 'would be copied as pg-dr/restore-src-c1-pg-orders-orders-db on c2' <<<"$D" && grep -q 'PostgresBackup pg-dr/orders-full-1 on c2 to appear' <<<"$D" \
+grep -q 'would be copied as pg-dr/restore-src-c1-pg-orders-orders-db on c2' <<<"$D" && grep -q 'the PostgresBackup in pg-dr on c2 that backupSync makes of orders-full-1 to appear' <<<"$D" && grep -q 'restoreLabel 20200101-000000F, stanza pg-orders-orders-db-0000, location restore-src-c1-pg-orders-orders-db and instance orders-db' <<<"$D" \
   && ok "the plan states that the location copy would be created and sourceBackupName then waited for" || bad "copy plan" "$D"
 RKP=c2.orders-dr; C="$(plan_block 'PostgresBackupLocation .* on ')"
 [[ "$(yq '.metadata.name' <<<"$C")" == restore-src-c1-pg-orders-orders-db && "$(yq '.spec.backupSync.enabled' <<<"$C")" == true \
@@ -849,7 +861,7 @@ reset
 RK=c2.orders-dr
 set_flag sync.names "orders-full-1 orders-full-0"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
-expect "a named backup onto a new instance of another cluster and namespace: SUCCEEDED" SUCCEEDED "" "restored c1/pg-orders/orders-db into c2/pg-dr/orders-dr" "PostgresBackup pg-dr/orders-full-1 synced and Succeeded" "Application tpg-c2-orders-dr synced"
+expect "a named backup onto a new instance of another cluster and namespace: SUCCEEDED" SUCCEEDED "" "restored c1/pg-orders/orders-db into c2/pg-dr/orders-dr" "PostgresBackup pg-dr/sync-20200101-000000f-e8854c1b (source backup orders-full-1, restoreLabel 20200101-000000F) synced and Succeeded" "Application tpg-c2-orders-dr synced"
 order="$(grep -nE '^(push|label c2 namespace|sync tpg-c2-orders-dr resources=:ServiceAccount|sync tpg-c2-orders-dr resources=sql|apply c2 postgresbackuplocation|apply c2 postgresrestore|wait ready|adopt)' "$TMP/events" | sed -E 's/^[0-9]+://' | cut -c1-48 | paste -sd'|' -)"
 want="push mode=direct restore: add c2/orders-dr from c1/orders-db (tpg-restore-x)|label c2 namespace pg-dr|sync tpg-c2-orders-dr resources=:ServiceAccount:pg-dr/tpg-vso,secrets.hashicorp.com|sync tpg-c2-orders-dr resources=sql.tanzu.vmware.com:PostgresBackupLocation:pg-dr/orders-dr|apply c2 postgresbackuplocation pg-dr/restore-src-c1-pg-orders-orders-db|apply c2 postgresrestore pg-dr/orders-dr-restore|wait ready orders-dr|push mode=direct restore: record the restore-patch of c2/orders-dr|adopt c2 orders-dr"
 want="$(cut -c1-48 <<<"${want//|/$'\n'}" | paste -sd'|' -)"
@@ -885,7 +897,8 @@ set_flag sync.names "orders-full-1"
 mkdir -p "$TMP/cl/c2/postgresbackuplocation/pg-dr"
 printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"earlier-copy","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"pg-backups-c1","repoPath":"/pg-orders"}},"backupSync":{"enabled":true}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json"
 mkdir -p "$TMP/cl/c2/postgresbackup/pg-dr"
-printf '%s' '{"kind":"PostgresBackup","metadata":{"name":"orders-full-1","namespace":"pg-dr"},"status":{"phase":"Succeeded"}}' > "$TMP/cl/c2/postgresbackup/pg-dr/orders-full-1.json"
+# what the earlier restore's backupSync made of orders-full-1 (named after its label, listed from the reused location)
+printf '%s' '{"kind":"PostgresBackup","metadata":{"name":"sync-20200101-000000f-e8854c1b","namespace":"pg-dr"},"spec":{"sourceInstance":{"name":"orders-db"},"type":"full"},"status":{"phase":"Succeeded","restoreLabel":"20200101-000000F","stanzaName":"pg-orders-orders-db-0000","backupLocation":"earlier-copy"}}' > "$TMP/cl/c2/postgresbackup/pg-dr/sync-20200101-000000f-e8854c1b.json"
 run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
 expect "a reused location with keepSourceLocation=false: SUCCEEDED" SUCCEEDED ""
 [[ -f "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json" ]] && ! ev_has '^delete' && ! ev_has 'apply c2 postgresbackuplocation' && ok "…the reused location is neither created nor deleted" || bad "reused location touched" "$(cat "$TMP/events")"
@@ -964,6 +977,48 @@ reset
 set_flag sync.mode running; set_flag sync.names "orders-full-1"
 run "$PJ" P_DRY_RUN=false P_TIMEOUT=60
 expect "the synced backup stays Running: BACKUPS_NOT_SYNCED with the last phase" FAILED BACKUPS_NOT_SYNCED "last phase seen: Running"
+# The operator names a synced backup after its pgBackRest label (sync-<label lowercase>-<8 of the stanza uuid>), not
+# after the source backup: the pair finds it by restoreLabel, stanza, location and instance, and the PostgresRestore
+# names the synced one
+echo "-- the synced backup is found by its label, not by the source name"
+reset
+set_flag sync.names "orders-full-1 orders-full-0"
+run "$PJ" P_DRY_RUN=false
+expect "a named backup into another cluster: SUCCEEDED, the synced backup named in the detail" SUCCEEDED "" "orders-full-1, restoreLabel 20200101-000000F) synced and Succeeded"
+[[ "$(jq -r '.spec.sourceBackup.name' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json 2>/dev/null)" == sync-20200101-000000f-e8854c1b ]] \
+  && ok "the PostgresRestore names the synced backup (sync-<label>-<hash>), not the source backup, and not the other backup of the repository" \
+  || bad "restore names the source backup" "$(jq -c '.spec' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json 2>/dev/null)"
+reset
+set_flag sync.names "orders-full-1"
+mkdir -p "$TMP/cl/c2/postgresbackup/pg-dr"
+jq -cn '{kind: "PostgresBackup", metadata: {name: "sync-20200101-000000f-aaaaaaaa", namespace: "pg-dr"}, spec: {sourceInstance: {name: "reports-db"}, type: "full"},
+  status: {phase: "Succeeded", restoreLabel: "20200101-000000F", stanzaName: "pg-orders-orders-db-0000", backupLocation: "restore-src-c1-pg-orders-orders-db"}}' > "$TMP/cl/c2/postgresbackup/pg-dr/sync-20200101-000000f-aaaaaaaa.json"
+jq -cn '{kind: "PostgresBackup", metadata: {name: "sync-20200101-000000f-bbbbbbbb", namespace: "pg-dr"}, spec: {sourceInstance: {name: "orders-db"}, type: "full"},
+  status: {phase: "Succeeded", restoreLabel: "20200101-000000F", stanzaName: "another-stanza", backupLocation: "restore-src-c1-pg-orders-orders-db"}}' > "$TMP/cl/c2/postgresbackup/pg-dr/sync-20200101-000000f-bbbbbbbb.json"
+run "$PJ" P_DRY_RUN=false
+[[ "$(jq -r '.spec.sourceBackup.name' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json 2>/dev/null)" == sync-20200101-000000f-e8854c1b ]] \
+  && ok "a backup with the same label of another instance, and one of another stanza, are not taken for the source backup" \
+  || bad "wrong synced backup" "$(jq -c '.spec' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json 2>/dev/null) $OUT"
+reset
+set_flag sync.names "orders-full-1"
+mkdir -p "$TMP/cl/c2/postgresbackup/pg-dr"
+jq -cn '{kind: "PostgresBackup", metadata: {name: "sync-20200101-000000f-cccccccc", namespace: "pg-dr"}, spec: {sourceInstance: {name: "orders-db"}, type: "full"},
+  status: {phase: "Succeeded", restoreLabel: "20200101-000000F", stanzaName: "pg-orders-orders-db-0000", backupLocation: "restore-src-c1-pg-orders-orders-db"}}' > "$TMP/cl/c2/postgresbackup/pg-dr/sync-20200101-000000f-cccccccc.json"
+run "$PJ" P_DRY_RUN=false
+expect "two synced backups with the same label, stanza, location and instance: BACKUP_AMBIGUOUS, nothing restored" FAILED BACKUP_AMBIGUOUS "sync-20200101-000000f-cccccccc" "sync-20200101-000000f-e8854c1b"
+! ev_has 'apply c2 postgresrestore' && ok "…and no PostgresRestore is created" || bad "restore created after ambiguity"
+reset
+set_flag sync.names "orders-full-0"
+run "$PJ" P_DRY_RUN=false P_TIMEOUT=60
+expect "synced backups of the repository exist but none has the label: BACKUPS_NOT_SYNCED names the label and lists what is there" FAILED BACKUPS_NOT_SYNCED "restoreLabel 20200101-000000F" "sync-20190101-000000f-e8854c1b (label 20190101-000000F"
+reset
+mkdir -p "$TMP/cl/c1/postgresbackup/pg-orders"
+jq 'del(.status.restoreLabel)' "$TMP/cl/c1/postgresbackup/pg-orders/orders-full-1.json" > "$TMP/cl/c1/postgresbackup/pg-orders/orders-nolabel.json"
+sed -i 's/orders-full-1/orders-nolabel/' "$TMP/cl/c1/postgresbackup/pg-orders/orders-nolabel.json"
+mk c1/pg-orders/orders-db "sourceBackupName: orders-nolabel" c2/pg-dr/orders-dr "$BACKUP_T"
+run "$PJ"
+expect "a source backup without restoreLabel: BACKUP_LABEL_UNKNOWN in the plan, also in a dry run" FAILED BACKUP_LABEL_UNKNOWN "orders-nolabel" "restoreLabel"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"
 
 echo "-- the restore phase"
 reset
@@ -1172,7 +1227,7 @@ mkdir -p "$TMP/cl/c2/secret/pg-dr" "$TMP/cl/c2/postgresbackuplocation/pg-dr"
 printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"earlier-copy","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"legacy-container","repoPath":"/legacy","secret":{"name":"earlier-creds"}}},"backupSync":{"enabled":true}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json"
 jq -cn '{kind: "Secret", metadata: {name: "earlier-creds", namespace: "pg-dr", labels: {"tpg.fleet/restore-source": "c1.legacy-db"}}, data: {accountKey: ("OLD" | @base64)}}' > "$TMP/cl/c2/secret/pg-dr/earlier-creds.json"
 mkdir -p "$TMP/cl/c2/postgresbackup/pg-dr"   # the backups the earlier restore synced
-printf '%s' '{"kind":"PostgresBackup","metadata":{"name":"legacy-full-1","namespace":"pg-dr"},"status":{"phase":"Succeeded"}}' > "$TMP/cl/c2/postgresbackup/pg-dr/legacy-full-1.json"
+printf '%s' '{"kind":"PostgresBackup","metadata":{"name":"sync-20200101-000000f-e8854c1b","namespace":"pg-dr"},"spec":{"sourceInstance":{"name":"legacy-db"},"type":"full"},"status":{"phase":"Succeeded","restoreLabel":"20200101-000000F","stanzaName":"legacy-stanza","backupLocation":"earlier-copy"}}' > "$TMP/cl/c2/postgresbackup/pg-dr/sync-20200101-000000f-e8854c1b.json"
 RK=c2.orders-dr; mk c1/pg-legacy/legacy-db 'sourceBackupName: legacy-full-1' c2/pg-dr/orders-dr "$LEGACY_SPEC"; run "$PJ" P_DRY_RUN=false P_KEEP_SOURCE_LOCATION=false
 expect "the location of an earlier restore is reused: SUCCEEDED, its Secret earlier-creds refreshed (label equals this source)" SUCCEEDED "" "Secret pg-dr/earlier-creds was copied from c1/pg-legacy/src-creds"
 rm -f "$TMP/cl/c2/postgres/pg-dr/orders-dr.json"   # the restored instance of that run, so the next run restores into a new target again
@@ -1592,7 +1647,7 @@ UPR="$(source "$UP/prelude.sh"; instance_render "$UP/repo" c1 up-db | yq -o=json
 
 echo "== 7e. real runs: the three methods (a new instance on another cluster, in another namespace of the cluster, in place) x a named backup and each PITR type"
 real_check() {  # real_check SHAPE RECOVERY: a real run without a spec file (the spec of the restored Postgres is read from the cluster)
-  local shape="$1" kind="$2" tag="real $1 $2" r why="" n_restore adopt_ev
+  local shape="$1" kind="$2" tag="real $1 $2" r why="" n_restore adopt_ev want_sb
   reset; set_flag sync.names "orders-full-1"
   rm -f "$TMP/cl/c1/postgresbackup/pg-orders/orders-running.json"   # a backup that is still running holds an in-place target (OPERATION_IN_PROGRESS)
   shape_pair "$shape" "$kind" nospec
@@ -1603,7 +1658,8 @@ $(tail -8 <<<"$OUT")"; return; fi
   [[ "$n_restore" == 1 ]] || { bad "$tag: ${n_restore} PostgresRestore objects were applied, want 1" "$(cat "$TMP/events")"; return; }
   r="$(cat "$TMP/cl/${T[0]}/postgresrestore/${T[1]}/"*.json)"
   if [[ "$kind" == backup ]]; then
-    [[ "$(jq -r '.spec.sourceBackup.name' <<<"$r")" == orders-full-1 && "$(jq '.spec | has("pitr")' <<<"$r")" == false ]] || why+=" spec.sourceBackup;"
+    want_sb=orders-full-1; case "$shape" in newcluster|othernamespace) want_sb=sync-20200101-000000f-e8854c1b ;; esac   # the synced backup (named after its label), not the source backup
+    [[ "$(jq -r '.spec.sourceBackup.name' <<<"$r")" == "$want_sb" && "$(jq '.spec | has("pitr")' <<<"$r")" == false ]] || why+=" spec.sourceBackup (${want_sb});"
   else
     [[ "$(jq -r '.spec.pitr.type' <<<"$r")" == "$kind" && "$(jq '.spec | has("sourceBackup")' <<<"$r")" == false ]] || why+=" spec.pitr.type ${kind};"
   fi
@@ -1616,7 +1672,7 @@ $(tail -8 <<<"$OUT")"; return; fi
   fi
   # a named backup into another namespace or cluster waits for the synced backup; nothing else does
   if [[ "$kind" == backup && "$shape" != inplace && "$shape" != samenamespace ]]; then
-    grep -q "PostgresBackup ${T[1]}/orders-full-1 synced and Succeeded" <<<"$(detail)" || why+=" no wait for the synced backup;"
+    grep -q "PostgresBackup ${T[1]}/sync-20200101-000000f-e8854c1b (source backup orders-full-1, restoreLabel 20200101-000000F) synced and Succeeded" <<<"$(detail)" || why+=" no wait for the synced backup;"
   else
     ! grep -q "synced and Succeeded" <<<"$(detail)" || why+=" a wait for a synced backup;"
   fi

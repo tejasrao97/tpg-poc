@@ -20,7 +20,8 @@
 #    PostgresBackupLocation (container, repoPath, Secret) and stanza.
 #  2 Named backup (pitrEnabled false): same namespace -> the PostgresBackup must exist and be Succeeded now
 #    (BACKUP_NOT_FOUND, BACKUP_NOT_SUCCEEDED, also in a dry run); another namespace or cluster -> the SOURCE
-#    PostgresBackup must be readable and Succeeded first (SOURCE_BACKUP_UNVERIFIED, BACKUP_NOT_SUCCEEDED).
+#    PostgresBackup must be readable and Succeeded first (SOURCE_BACKUP_UNVERIFIED, BACKUP_NOT_SUCCEEDED) and report
+#    status.restoreLabel (BACKUP_LABEL_UNKNOWN): backupSync names the synced backup in the target namespace after that label.
 #  3 PITR: location and stanza come from the live source, else from the source PostgresBackup; a given value
 #    that differs is a WARNING (the given value wins); with neither a live source nor a readable
 #    sourceBackupName they are mandatory (PITR_SOURCE_UNKNOWN). srcBackupLabel is spec.pitr.sourceBackupLocation.set.
@@ -70,7 +71,9 @@
 #    theirs. A reused copy keeps using the Secret it has: when its contents differ from the source's it is updated only if its
 #    restore-source label equals this pair's source, otherwise SOURCE_SECRET_CONFLICT (no label: a Secret this workflow did not make).
 #    Secret values are held in shell variables and piped to kubectl on stdin: never a file, an argument or a log line. A named
-#    backup then waits for the PostgresBackup of the same name in the target namespace (BACKUPS_NOT_SYNCED).
+#    backup then waits for the synced PostgresBackup in the target namespace (BACKUPS_NOT_SYNCED): the one with the source
+#    backup's restoreLabel, stanza, the location of the copy (or the reused one) and the source instance, named sync-<label>-<hash>,
+#    not like the source backup (BACKUP_AMBIGUOUS for more than one); the PostgresRestore names it.
 #  7 dryRun: nothing is changed on a cluster, in Git or in Argo CD; the whole plan, the PostgresRestore as YAML
 #    included, is logged and recorded (plan.restore.<cluster>.<instance>).
 #  8 The PostgresRestore is rendered through helm_artifacts/instance/crd-reference (tpg.prune: zero defaults
@@ -85,7 +88,7 @@
 # 10 Success is the PostgresRestore Succeeded and the target Running.
 #
 # Reason codes: INVALID_PAIR NOT_REGISTERED FLEET_UNREADABLE SOURCE_NAMESPACE_MISMATCH SOURCE_UNREADABLE
-#   BACKUP_NOT_FOUND BACKUP_NOT_SUCCEEDED BACKUP_OF_OTHER_INSTANCE SOURCE_BACKUP_UNVERIFIED PITR_SOURCE_UNKNOWN
+#   BACKUP_NOT_FOUND BACKUP_NOT_SUCCEEDED BACKUP_LABEL_UNKNOWN BACKUP_AMBIGUOUS BACKUP_OF_OTHER_INSTANCE SOURCE_BACKUP_UNVERIFIED PITR_SOURCE_UNKNOWN
 #   BACKUP_LOCATION_NOT_INITIALIZED SOURCE_LOCATION_UNKNOWN SOURCE_LOCATION_UNREADABLE NO_FULL_BACKUP INVALID_TIMESTAMP
 #   OUTSIDE_RECOVERY_WINDOW TARGET_UNREADABLE NAMESPACE_IMMUTABLE INSTANCE_NAME_IN_USE TARGET_EXISTS
 #   CONFIRMATION_MISMATCH (in place only) OPERATION_IN_PROGRESS UNKNOWN_TARGET_CLUSTER SPEC_FILE_REQUIRED SPEC_FILE_NOT_FOUND
@@ -271,6 +274,13 @@ if [[ "$METHOD" == backup ]]; then
   fi
   sphase="$(jq -r '.status.phase // ""' <<<"$SB")"
   [[ "$sphase" == Succeeded ]] || fail BACKUP_NOT_SUCCEEDED "PostgresBackup ${SNS}/${SBK} on ${SC} is in phase ${sphase:-<none>}, not Succeeded"
+  # Into another namespace or cluster the operator names the synced backup after its pgBackRest label
+  # (sync-<label lowercase>-<8 of the stanza uuid>), not after this one: the label finds it (BACKUP_LABEL_UNKNOWN without one)
+  SB_LABEL=""; SB_STANZA=""
+  if [[ "$SAME_NS" != true ]]; then
+    SB_LABEL="$(jq -r '.status.restoreLabel // ""' <<<"$SB")"; SB_STANZA="$(jq -r '.status.stanzaName // ""' <<<"$SB")"
+    [[ -n "$SB_LABEL" ]] || fail BACKUP_LABEL_UNKNOWN "PostgresBackup ${SNS}/${SBK} on ${SC} reports no status.restoreLabel (the pgBackRest label): backupSync names the synced backup in ${TNS} after that label, so it could not be found there; check that the backup completed and the operator version"
+  fi
   plan "named backup ${SNS}/${SBK} on ${SC}: Succeeded$( [[ "$SAME_NS" == true ]] && echo " (same namespace: no wait, no copy)" || echo " (source check passed; the target namespace gets a copy of the source backup location and the same-named backup is waited for)" )"
 fi
 
@@ -636,7 +646,7 @@ if [[ "$SAME_NS" != true ]]; then
   else
     plan "source location: ${TNS}/${COPY_NAME} on ${TC} already points at ${LOC_CONT}${LOC_PATH} with backupSync on: reused, not created, never removed by this run; it reads the Secret ${COPY_SECRET}$( [[ "$COPY_SECRET" == backup-storage ]] && echo " of the namespace" || echo ", which is refreshed from ${SC}/${SNS}/${LOC_SECRET} in memory when its contents differ (only when it is labelled tpg.fleet/restore-source=${src_label}, else SOURCE_SECRET_CONFLICT)" )"
   fi
-  [[ "$METHOD" != backup ]] || plan "named backup: after the location exists, wait for PostgresBackup ${TNS}/${SBK} on ${TC} to appear and be Succeeded (counts against restoreTimeoutSeconds ${TIMEOUT}s; Failed stops the pair at once)"
+  [[ "$METHOD" != backup ]] || plan "named backup: after the location exists, wait for the PostgresBackup in ${TNS} on ${TC} that backupSync makes of ${SBK} to appear and be Succeeded: the one with restoreLabel ${SB_LABEL}, stanza ${SB_STANZA:-<any>}, location ${COPY_NAME} and instance ${SI} (it is named sync-<label>-<hash>, not ${SBK}; counts against restoreTimeoutSeconds ${TIMEOUT}s; Failed stops the pair at once); the PostgresRestore then names it"
 fi
 RESTORE_BL="$SRC_BL"; [[ "$SAME_NS" == true ]] || RESTORE_BL="$COPY_NAME"
 
@@ -654,7 +664,9 @@ RNAME="${TI}-restore-$(date -u +%Y%m%d%H%M%S)"
 # fills in its spec (lab item), an existing one keeps its spec
 tinst="$(jq -cn --arg n "$TI" --argjson spec "${SPEC_JSON:-null}" '{name: $n} + (if $spec != null then {spec: $spec} else {} end)')"
 if [[ "$METHOD" == backup ]]; then
-  rspec="$(jq -cn --arg b "$SBK" --argjson t "$tinst" '{sourceBackup: {name: $b}, targetInstance: $t}')"
+  # into another namespace or cluster the synced backup has another name, known after backupSync: a placeholder in the plan
+  RESTORE_SB="$SBK"; [[ "$SAME_NS" == true ]] || RESTORE_SB="@synced:${SB_LABEL}@"
+  rspec="$(jq -cn --arg b "$RESTORE_SB" --argjson t "$tinst" '{sourceBackup: {name: $b}, targetInstance: $t}')"
 else
   rspec="$(jq -cn --arg type "$METHOD" --arg ts "$PITR_TS" --arg tg "$PITR_TARGET" --argjson best "$PITR_BEST" --arg bl "$RESTORE_BL" \
     --arg st "$SRC_STANZA" --arg lab "$PITR_LABEL" --argjson t "$tinst" '
@@ -854,23 +866,37 @@ if [[ "$SAME_NS" != true ]]; then
     note "source backup location ${TNS}/${COPY_NAME} created"
   fi
   if [[ "$METHOD" == backup ]]; then
-    last_phase=""
+    last_phase=""; synced_seen=""; SYNC_NAME=""
     while true; do
       to_tgt
-      if get_obj "$TNS" postgresbackup "$SBK" && [[ -n "$OBJ" ]]; then
-        last_phase="$(jq -r '.status.phase // ""' <<<"$OBJ")"
+      matches="[]"
+      if tk -n "$TNS" get postgresbackup -o json > "$WORK/synced.json" 2>/dev/null; then
+        # the synced backup: the label (case: the object name is lowercase), stanza, location and instance of the source backup
+        matches="$(jq -c --arg l "$SB_LABEL" --arg st "$SB_STANZA" --arg loc "$COPY_NAME" --arg i "$SI" '[.items[]?
+          | select(((.status.restoreLabel // "") | ascii_downcase) == ($l | ascii_downcase) and ($st == "" or (.status.stanzaName // "") == $st)
+                   and (.status.backupLocation // "") == $loc and (.spec.sourceInstance.name // "") == $i)
+          | {name: .metadata.name, phase: (.status.phase // "")}]' "$WORK/synced.json")"
+        synced_seen="$(jq -r '[.items[]? | "\(.metadata.name) (label \(.status.restoreLabel // "none"), \(.status.phase // "no phase"))"] | join(", ")' "$WORK/synced.json")"
+      fi
+      if [[ "$(jq 'length' <<<"$matches")" -gt 1 ]]; then
+        fail BACKUP_AMBIGUOUS "more than one PostgresBackup in ${TNS} on ${TC} has restoreLabel ${SB_LABEL}, stanza ${SB_STANZA:-<any>}, location ${COPY_NAME} and instance ${SI}: $(jq -r 'map(.name) | join(", ")' <<<"$matches"); remove the duplicates (or the extra location) and run the pair again"
+      fi
+      if [[ "$(jq 'length' <<<"$matches")" -eq 1 ]]; then
+        SYNC_NAME="$(jq -r '.[0].name' <<<"$matches")"; last_phase="$(jq -r '.[0].phase' <<<"$matches")"
         case "$last_phase" in
           Succeeded) break ;;
-          Failed) fail BACKUP_NOT_SUCCEEDED "the synced PostgresBackup ${TNS}/${SBK} on ${TC} is Failed" ;;
+          Failed) fail BACKUP_NOT_SUCCEEDED "the synced PostgresBackup ${TNS}/${SYNC_NAME} on ${TC} (source backup ${SBK}, restoreLabel ${SB_LABEL}) is Failed" ;;
         esac
       fi
       if (( SECONDS - START > TIMEOUT )); then
-        fail BACKUPS_NOT_SYNCED "PostgresBackup ${TNS}/${SBK} did not appear Succeeded in ${TNS} on ${TC} within ${TIMEOUT}s (last phase seen: ${last_phase:-not there}); backupSync of ${COPY_NAME} has not listed it"
+        fail BACKUPS_NOT_SYNCED "the synced PostgresBackup of ${SBK} (restoreLabel ${SB_LABEL}, stanza ${SB_STANZA:-<any>}, location ${COPY_NAME}, instance ${SI}) did not appear Succeeded in ${TNS} on ${TC} within ${TIMEOUT}s (last phase seen: ${last_phase:-not there}); backupSync of ${COPY_NAME} has not listed it. In the namespace: ${synced_seen:-no PostgresBackup}"
       fi
-      log "waiting for the synced PostgresBackup ${TNS}/${SBK} on ${TC}: phase ${last_phase:-<not there>} ($((SECONDS - START))s)"
+      log "waiting for the synced PostgresBackup of ${SBK} (restoreLabel ${SB_LABEL}) in ${TNS} on ${TC}: phase ${last_phase:-<not there>} ($((SECONDS - START))s)"
       sleep 20
     done
-    note "PostgresBackup ${TNS}/${SBK} synced and Succeeded"
+    note "PostgresBackup ${TNS}/${SYNC_NAME} (source backup ${SBK}, restoreLabel ${SB_LABEL}) synced and Succeeded"
+    # the PostgresRestore names the synced backup
+    RESTORE_YAML="$(N="$SYNC_NAME" yq '.spec.sourceBackup.name = strenv(N)' <<<"$RESTORE_YAML")"
   fi
 fi
 
@@ -1000,4 +1026,4 @@ if [[ "$SAME_NS" != true ]]; then
 fi
 w="$(join_list ${WARNS[@]+"${WARNS[@]}"})"
 notes="$(join_list ${NOTES[@]+"${NOTES[@]}"})"
-record "$RKEY" SUCCEEDED "" "restored ${SC}/${SNS}/${SI} into ${TC}/${TNS}/${TI} ($( [[ "$METHOD" == backup ]] && echo "backup ${SBK}" || echo "pitr ${METHOD}" ))${notes:+; ${notes}}${w:+; warnings: ${w}}"
+record "$RKEY" SUCCEEDED "" "restored ${SC}/${SNS}/${SI} into ${TC}/${TNS}/${TI} ($( [[ "$METHOD" == backup ]] && echo "backup ${SBK}${SYNC_NAME:+ = ${SYNC_NAME}}" || echo "pitr ${METHOD}" ))${notes:+; ${notes}}${w:+; warnings: ${w}}"
