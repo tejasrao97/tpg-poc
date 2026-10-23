@@ -192,6 +192,7 @@ fleet_lock_release() { ev "lock release"; }
 fleet_head() { printf 'head0001'; }
 appset_refresh() { ev "appset refresh $1"; }
 app_exists() { ! flag app.missing; }
+app_removed_or_force() { ev "app removed $1"; FORCED_NOTE=""; ! flag app.stuck; }
 sync_instance_app() { ev "adopt $1 $2"; SYNC_FAIL_REASON=SYNC_FAILED; SYNC_FAIL_DETAIL="stub"; ! flag adopt.fail; }
 pg_wait_ready() {
   ev "wait ready $1"
@@ -224,10 +225,11 @@ app_sync_wait() {
   return 0
 }
 tk() {
-  local ns="" all=false out="" ignore=false file="" pos=() d f body json k nm nsx
+  local ns="" all=false out="" ignore=false file="" pos=() d f body json k nm nsx sdry=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -n) ns="$2"; shift 2 ;;
+      --dry-run=server) sdry=true; shift ;;
       -A) all=true; shift ;;
       -o) out="$2"; shift 2 ;;
       -f) file="$2"; shift 2 ;;
@@ -260,6 +262,23 @@ tk() {
       k="$(jq -r '.kind | ascii_downcase' <<<"$json")"; nm="$(jq -r '.metadata.name' <<<"$json")"
       nsx="$(jq -r '.metadata.namespace // empty' <<<"$json")"; nsx="${nsx:-$ns}"
       case "$k" in namespace|postgresversion) nsx="_" ;; esac
+      # the operator's webhook (seen in the lab): the target of a named-backup restore must have the backup's major version; a
+      # target without spec.targetInstance.spec gets the newest PostgresVersion of the cluster (postgres-18.1 here)
+      if [[ "$k" == postgresrestore ]]; then
+        flag webhook.reject && { echo "Error from server (Forbidden): admission webhook denied the PostgresRestore ${nm}: stub refusal" >&2; return 1; }
+        local sbn bmaj tv tmaj
+        sbn="$(jq -r '.spec.sourceBackup.name // empty' <<<"$json")"
+        if [[ -n "$sbn" ]]; then
+          [[ -f "$CLD/$CLUSTER/postgresbackup/$nsx/$sbn.json" ]] || { echo "The PostgresRestore \"${nm}\" is invalid: spec.sourceBackup.name: Not found: Postgres Backup '${sbn}' does not exist in ${nsx}" >&2; return 1; }
+          bmaj="$(jq -r '.status.fullPostgresVersion // "17.6"' "$CLD/$CLUSTER/postgresbackup/$nsx/$sbn.json")"; bmaj="${bmaj%%.*}"
+          tv="$(jq -r '.spec.targetInstance.spec.postgresVersion.name // empty' <<<"$json")"
+          [[ -n "$tv" ]] || tv="$(jq -r '.spec.postgresVersion.name // empty' "$CLD/$CLUSTER/postgres/$nsx/$(jq -r '.spec.targetInstance.name' <<<"$json").json" 2>/dev/null)"
+          [[ -n "$tv" ]] || tv=postgres-18.1
+          tmaj="$(sed -nE 's/^(postgres-)?([0-9]+).*$/\2/p' <<<"$tv")"
+          [[ "$tmaj" == "$bmaj" ]] || { echo "The PostgresRestore \"${nm}\" is invalid: spec.targetInstance.spec.postgresVersion.name: Invalid value: \"${tv}\": Postgres Backup '${sbn}' [version '${bmaj}'] and Postgres Restore Target Instance [version '${tmaj}'] is not on same Postgres Major Version" >&2; return 1; }
+        fi
+      fi
+      if [[ "$sdry" == true ]]; then ev "dryrun ${CLUSTER} ${k} ${nsx}/${nm}"; return 0; fi
       ev "apply ${CLUSTER} ${k} ${nsx}/${nm}"
       case "$k" in vaultstaticsecret|serviceaccount) ev "APPLIED-SHARED ${k} ${nsx}/${nm}" ;; esac
       [[ ! -e "$FLAGS/apply.fail.${k}" ]] || { echo "Error from server (Invalid): ${k} ${nm} is invalid" >&2; return 1; }
@@ -271,8 +290,11 @@ tk() {
           jq --arg p "$phase" '.status = {phase: $p, conditions: (if $p == "Failed" then [{message: "restore pod failed: stub"}] else [] end)}' "$CLD/$CLUSTER/$k/$nsx/$nm.json" > "$CLD/$CLUSTER/$k/$nsx/$nm.tmp" && mv "$CLD/$CLUSTER/$k/$nsx/$nm.tmp" "$CLD/$CLUSTER/$k/$nsx/$nm.json"
           local ti; ti="$(jq -r '.spec.targetInstance.name' "$CLD/$CLUSTER/$k/$nsx/$nm.json")"
           if [[ "$(jq -r '.spec.targetInstance.spec // empty' "$CLD/$CLUSTER/$k/$nsx/$nm.json")" != "" ]]; then
-            mkdir -p "$CLD/$CLUSTER/postgres/$nsx"
-            jq '{kind: "Postgres", metadata: {name: .spec.targetInstance.name, namespace: .metadata.namespace}, spec: .spec.targetInstance.spec, status: {currentState: "Running", stanzaName: "s"}}' "$CLD/$CLUSTER/$k/$nsx/$nm.json" > "$CLD/$CLUSTER/postgres/$nsx/$ti.json"
+            # the operator creates the instance from the spec it was given and adds its own fields (SNAP_EXTRA)
+            if ! flag snap.gone; then
+              mkdir -p "$CLD/$CLUSTER/postgres/$nsx"
+              jq --argjson extra "${SNAP_EXTRA:-{\}}" '{kind: "Postgres", metadata: {name: .spec.targetInstance.name, namespace: .metadata.namespace}, spec: (.spec.targetInstance.spec + $extra), status: {currentState: "Running", stanzaName: "s"}}' "$CLD/$CLUSTER/$k/$nsx/$nm.json" > "$CLD/$CLUSTER/postgres/$nsx/$ti.json"
+            fi
           elif [[ ! -f "$CLD/$CLUSTER/postgres/$nsx/$ti.json" ]] && ! flag snap.gone; then
             # no spec file: the operator creates the instance and fills in its spec (what it adds is the operator's: a runtime-looking
             # metadata and status, a null field)
@@ -299,7 +321,8 @@ tk() {
                 | {kind: "PostgresBackup", metadata: {name: ("sync-" + ($lab | ascii_downcase) + "-e8854c1b"), namespace: $ns,
                     labels: {"source-namespace": ($o.metadata.namespace // "pg-orders"), "sql.tanzu.vmware.com/recovered-from-backuplocation": "true"}},
                    spec: {expire: false, sourceInstance: {name: ($o.spec.sourceInstance.name // "orders-db")}, type: ($o.spec.type // "full")},
-                   status: {phase: $p, restoreLabel: $lab, stanzaName: ($o.status.stanzaName // "pg-orders-orders-db-0000"), backupLocation: $loc}}' \
+                   status: ({phase: $p, restoreLabel: $lab, stanzaName: ($o.status.stanzaName // "pg-orders-orders-db-0000"), backupLocation: $loc}
+                     + (if $o.status.fullPostgresVersion then {fullPostgresVersion: $o.status.fullPostgresVersion} else {} end))}' \
                 > "$CLD/$CLUSTER/postgresbackup/$nsx/sync-$(tr 'A-Z' 'a-z' <<<"$lab")-e8854c1b.json"
             done
           fi ;;
@@ -373,6 +396,8 @@ plan_block() {  # plan_block HEADER_REGEX -> the YAML block that follows the pla
   awk -v h="$1" '$0 ~ h {f=1; next} f && /^      / {sub(/^      /, ""); print; next} f {exit}' "$TMP/rec/plan.restore.${RKP:-$RK}.detail" 2>/dev/null | sed 's/^result\.//' || true
 }
 restore_yaml() { plan_block 'PostgresRestore .* on '; }
+# the targetInstance the plan of a named backup into another namespace or cluster shows (its PostgresRestore is rendered after the sync)
+tgt_yaml() { plan_block 'targetInstance of that PostgresRestore' | yq '{"kind": "PostgresRestore", "spec": {"targetInstance": .}}'; }
 snapshot() { (cd "$TMP/cl" && find . -type f | sort | xargs cat | sha256sum | cut -c1-16; sha256sum < "$TMP/fleet.repo/clusters/fleet.yaml" | cut -c1-16) | paste -sd' ' -; }
 nothing_changed() {  # nothing_changed LABEL SNAPSHOT_BEFORE: the clusters, the fleet repository and the Argo CD calls are as they were
   local after; after="$(snapshot)"
@@ -416,12 +441,22 @@ shape_pair() {  # shape_pair SHAPE RECOVERY SPEC(spec|nospec): PJ, T (cluster, n
 shape_check() {  # shape_check TAG SHAPE RECOVERY SPEC Y C: the rendered PostgresRestore (Y) and location copy (C) say what the shape and the recovery point say
   local tag="$1" shape="$2" kind="$3" spec="$4" y="$5" c="$6" why="" want_loc="$COPYN" p want_sb
   case "$shape" in samenamespace|inplace) want_loc=orders-db-backup-location ;; esac
+  # a named backup into another namespace or cluster: the PostgresRestore is rendered once the synced backup is known; the plan
+  # shows its targetInstance (as the chart renders it) and how sourceBackup.name is found, no object with a placeholder
+  if [[ "$kind" == backup && ( "$shape" == newcluster || "$shape" == othernamespace ) ]]; then
+    [[ -z "$y" ]] || why+=" a PostgresRestore in the plan before the synced backup is known;"
+    y="$(plan_block 'targetInstance of that PostgresRestore' | yq '{"kind": "PostgresRestore", "spec": {"targetInstance": .}}')"
+  fi
   [[ "$(yq '.kind' <<<"$y")" == PostgresRestore && "$(yq '.spec.targetInstance.name' <<<"$y")" == "${T[2]}" ]] || why+=" kind or targetInstance.name;"
-  [[ "$(yq '.spec.targetInstance | has("spec")' <<<"$y")" == "$([[ "$spec" == spec ]] && echo true || echo false)" ]] || why+=" targetInstance.spec only with a spec file;"
-  if [[ "$spec" == spec ]]; then [[ "$(yq '.spec.targetInstance.spec.storageSize' <<<"$y")" == 50Gi ]] || why+=" the spec file's storageSize;"; fi
-  if [[ "$kind" == backup ]]; then
-    want_sb=orders-full-1; case "$shape" in newcluster|othernamespace) want_sb='@synced:20200101-000000F@' ;; esac   # resolved after backupSync (restoreLabel of the source backup)
-    [[ "$(yq '.spec.sourceBackup.name' <<<"$y")" == "$want_sb" && "$(yq '.spec | has("pitr")' <<<"$y")" == false ]] || why+=" spec.sourceBackup.name ($want_sb) without pitr;"
+  # spec.targetInstance.spec: the spec file's; for a new target without one the render of its new entry; in place without one: none
+  [[ "$(yq '.spec.targetInstance | has("spec")' <<<"$y")" == "$([[ "$spec" == spec || "$shape" != inplace ]] && echo true || echo false)" ]] || why+=" targetInstance.spec (the file's, or the render of a new entry);"
+  if [[ "$spec" == spec ]]; then [[ "$(yq '.spec.targetInstance.spec.storageSize' <<<"$y")" == 50Gi ]] || why+=" the spec file's storageSize;"
+  elif [[ "$shape" != inplace ]]; then [[ "$(yq '.spec.targetInstance.spec.postgresVersion.name' <<<"$y")" == postgres-17.6 && "$(yq '.spec.targetInstance.spec.backupLocation.name' <<<"$y")" == "${T[2]}-backup-location" ]] || why+=" the render of the new entry (postgres-17.6, its own backup location);"; fi
+  if [[ "$kind" == backup && ( "$shape" == newcluster || "$shape" == othernamespace ) ]]; then
+    grep -q 'spec.sourceBackup.name is the name of that PostgresBackup (restoreLabel 20200101-000000F' "$TMP/rec/plan.restore.${RKP:-$RK}.detail" && ! grep -q '@synced' "$TMP/rec/plan.restore.${RKP:-$RK}.detail" \
+      || why+=" the plan does not say how sourceBackup.name is found;"
+  elif [[ "$kind" == backup ]]; then
+    [[ "$(yq '.spec.sourceBackup.name' <<<"$y")" == orders-full-1 && "$(yq '.spec | has("pitr")' <<<"$y")" == false ]] || why+=" spec.sourceBackup.name without pitr;"
   else
     p='.spec.pitr'
     [[ "$(yq "$p.type" <<<"$y")" == "$kind" && "$(yq '.spec | has("sourceBackup")' <<<"$y")" == false \
@@ -458,6 +493,14 @@ for shape in newcluster othernamespace samenamespace inplace; do
       else bad "$tag: dry run (got $(st)/$(reason), want SUCCEEDED/DRY_RUN)" "$(detail)
 $(tail -8 <<<"$OUT")"; fi
       nothing_changed "$tag" "$snap"
+      if [[ "$kind" == backup && ( "$shape" == newcluster || "$shape" == othernamespace ) ]]; then
+        # its PostgresRestore exists only in a real run (rendered once the synced backup is known): captured from one
+        set_flag sync.names "orders-full-1"; run "$PJ" P_DRY_RUN=false
+        f="$(find "$TMP/cl/${T[0]}/postgresrestore/${T[1]}" -name '*.json' 2>/dev/null | head -1)"
+        if [[ "$(st)" == SUCCEEDED && -n "$f" ]]; then jq 'del(.status)' "$f" | yq -P -p=json . > "$SHAPES/${shape}-${kind}-${spec}.restore.yaml"
+        else bad "$tag: a real run for the applied PostgresRestore (got $(st)/$(reason))" "$(detail)"; fi
+        reset
+      fi
     done
   done
 done
@@ -476,8 +519,9 @@ RKP=c1.orders-copy; Y="$(restore_yaml)"
 [[ "$(yq '.kind' <<<"$Y")" == PostgresRestore && "$(yq '.spec.sourceBackup.name' <<<"$Y")" == orders-full-1 && "$(yq '.spec | has("pitr")' <<<"$Y")" == false \
    && "$(yq '.spec.targetInstance.name' <<<"$Y")" == orders-copy ]] \
   && ok "the PostgresRestore: spec.sourceBackup.name = sourceBackupName, no pitr, targetInstance.name" || bad "restore yaml" "$Y"
-[[ "$(yq '.spec.targetInstance | has("spec")' <<<"$Y")" == false ]] && grep -q 'spec.targetInstance.spec: none, only the name: the operator creates the instance and fills in its spec (lab item' "$TMP/rec/plan.restore.c1.orders-copy.detail" \
-  && ok "a new target without a spec file: spec.targetInstance.spec is omitted (the operator creates the instance; the plan names the lab item)" || bad "no spec" "$Y $(cat "$TMP/rec/plan.restore.c1.orders-copy.detail")"
+[[ "$(yq '.spec.targetInstance.spec.postgresVersion.name' <<<"$Y")" == postgres-17.6 && "$(yq '.spec.targetInstance.spec.backupLocation.name' <<<"$Y")" == orders-copy-backup-location ]] \
+  && grep -q 'spec.targetInstance.spec: the render of the new entry of clusters/fleet.yaml (postgres-17.6' "$TMP/rec/plan.restore.c1.orders-copy.detail" \
+  && ok "a new target without a spec file: spec.targetInstance.spec is the render of its new entry (the operator would fill in its newest version and refuse the backup)" || bad "no spec" "$Y $(cat "$TMP/rec/plan.restore.c1.orders-copy.detail")"
 grep -q 'restore-src' <<<"$(cat "$TMP/rec/plan.restore.c1.orders-copy.detail")" && bad "a same-namespace restore needs no location copy" "$(cat "$TMP/rec/plan.restore.c1.orders-copy.detail")" || ok "a same-namespace restore plans no location copy"
 grep -q 'entry would be added' "$TMP/rec/plan.restore.c1.orders-copy.detail" && grep -q 'shared Secrets of pg-orders: owned by orders-db' "$TMP/rec/plan.restore.c1.orders-copy.detail" \
   && ok "the plan says the entry would be added and who owns the shared Secrets (orders-db, the namespace's owner)" || bad "plan text" "$(cat "$TMP/rec/plan.restore.c1.orders-copy.detail")"
@@ -499,8 +543,9 @@ RKP=c2.orders-dr; C="$(plan_block 'PostgresBackupLocation .* on ')"
   && ok "the location copy: source name and metadata dropped, backupSync on, retention 9999999, same container, repoPath, Secret, enableSSL and caBundle" || bad "copy yaml" "$C"
 [[ "$(yq '.metadata.labels["tpg.fleet/restore-source"]' <<<"$C")" == "c1.orders-db" && "$(yq '.metadata | has("namespace")' <<<"$C")" == false && "$(yq '.spec.storage.azure | has("forcePathStyle")' <<<"$C")" == false ]] \
   && ok "the copy is labelled tpg.fleet/restore-source, carries no namespace (the apply sets it) and no zero default (forcePathStyle)" || bad "copy labels" "$C"
-Y="$(restore_yaml)"
-[[ "$(yq '.spec.targetInstance | keys | join(",")' <<<"$Y")" == name ]] && ok "onto another cluster without a spec file: targetInstance carries the name only (the chart render is not sent)" || bad "targetInstance keys" "$Y"
+Y="$(tgt_yaml)"
+[[ -z "$(restore_yaml)" && "$(yq '.spec.targetInstance | keys | join(",")' <<<"$Y")" == name,spec && "$(yq '.spec.targetInstance.spec.postgresVersion.name' <<<"$Y")" == postgres-17.6 ]] \
+  && ok "onto another cluster without a spec file: no PostgresRestore before the sync; its targetInstance carries the name and the render of the new entry" || bad "targetInstance keys" "$(restore_yaml) / $Y"
 
 echo "== 1b. every PITR type renders into spec.pitr"
 reset
@@ -534,10 +579,13 @@ RKP=c1.orders-copy; Y="$(restore_yaml)"
 echo "== 1c. skipMinorVersionCheck, TARGET_EXISTS, in place and confirm"
 reset
 RK=c2.orders-dr; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\nskipMinorVersionCheck: true'; run "$PJ"
-Y="$(RKP=c2.orders-dr restore_yaml)"
-[[ "$(yq '.metadata.annotations["sql.tanzu.vmware.com/skip-minor-version-check"]' <<<"$Y")" == true ]] && ok "skipMinorVersionCheck: the annotation sql.tanzu.vmware.com/skip-minor-version-check: \"true\" on the PostgresRestore" || bad "annotation" "$Y"
-mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ"
-Y="$(RKP=c2.orders-dr restore_yaml)"
+grep -q ', the annotation sql.tanzu.vmware.com/skip-minor-version-check;' "$TMP/rec/plan.restore.c2.orders-dr.detail" && ok "skipMinorVersionCheck: the plan names the annotation of the PostgresRestore" || bad "annotation plan" "$(cat "$TMP/rec/plan.restore.c2.orders-dr.detail")"
+set_flag sync.names "orders-full-1"; run "$PJ" P_DRY_RUN=false
+Y="$(yq -P . "$(find "$TMP/cl/c2/postgresrestore/pg-dr" -name '*.json' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)")"
+[[ "$(yq '.metadata.annotations["sql.tanzu.vmware.com/skip-minor-version-check"]' <<<"$Y")" == true ]] && ok "skipMinorVersionCheck: the annotation sql.tanzu.vmware.com/skip-minor-version-check: \"true\" on the applied PostgresRestore" || bad "annotation" "$Y"
+reset; RK=c2.orders-dr
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; set_flag sync.names "orders-full-1"; run "$PJ" P_DRY_RUN=false
+Y="$(yq -P . "$(find "$TMP/cl/c2/postgresrestore/pg-dr" -name '*.json' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)")"
 [[ "$(yq '.metadata | has("annotations")' <<<"$Y")" == false && "$(yq '.metadata.labels["tpg.fleet/workflow"]' <<<"$Y")" == tpg-restore-x ]] && ok "without the flag no annotation; the workflow label is there" || bad "no annotation" "$Y"
 reset
 # a live Postgres of the target name that is not the source and not in place: TARGET_EXISTS at plan time, also in a dry run
@@ -769,7 +817,7 @@ expect "a local spec file that is not in patchFiles: SPEC_FILE_NOT_RECEIVED" FAI
 B64="$(base64 -w0 "$RSD/orders-dr.yaml")"
 run "$PJ" P_PATCH_FILES="{\"./local.yaml\": \"$B64\"}"
 expect "a local spec file in patchFiles is used" SUCCEEDED DRY_RUN
-Y="$(RKP=c2.orders-dr restore_yaml)"
+Y="$(RKP=c2.orders-dr tgt_yaml)"
 [[ "$(yq '.spec.targetInstance.spec.storageSize' <<<"$Y")" == 50Gi && "$(yq '.spec.targetInstance.spec | has("highAvailability")' <<<"$Y")" == false \
    && "$(yq '.spec.targetInstance.spec.postgresVersion.name' <<<"$Y")" == postgres-17.6 ]] \
   && ok "the spec file is the instance spec: storageSize 50Gi, highAvailability enabled:false is a zero default and is left out (pruned like a Postgres)" || bad "spec file" "$Y"
@@ -782,7 +830,7 @@ targetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-s
 done
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-extra.yaml]'; run "$PJ"
 expect "a spec file field the entry does not render: the pair goes on, no SPEC_FILE_NOT_IN_ENTRY any more" SUCCEEDED DRY_RUN
-Y="$(RKP=c2.orders-dr restore_yaml)"
+Y="$(RKP=c2.orders-dr tgt_yaml)"
 [[ ! -e "$TMP/rec/warning.c2.orders-dr.SPEC_FILE_NOT_IN_ENTRY.status" && "$(yq '.spec.targetInstance.spec.pgConfig.dbname' <<<"$Y")" == orders ]] \
   && ok "…the field is in spec.targetInstance.spec as the file has it" || bad "extra field" "$Y"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr $'pitrEnabled: false\ntargetInstanceSpecFilePath: [repo:helm_artifacts/instance/tpg-instance/restore-specs/orders-loc.yaml]'; run "$PJ"
@@ -1018,6 +1066,92 @@ sed -i 's/orders-full-1/orders-nolabel/' "$TMP/cl/c1/postgresbackup/pg-orders/or
 mk c1/pg-orders/orders-db "sourceBackupName: orders-nolabel" c2/pg-dr/orders-dr "$BACKUP_T"
 run "$PJ"
 expect "a source backup without restoreLabel: BACKUP_LABEL_UNKNOWN in the plan, also in a dry run" FAILED BACKUP_LABEL_UNKNOWN "orders-nolabel" "restoreLabel"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"
+# The PostgresRestore of a named backup into another namespace or cluster is rendered once the synced backup is known (no
+# placeholder in any object); a new target without a spec file gets the render of its new entry as targetInstance.spec (without
+# one the operator fills in its newest version, postgres-18.x, and refuses the backup of another major version, as in the lab);
+# a server-side dry run checks the object before it is created
+echo "-- the PostgresRestore: rendered with the synced name, the new entry's spec, a server dry run first"
+reset
+run "$PJ"
+D="$(cat "$TMP/rec/plan.restore.c2.orders-dr.detail" 2>/dev/null || true)"
+! grep -q '@synced' <<<"$D$(cat "$TMP/records")" && grep -q 'rendered after the copy exists' <<<"$D" && grep -q 'restoreLabel 20200101-000000F' <<<"$D" \
+  && ok "the plan renders no PostgresRestore with a placeholder: it says how sourceBackup.name is found after the copy exists" || bad "plan placeholder" "$D"
+grep -q 'targetInstance.spec: the render of the new entry' <<<"$D" && ok "the plan says the new target's spec is the render of its new entry" || bad "plan target spec" "$D"
+reset
+set_flag sync.names "orders-full-1"
+run "$PJ" P_DRY_RUN=false
+expect "a named backup into another cluster without a spec file: SUCCEEDED (the operator accepts it)" SUCCEEDED ""
+R="$(cat "$TMP/cl/c2/postgresrestore/pg-dr/"*.json 2>/dev/null || true)"
+[[ "$(jq -r '.spec.sourceBackup.name' <<<"$R")" == sync-20200101-000000f-e8854c1b && "$(jq -r '.spec.targetInstance.spec.postgresVersion.name' <<<"$R")" == postgres-17.6 \
+   && "$(jq -r '.spec.targetInstance.spec.backupLocation.name' <<<"$R")" == orders-dr-backup-location ]] \
+  && ok "the applied PostgresRestore names the synced backup and carries the render of the new entry (postgres-17.6, its own backup location)" || bad "applied restore" "$R"
+order2="$(grep -E '^(dryrun|apply) c2 postgresrestore' "$TMP/events" | cut -d' ' -f1 | paste -sd' ' - || true)"
+[[ "$order2" == "dryrun apply" ]] && ok "a server-side dry run of the PostgresRestore comes before its creation" || bad "dry run order" "$order2"
+grep -q 'PostgresRestore pg-dr/orders-dr-restore-[0-9]* on c2 as applied:' "$TMP/rec/plan.restore.c2.orders-dr.detail" \
+  && grep -q 'name: sync-20200101-000000f-e8854c1b' "$TMP/rec/plan.restore.c2.orders-dr.detail" \
+  && ok "the run record and the log show the PostgresRestore as it was applied" || bad "applied object not recorded" "$(tail -20 "$TMP/rec/plan.restore.c2.orders-dr.detail")"
+
+echo "-- a refused restore rolls the new target back"
+entry_of() { yq -o=json -I=0 ".clusters.c2.instances[\"$1\"] // \"none\"" "$TMP/fleet.repo/clusters/fleet.yaml"; }
+reset
+set_flag sync.names "orders-full-1"; set_flag webhook.reject
+run "$PJ" P_DRY_RUN=false
+expect "the operator refuses the PostgresRestore in the server dry run: RESTORE_REJECTED with its message, rolled back" FAILED RESTORE_REJECTED "stub refusal" "rolled back"
+[[ "$(entry_of orders-dr)" == '"none"' ]] && grep -q '^push mode=direct restore: roll back c2/orders-dr' "$TMP/events" \
+  && ok "…the entry this run added is removed again (a push of its own)" || bad "entry not rolled back" "$(entry_of orders-dr) $(grep '^push' "$TMP/events")"
+! ev_has 'apply c2 postgresrestore' && ev_has 'app removed tpg-c2-orders-dr' \
+  && [[ ! -e "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-orders-orders-db.json" && ! -e "$TMP/cl/c2/namespace/_/pg-dr.json" ]] \
+  && ok "…no PostgresRestore was created; the Application is gone, the location copy this run made and the namespace it created are removed" \
+  || bad "rollback incomplete" "$(cat "$TMP/events") $(find "$TMP/cl/c2" -type f | head -30)"
+[[ ! -e "$TMP/rec/warning.c2.orders-dr.ROLLBACK_INCOMPLETE.status" ]] && ok "…and nothing is left over (no ROLLBACK_INCOMPLETE)" || bad "unexpected ROLLBACK_INCOMPLETE" "$(cat "$TMP/rec/warning.c2.orders-dr.ROLLBACK_INCOMPLETE.detail")"
+reset
+set_flag sync.names "orders-full-1"; set_flag webhook.reject
+mkdir -p "$TMP/cl/c2/postgresbackuplocation/pg-dr" "$TMP/cl/c2/namespace/_" "$TMP/cl/c2/postgresbackup/pg-dr"
+printf '%s' '{"kind":"PostgresBackupLocation","metadata":{"name":"earlier-copy","namespace":"pg-dr"},"spec":{"storage":{"azure":{"container":"pg-backups-c1","repoPath":"/pg-orders"}},"backupSync":{"enabled":true}}}' > "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json"
+printf '%s' '{"kind":"PostgresBackup","metadata":{"name":"sync-20200101-000000f-e8854c1b","namespace":"pg-dr"},"spec":{"sourceInstance":{"name":"orders-db"},"type":"full"},"status":{"phase":"Succeeded","restoreLabel":"20200101-000000F","stanzaName":"pg-orders-orders-db-0000","backupLocation":"earlier-copy"}}' > "$TMP/cl/c2/postgresbackup/pg-dr/sync-20200101-000000f-e8854c1b.json"
+printf '%s' '{"kind":"Namespace","metadata":{"name":"pg-dr"}}' > "$TMP/cl/c2/namespace/_/pg-dr.json"
+run "$PJ" P_DRY_RUN=false
+expect "a refused restore with a reused location in a namespace that existed: RESTORE_REJECTED, rolled back" FAILED RESTORE_REJECTED "rolled back"
+[[ -e "$TMP/cl/c2/postgresbackuplocation/pg-dr/earlier-copy.json" && -e "$TMP/cl/c2/namespace/_/pg-dr.json" && "$(entry_of orders-dr)" == '"none"' ]] \
+  && ok "…the reused location and the namespace that existed before the run are kept, the entry is removed" || bad "kept too little or too much" "$(find "$TMP/cl/c2" -type f | head -30) $(entry_of orders-dr)"
+reset
+set_flag sync.names "orders-full-1"; set_flag webhook.reject
+mkdir -p "$TMP/cl/c2/postgres/pg-dr"
+printf '%s' '{"kind":"Postgres","metadata":{"name":"neighbour-db","namespace":"pg-dr"},"spec":{"postgresVersion":{"name":"postgres-17.6"}},"status":{"currentState":"Running"}}' > "$TMP/cl/c2/postgres/pg-dr/neighbour-db.json"
+run "$PJ" P_DRY_RUN=false
+expect "a refused restore in a namespace another Postgres uses: RESTORE_REJECTED, rolled back" FAILED RESTORE_REJECTED "rolled back" "namespace pg-dr kept"
+[[ -e "$TMP/cl/c2/postgres/pg-dr/neighbour-db.json" ]] && ! ev_has '^delete c2 namespace' && ok "…the namespace is not deleted while another Postgres uses it" || bad "shared namespace deleted" "$(cat "$TMP/events")"
+reset
+set_flag sync.names "orders-full-1"; set_flag webhook.reject
+yq -i '.clusters.c2.instances.orders-dr = {"instance": {"namespace": "pg-dr", "postgresVersion": "postgres-17.6", "storageSize": "99Gi"}}' "$TMP/fleet.repo/clusters/fleet.yaml"
+declared="$(entry_of orders-dr)"
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"
+run "$PJ" P_DRY_RUN=false
+expect "a refused restore into a declared-but-undeployed target: RESTORE_REJECTED, rolled back" FAILED RESTORE_REJECTED "rolled back"
+[[ "$(entry_of orders-dr)" == "$declared" ]] && ! ev_has 'app removed' && ok "…the declared entry it replaced is put back as it was (its Application stays)" || bad "declared entry not restored" "$(entry_of orders-dr) vs ${declared}"
+reset
+set_flag sync.names "orders-full-1"; set_flag webhook.reject
+run "$PJ" P_DRY_RUN=false P_PUSH_MODE=pr
+expect "pushMode=pr: RESTORE_REJECTED, rolled back" FAILED RESTORE_REJECTED "rolled back"
+grep -q '^push mode=pr restore: roll back c2/orders-dr' "$TMP/events" && ok "…the entry is removed with pushMode pr, like it was added" || bad "pr rollback" "$(grep '^push' "$TMP/events")"
+reset
+set_flag sync.names "orders-full-1"; set_flag webhook.reject; set_flag app.stuck
+run "$PJ" P_DRY_RUN=false
+expect "the Application does not go away: RESTORE_REJECTED stays the result" FAILED RESTORE_REJECTED "stub refusal"
+grep -q 'tpg-c2-orders-dr' "$TMP/rec/warning.c2.orders-dr.ROLLBACK_INCOMPLETE.detail" 2>/dev/null && [[ -e "$TMP/cl/c2/namespace/_/pg-dr.json" ]] \
+  && ok "…ROLLBACK_INCOMPLETE names the Application left over, and the namespace is kept while it exists" || bad "incomplete rollback not reported" "$(ls "$TMP/rec") $(cat "$TMP/rec/warning.c2.orders-dr.ROLLBACK_INCOMPLETE.detail" 2>/dev/null)"
+reset
+set_flag sync.names "orders-full-1"; set_flag apply.fail.postgresrestore
+run "$PJ" P_DRY_RUN=false
+expect "the dry run passes but the create is refused: CREATE_FAILED with the error, rolled back" FAILED CREATE_FAILED "is invalid" "rolled back"
+[[ "$(entry_of orders-dr)" == '"none"' ]] && ok "…the entry is removed again" || bad "create failure not rolled back" "$(entry_of orders-dr)"
+reset
+set_flag sync.names "orders-full-1"; set_flag restore.phase Failed
+run "$PJ" P_DRY_RUN=false
+expect "a restore that ran and failed: RESTORE_FAILED, not rolled back" FAILED RESTORE_FAILED
+[[ "$(entry_of orders-dr)" != '"none"' && -e "$TMP/cl/c2/postgresbackuplocation/pg-dr/restore-src-c1-pg-orders-orders-db.json" ]] && ! ev_has 'app removed' \
+  && ok "…the entry, the Application and the copy stay for the diagnosis" || bad "rolled back a failed restore" "$(entry_of orders-dr) $(cat "$TMP/events")"
 mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"
 
 echo "-- the restore phase"
@@ -1313,7 +1447,7 @@ run "$PJ"
 expect "a backup running on the in-place target is a warning in a dry run" SUCCEEDED DRY_RUN
 [[ -e "$TMP/rec/warning.c1.orders-db.OPERATION_IN_PROGRESS.status" ]] && ok "OPERATION_IN_PROGRESS warning" || bad "busy warning"
 if command -v kubeconform >/dev/null; then
-  reset; RK=c2.orders-dr; mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ"
+  reset; RK=c2.orders-dr; mk c1/pg-orders/orders-db '' c2/pg-dr/orders-dr "$LATEST"; run "$PJ"
   RKP=c2.orders-dr
   { restore_yaml; echo ---; plan_block 'PostgresBackupLocation .* on '; } > "$TMP/rendered.yaml"
   SCHEMAS="$ROOT/helm_artifacts/instance/crd-reference/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
@@ -1398,7 +1532,8 @@ printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  logLevel: 
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  sharedMemorySize: 1Gi\n' > "$TMP/fleet.repo/helm_artifacts/instance/tpg-instance/patches/src-patch.yaml"
 printf 'apiVersion: sql.tanzu.vmware.com/v1\nkind: Postgres\nspec:\n  sharedMemorySize: 2Gi\n' > "$TMP/fleet.repo/helm_artifacts/instance/tpg-instance/overlays/src-overlay.yaml"
 cp "$TMP/fleet.repo/clusters/fleet.yaml" "$TMP/source-fleet.yaml"
-mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ" P_DRY_RUN=false
+# the operator adds fields of its own to the spec it was given (the live spec is more than the render that was sent)
+mk c1/pg-orders/orders-db "$ORDERS_BACKUP" c2/pg-dr/orders-dr "$BACKUP_T"; run "$PJ" P_DRY_RUN=false SNAP_EXTRA='{"storageClassName": "operator-default", "logLevel": "Debug"}'
 expect "a source that has a restore-patch and Postgres patch files: SUCCEEDED" SUCCEEDED ""
 E="$(yq '.clusters.c2.instances.orders-dr' "$TMP/fleet.repo/clusters/fleet.yaml")"
 RPF="$(rp_files | grep -v sssss)"
@@ -1408,9 +1543,10 @@ RPF="$(rp_files | grep -v sssss)"
 [[ "$(yq '.patches | has("postgres")' <<<"$E")" == false && "$(yq '.overlays | has("postgres")' <<<"$E")" == false ]] \
   && [[ "$(yq '.clusters.c1.instances.orders-db.restorePatch.current' "$TMP/fleet.repo/clusters/fleet.yaml")" == "restore-patch/orders-db-restore-sssss.yaml" ]] \
   && ok "the Postgres patch and overlay files of the source are not copied (they changed the source's Postgres), the source's entry is untouched" || bad "copied patches" "$E"
-[[ "$(yq '.instance.storageClassName' <<<"$E")" == operator-default && "$(yq '.instance.storageSize' <<<"$E")" == 20Gi && "$(yq '.instance.postgresVersion' <<<"$E")" == postgres-17.6 \
-   && "$(yq -o=json -I=0 '.instance.highAvailability' <<<"$E")" == '{"enabled":true,"readReplicas":1}' && "$(yq '.instance | has("walStorageSize")' <<<"$E")" == false && "$(yq '.instance | has("resources")' <<<"$E")" == false ]] \
-  && ok "the entry is seeded from the live spec (storageClassName, storageSize, HA); the source's walStorageSize and resources, which the live spec lacks, are removed" || bad "snapshot seeding" "$E"
+LIVEJ="$(jq -c '.spec' "$TMP/cl/c2/postgres/pg-dr/orders-dr.json")"
+[[ "$(yq '.instance.storageClassName' <<<"$E")" == operator-default && "$(yq '.instance.storageSize' <<<"$E")" == "$(jq -r '.storageSize' <<<"$LIVEJ")" && "$(yq '.instance.postgresVersion' <<<"$E")" == postgres-17.6 \
+   && "$(yq -o=json -I=0 '.instance.highAvailability' <<<"$E")" == "$(jq -c '.highAvailability' <<<"$LIVEJ")" ]] \
+  && ok "the entry is seeded from the live spec: the field the operator added (storageClassName operator-default), and storageSize, version and HA as the instance runs" || bad "snapshot seeding" "$E"
 SNAPF="$RPDR/$RPF"
 LIVE="$(jq -c '.spec | del(.certificateSecretName)' "$TMP/cl/c2/postgres/pg-dr/orders-dr.json")"
 [[ "$(yq '. | keys | join(",")' "$SNAPF")" == "apiVersion,kind,spec" && "$(yq -o=json -I=0 '.spec' "$SNAPF" | jq -S -c .)" == "$(jq -S -c . <<<"$LIVE")" ]] \
@@ -1418,11 +1554,11 @@ LIVE="$(jq -c '.spec | del(.certificateSecretName)' "$TMP/cl/c2/postgres/pg-dr/o
 [[ "$(grep -c '^push' "$TMP/events")" -eq 2 ]] && ev_has 'push mode=direct restore: record the restore-patch of c2/orders-dr' \
   && ok "two commits: the entry before the restore, the restore-patch after it (the Application is adopted only after the second)" || bad "snapshot pushes" "$(cat "$TMP/events")"
 RS="$(rendered_spec c2 orders-dr)"
-[[ "$(jq -S -c . <<<"$RS")" == "$(jq -S -c . <<<"$LIVE")" && "$(jq -r '.backupLocation.name' <<<"$RS")" == restore-src-location ]] \
-  && ok "the chart renders the live spec as it is (storageClassName operator-default, HA 1, logLevel Debug, nothing of the source's patches): the backupLocation and imagePullSecret the live spec sets win over the fleet's" || bad "snapshot render" "$RS
+[[ "$(jq -S -c . <<<"$RS")" == "$(jq -S -c . <<<"$LIVE")" && "$(jq -r '.backupLocation.name' <<<"$RS")" == orders-dr-backup-location ]] \
+  && ok "the chart renders the live spec as it is (storageClassName operator-default and logLevel Debug the operator added, nothing of the source's patches), its own backup location" || bad "snapshot render" "$RS
 $LIVE"
-[[ "$(jq 'has("spec")' <<<"$(jq -c '.spec.targetInstance' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json)")" == false ]] && ok "…and the PostgresRestore carries spec.targetInstance.name only" || bad "restore without spec"
-grep -q 'lab item' <<<"$(detail)" && ok "…the result records that how the operator fills the spec is a lab item" || bad "lab note" "$(detail)"
+[[ "$(jq -r '.spec.targetInstance.spec.postgresVersion.name' "$TMP/cl/c2/postgresrestore/pg-dr/"*.json)" == postgres-17.6 ]] && ok "…and the PostgresRestore carries the render of the new entry as spec.targetInstance.spec" || bad "restore without spec"
+grep -q 'was created from the render of its new entry' <<<"$(detail)" && ok "…the result says the instance was created from the render of its new entry" || bad "lab note" "$(detail)"
 echo "-- …the live spec cannot be read, or is no Postgres spec: the pair stays SUCCEEDED, the Application is not synced"
 reset
 RK=c2.orders-dr; set_flag sync.names "orders-full-1"; set_flag snap.gone
@@ -1801,7 +1937,7 @@ if [[ -z "$TABLE" ]]; then bad "section 16 of the docs has no 'Reasons the resto
   # every code the script passes to fail, block or warn (the placeholders REASON and CODE are the helpers' own parameters)
   while read -r code; do
     printf '%s\n' "$TABLE" | grep -q "\`${code}\`" || missing="${missing} ${code}"
-  done < <(grep -oE '\b(fail|block|warn) [A-Z][A-Z_]{3,}' "$ROOT/workflows/scripts/restore-pair.sh" | awk '{print $2}' | sort -u | grep -vxE 'REASON|CODE')
+  done < <(grep -oE '\b(fail|block|warn|refuse) [A-Z][A-Z_]{3,}' "$ROOT/workflows/scripts/restore-pair.sh" | awk '{print $2}' | sort -u | grep -vxE 'REASON|CODE')
   # the codes record() writes directly
   for code in INVALID_PAIR SKIPPED_IN_PROGRESS TIMEOUT DRY_RUN UNEXPECTED_ERROR; do
     printf '%s\n' "$TABLE" | grep -q "\`${code}\`" || [[ "$code" == DRY_RUN ]] || missing="${missing} ${code}"

@@ -281,7 +281,7 @@ if [[ "$METHOD" == backup ]]; then
     SB_LABEL="$(jq -r '.status.restoreLabel // ""' <<<"$SB")"; SB_STANZA="$(jq -r '.status.stanzaName // ""' <<<"$SB")"
     [[ -n "$SB_LABEL" ]] || fail BACKUP_LABEL_UNKNOWN "PostgresBackup ${SNS}/${SBK} on ${SC} reports no status.restoreLabel (the pgBackRest label): backupSync names the synced backup in ${TNS} after that label, so it could not be found there; check that the backup completed and the operator version"
   fi
-  plan "named backup ${SNS}/${SBK} on ${SC}: Succeeded$( [[ "$SAME_NS" == true ]] && echo " (same namespace: no wait, no copy)" || echo " (source check passed; the target namespace gets a copy of the source backup location and the same-named backup is waited for)" )"
+  plan "named backup ${SNS}/${SBK} on ${SC}: Succeeded$( [[ "$SAME_NS" == true ]] && echo " (same namespace: no wait, no copy)" || echo " (source check passed; the target namespace gets a copy of the source backup location, and the backup backupSync makes of it there, found by its label, is waited for)" )"
 fi
 
 # ---- 3. point-in-time recovery: the backup location (as seen from the source namespace) and the stanza
@@ -491,6 +491,9 @@ prepare_entry() {
   [[ -z "$SPEC_JSON" ]] || stage_restore_patch "$SPEC_JSON" base || return 1
 }
 OWNER_NOTE=""
+# the entry a new target replaces (declared, not deployed): put back by a rollback (RESTORE_REJECTED, CREATE_FAILED)
+ORIG_ENTRY=""
+[[ "$TGT_FLEET" != true ]] || ORIG_ENTRY="$(TC_="$TC" TI_="$TI" yq -o=json -I=0 '.clusters[strenv(TC_)].instances[strenv(TI_)]' "$REPO/$FLEET_REL")"
 if [[ "$ENTRY_NEW" == true ]]; then
   if [[ "$SRC_FLEET" != true && -z "$SPEC" ]]; then
     fail SPEC_FILE_REQUIRED "${SC}/${SI} is not declared in ${FLEET_REL} (nothing to copy for the new instance ${TC}/${TI}): give targetInstanceSpecFilePath, one kind: Postgres document with at least spec.postgresVersion.name"
@@ -523,7 +526,7 @@ if [[ "$TGT_EXISTS" == false ]]; then
     T_PGV="$(jq -r '.postgresVersion.name // ""' <<<"$base_spec")"
     T_BLN="$(jq -r '.backupLocation.name // ""' <<<"$base_spec")"
   fi
-  plan "target: new instance ${TC}/${TNS}/${TI}, version ${T_PGV:-unknown}; spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is" || echo "none, only the name: the operator creates the instance and fills in its spec (lab item: how it fills it)" ); ${FLEET_REL}: $( [[ "$ENTRY_NEW" == true ]] && echo "the entry would be $( [[ "$TGT_FLEET" == true ]] && echo "replaced (it is declared but not deployed)" || echo added )$( [[ "$SRC_FLEET" == true ]] && echo " (a copy of the entry of ${SC}/${SI})" || echo " (from the spec file)" ) (pushMode ${PUSH_MODE})" || echo "the entry already exists" ); shared Secrets of ${TNS}: $( [[ "$T_OWNER" == true ]] && echo "owned by ${TI}" || echo "owned by ${OWNER_NOTE:-another instance}" )"
+  plan "target: new instance ${TC}/${TNS}/${TI}, version ${T_PGV:-unknown}; spec.targetInstance.spec: $( [[ -n "$SPEC" ]] && echo "the spec file ${SPEC}, as it is" || echo "the render of the new entry of ${FLEET_REL} (${T_PGV:-unknown}, storageSize $(jq -r '.storageSize // "the chart default"' <<<"$base_spec")): what Argo CD renders for it later; without a spec the operator would fill in its own defaults, its newest PostgresVersion included, and refuse a backup of another major version" ); ${FLEET_REL}: $( [[ "$ENTRY_NEW" == true ]] && echo "the entry would be $( [[ "$TGT_FLEET" == true ]] && echo "replaced (it is declared but not deployed)" || echo added )$( [[ "$SRC_FLEET" == true ]] && echo " (a copy of the entry of ${SC}/${SI})" || echo " (from the spec file)" ) (pushMode ${PUSH_MODE})" || echo "the entry already exists" ); shared Secrets of ${TNS}: $( [[ "$T_OWNER" == true ]] && echo "owned by ${TI}" || echo "owned by ${OWNER_NOTE:-another instance}" )"
 fi
 RP_WHAT="the spec file"; [[ -n "$SPEC_JSON" ]] || RP_WHAT="the spec of the restored Postgres, read from ${TC} once it runs"
 RP_PLAN="mode ${RP_FORM}, restorePatch.current of ${TC}/${TI}, instance.restored: true and the fleet-equivalent fields of the spec written into the entry; the chart renders the Postgres from it (its fields; its own backupLocation and imagePullSecret win and the fleet's fill in where it omits them (${TI}-backup-location, regsecret); then the later changes of the entry and the tpg-patch patch file)"
@@ -660,27 +663,36 @@ render_obj() {  # render_obj KIND VALUES_JSON: RENDERED = the object as YAML (CH
   RENDERED="$(K="$1" yq 'select(.kind == strenv(K))' <<<"$out" | sed '/^---$/d;/^# Source:/d')"
 }
 RNAME="${TI}-restore-$(date -u +%Y%m%d%H%M%S)"
-# spec.targetInstance.spec is the spec file's spec as it is, or absent (the name only): the operator creates a new instance and
-# fills in its spec (lab item), an existing one keeps its spec
-tinst="$(jq -cn --arg n "$TI" --argjson spec "${SPEC_JSON:-null}" '{name: $n} + (if $spec != null then {spec: $spec} else {} end)')"
-if [[ "$METHOD" == backup ]]; then
-  # into another namespace or cluster the synced backup has another name, known after backupSync: a placeholder in the plan
-  RESTORE_SB="$SBK"; [[ "$SAME_NS" == true ]] || RESTORE_SB="@synced:${SB_LABEL}@"
-  rspec="$(jq -cn --arg b "$RESTORE_SB" --argjson t "$tinst" '{sourceBackup: {name: $b}, targetInstance: $t}')"
-else
-  rspec="$(jq -cn --arg type "$METHOD" --arg ts "$PITR_TS" --arg tg "$PITR_TARGET" --argjson best "$PITR_BEST" --arg bl "$RESTORE_BL" \
-    --arg st "$SRC_STANZA" --arg lab "$PITR_LABEL" --argjson t "$tinst" '
-    {pitr: ({type: $type}
-        + (if $ts != "" then {timestamp: $ts} else {} end)
-        + (if $tg != "" then {target: $tg} else {} end)
-        + (if $best then {bestEffort: true} else {} end)
-        + {sourceBackupLocation: ({name: $bl, stanzaName: $st} + (if $lab != "" then {set: $lab} else {} end))}),
-     targetInstance: $t}')"
-fi
-render_obj PostgresRestore "$(jq -cn --arg name "$RNAME" --arg wf "$WF" --argjson skip "$SKIPMINOR" --argjson spec "$rspec" \
-  '{postgresRestore: {enabled: true, name: $name, labels: {"tpg.fleet/workflow": $wf},
-    annotations: (if $skip then {"sql.tanzu.vmware.com/skip-minor-version-check": "true"} else {} end), spec: $spec}}')"
-RESTORE_YAML="$RENDERED"
+# spec.targetInstance.spec: the spec file's spec as it is; for a new target without one, the Postgres spec the chart renders from its new
+# entry (the operator would otherwise fill in its own defaults, its newest PostgresVersion included, and refuse a backup of another major
+# version: seen in the lab); an existing target (in place) keeps its spec
+TSPEC_JSON="$SPEC_JSON"
+[[ -n "$TSPEC_JSON" || "$TGT_EXISTS" == true ]] || TSPEC_JSON="$base_spec"
+render_restore() {  # render_restore SOURCE_BACKUP_NAME: RESTORE_YAML, the PostgresRestore as it is applied
+  local tinst rspec
+  tinst="$(jq -cn --arg n "$TI" --argjson spec "${TSPEC_JSON:-null}" '{name: $n} + (if $spec != null then {spec: $spec} else {} end)')"
+  if [[ "$METHOD" == backup ]]; then
+    rspec="$(jq -cn --arg b "$1" --argjson t "$tinst" '{sourceBackup: {name: $b}, targetInstance: $t}')"
+  else
+    rspec="$(jq -cn --arg type "$METHOD" --arg ts "$PITR_TS" --arg tg "$PITR_TARGET" --argjson best "$PITR_BEST" --arg bl "$RESTORE_BL" \
+      --arg st "$SRC_STANZA" --arg lab "$PITR_LABEL" --argjson t "$tinst" '
+      {pitr: ({type: $type}
+          + (if $ts != "" then {timestamp: $ts} else {} end)
+          + (if $tg != "" then {target: $tg} else {} end)
+          + (if $best then {bestEffort: true} else {} end)
+          + {sourceBackupLocation: ({name: $bl, stanzaName: $st} + (if $lab != "" then {set: $lab} else {} end))}),
+       targetInstance: $t}')"
+  fi
+  render_obj PostgresRestore "$(jq -cn --arg name "$RNAME" --arg wf "$WF" --argjson skip "$SKIPMINOR" --argjson spec "$rspec" \
+    '{postgresRestore: {enabled: true, name: $name, labels: {"tpg.fleet/workflow": $wf},
+      annotations: (if $skip then {"sql.tanzu.vmware.com/skip-minor-version-check": "true"} else {} end), spec: $spec}}')"
+  RESTORE_YAML="$RENDERED"
+}
+# a named backup into another namespace or cluster is restored from the backup backupSync makes of it there, whose name is known only
+# after the copy exists: that PostgresRestore is rendered then (no object holds a placeholder)
+SYNC_LATER=false; [[ "$METHOD" != backup || "$SAME_NS" == true ]] || SYNC_LATER=true
+RESTORE_YAML=""
+[[ "$SYNC_LATER" == true ]] || render_restore "$SBK"
 COPY_YAML=""
 if [[ "$SAME_NS" != true && "$COPY_CREATE" == true ]]; then
   render_obj PostgresBackupLocation "$(jq -cn --arg name "$COPY_NAME" --arg wf "$WF" --arg src "$src_label" --argjson spec "$COPY_SPEC" \
@@ -688,8 +700,17 @@ if [[ "$SAME_NS" != true && "$COPY_CREATE" == true ]]; then
       annotations: {"tpg.fleet/created-by": $wf}, spec: $spec}}')"
   COPY_YAML="$RENDERED"
 fi
-plan "PostgresRestore ${TNS}/${RNAME} on ${TC}:"
-plan "    ${RESTORE_YAML//$'\n'/$'\n'    }"
+if [[ "$SYNC_LATER" == true ]]; then
+  plan "PostgresRestore ${TNS}/${RNAME} on ${TC}: rendered after the copy exists, when backupSync has made the PostgresBackup of ${SBK} in ${TNS}: spec.sourceBackup.name is the name of that PostgresBackup (restoreLabel ${SB_LABEL}, named sync-<label>-<hash>), spec.targetInstance.name ${TI}, spec.targetInstance.spec $( [[ -n "$SPEC_JSON" ]] && echo "the spec file's" || echo "the render of the new entry" )$( [[ "$SKIPMINOR" == true ]] && echo ", the annotation sql.tanzu.vmware.com/skip-minor-version-check" ); a server-side dry run checks it before it is created"
+  # what of it is known now, as the chart renders it: spec.targetInstance (the rendered object itself is not shown or kept)
+  render_restore ""
+  plan "targetInstance of that PostgresRestore (spec.targetInstance, as it is sent):"
+  plan "    $(yq '.spec.targetInstance' <<<"$RESTORE_YAML" | sed ':a;N;$!ba;s/\n/\n    /g')"
+  RESTORE_YAML=""
+else
+  plan "PostgresRestore ${TNS}/${RNAME} on ${TC} (a server-side dry run checks it before it is created):"
+  plan "    ${RESTORE_YAML//$'\n'/$'\n'    }"
+fi
 [[ -z "$COPY_YAML" ]] || { plan "PostgresBackupLocation ${TNS}/${COPY_NAME} on ${TC}:"; plan "    ${COPY_YAML//$'\n'/$'\n'    }"; }
 if [[ "$POSTBACKUP" == true ]]; then plan "after the restore: a full backup of ${TI} (post-restore backup)"; fi
 if [[ "$SAME_NS" != true ]]; then
@@ -739,7 +760,7 @@ wait_app() {  # wait_app APP: the ApplicationSet has generated the Application
   appset_refresh tpg-instances || true
   wait_logged "Application ${1} generated" 40 15 app_exists "$1"
 }
-PUSHED_REV=""
+PUSHED_REV=""; ENTRY_PUSHED=false; NS_CREATED=false
 if [[ "$ENTRY_NEW" == true ]]; then
   if [[ "$PUSH_MODE" == direct ]]; then
     # the owner of the shared Secrets is decided under the fleet lock on the newest clusters/fleet.yaml: concurrent pairs into one new
@@ -753,11 +774,13 @@ if [[ "$ENTRY_NEW" == true ]]; then
       prepare_entry || { fleet_lock_release; fail FLEET_EDIT_FAILED "$FLEET_REL"; }
       git_commit_push "$REPO" "restore: add ${TC}/${TI} from ${SC}/${SI} (${WF})" "$FLEET_REL" ${SPEC_JSON:+"$RESTORE_PATCH_DIR"} \
         || { fleet_lock_release; fail GIT_PUSH_FAILED "pushMode=${PUSH_MODE}: the entry ${TC}/${TI} was not pushed to ${FLEET_REL}"; }
+      ENTRY_PUSHED=true
       fleet_lock_release
     fi
   else
     git_commit_push "$REPO" "restore: add ${TC}/${TI} from ${SC}/${SI} (${WF})" "$FLEET_REL" ${SPEC_JSON:+"$RESTORE_PATCH_DIR"} \
       || fail GIT_PUSH_FAILED "pushMode=${PUSH_MODE}: the entry ${TC}/${TI} was not merged into ${FLEET_REL}${PR_NUMBER:+ (pull request #${PR_NUMBER})}"
+    ENTRY_PUSHED=true
   fi
   PUSHED_REV="${PUSHED_REVISION:-}"
   # never two owners of the shared Secrets (concurrent pull requests into one namespace)
@@ -769,6 +792,8 @@ fi
 # a new instance (one declared in clusters/fleet.yaml but not deployed included): its Application provides the shared objects and the backup location
 if [[ "$TGT_EXISTS" == false ]]; then
   to_tgt
+  # a namespace this run creates is deleted again by a rollback (when nothing else uses it)
+  [[ -n "$(tk get namespace "$TNS" --ignore-not-found -o name 2>/dev/null)" ]] || NS_CREATED=true
   tk create namespace "$TNS" --dry-run=client -o yaml | tk apply -f - >/dev/null || fail TARGET_PREPARE_FAILED "namespace ${TNS} on ${TC}"
   tk label namespace "$TNS" tpg.fleet/managed=true --overwrite >/dev/null || fail TARGET_PREPARE_FAILED "label of namespace ${TNS} on ${TC}"
   wait_app "tpg-${TC}-${TI}" || fail APP_NOT_GENERATED "tpg-${TC}-${TI}: the ApplicationSet tpg-instances did not generate it after the push"
@@ -895,15 +920,92 @@ if [[ "$SAME_NS" != true ]]; then
       sleep 20
     done
     note "PostgresBackup ${TNS}/${SYNC_NAME} (source backup ${SBK}, restoreLabel ${SB_LABEL}) synced and Succeeded"
-    # the PostgresRestore names the synced backup
-    RESTORE_YAML="$(N="$SYNC_NAME" yq '.spec.sourceBackup.name = strenv(N)' <<<"$RESTORE_YAML")"
   fi
 fi
 
+# ---- 8 (real) a refused PostgresRestore rolls a new target back: nothing was restored, the new target holds no data
+ROLLED=(); KEPT=(); LEFT=()
+rollback_entry_edit() {  # the entry this run added is removed; a declared entry it replaced is put back as it was
+  local f="$REPO/$FLEET_REL"
+  if [[ -n "$ORIG_ENTRY" && "$ORIG_ENTRY" != null ]]; then
+    TC_="$TC" TI_="$TI" E_="$ORIG_ENTRY" yq -i '.clusters[strenv(TC_)].instances[strenv(TI_)] = (strenv(E_) | from_yaml)' "$f" || return 1
+  else
+    TC_="$TC" TI_="$TI" yq -i 'del(.clusters[strenv(TC_)].instances[strenv(TI_)])' "$f" || return 1
+  fi
+  # the restore-patch of a spec file, staged in the commit of the entry
+  [[ -z "$SPEC_JSON" || -z "$RP_PATH" ]] || rm -f "$REPO/helm_artifacts/instance/tpg-instance/${RP_PATH}"
+}
+rollback_new_target() {  # ROLLED (undone), KEPT (left on purpose), LEFT (could not be undone: ROLLBACK_INCOMPLETE)
+  local app="tpg-${TC}-${TI}" removed=false app_gone=true others
+  if [[ "$ENTRY_PUSHED" == true ]]; then
+    [[ "$PUSH_MODE" != direct ]] || fleet_lock_acquire || true
+    if git_clone "$REPO" >/dev/null 2>&1 && rollback_entry_edit \
+       && git_commit_push "$REPO" "restore: roll back ${TC}/${TI} (${WF}): the PostgresRestore was refused" "$FLEET_REL" ${SPEC_JSON:+"$RESTORE_PATCH_DIR"}; then
+      if [[ -n "$ORIG_ENTRY" && "$ORIG_ENTRY" != null ]]; then ROLLED+=("the declared entry ${TC}/${TI} put back in ${FLEET_REL} (pushMode ${PUSH_MODE})")
+      else ROLLED+=("the entry ${TC}/${TI} removed from ${FLEET_REL} (pushMode ${PUSH_MODE})"); removed=true; fi
+    else
+      LEFT+=("the entry ${TC}/${TI} in ${FLEET_REL} (pushMode ${PUSH_MODE}: the rollback commit failed; remove it with tpg-delete-instance)")
+    fi
+    [[ "$PUSH_MODE" != direct ]] || fleet_lock_release
+  fi
+  if [[ "$removed" == true ]]; then
+    appset_refresh tpg-instances || true
+    if app_removed_or_force "$app" true; then ROLLED+=("Application ${app} removed by Argo CD${FORCED_NOTE:+ (${FORCED_NOTE})}")
+    else app_gone=false; LEFT+=("Application ${app} (still there: argocd app delete ${app})"); fi
+  fi
+  to_tgt
+  if [[ "$COPY_MADE" == true ]]; then
+    if tk -n "$TNS" delete postgresbackuplocation "$COPY_NAME" --ignore-not-found >/dev/null 2>&1; then
+      ROLLED+=("the location copy ${TNS}/${COPY_NAME} removed")
+      if [[ "$COPY_SECRET_MADE" == true ]]; then
+        if tk -n "$TNS" delete secret "$COPY_SECRET" --ignore-not-found >/dev/null 2>&1; then ROLLED+=("its Secret ${TNS}/${COPY_SECRET} removed")
+        else LEFT+=("Secret ${TNS}/${COPY_SECRET} (kubectl -n ${TNS} delete secret ${COPY_SECRET})"); fi
+      fi
+    else
+      LEFT+=("PostgresBackupLocation ${TNS}/${COPY_NAME} (kubectl -n ${TNS} delete postgresbackuplocation ${COPY_NAME})")
+    fi
+  elif [[ "$SAME_NS" != true && -n "$COPY_NAME" ]]; then
+    KEPT+=("the location ${TNS}/${COPY_NAME}, which this run reused and did not create")
+  fi
+  if [[ "$NS_CREATED" == true ]]; then
+    others="$( { tk -n "$TNS" get postgres -o json 2>/dev/null | jq -r --arg i "$TI" '.items[]? | .metadata.name | select(. != $i)'
+                 fleet_ns_table "$REPO" "$TC" 2>/dev/null | awk -F'\t' -v ns="$TNS" -v i="$TI" '$2 == ns && $1 != i { print $1 }'; } | sort -u | paste -sd, - || true)"
+    if [[ "$removed" != true ]]; then KEPT+=("namespace ${TNS} kept (the entry of ${TI} is still in ${FLEET_REL})")
+    elif [[ "$app_gone" != true ]]; then LEFT+=("namespace ${TNS} (kept while Application ${app} exists; kubectl delete namespace ${TNS} afterwards)")
+    elif [[ -n "$others" ]]; then KEPT+=("namespace ${TNS} kept: ${others} use it")
+    elif tk delete namespace "$TNS" --ignore-not-found --wait=false >/dev/null 2>&1; then ROLLED+=("namespace ${TNS}, which this run created, deleted")
+    else LEFT+=("namespace ${TNS} (kubectl delete namespace ${TNS})"); fi
+  fi
+  [[ "${#LEFT[@]}" -eq 0 ]] || warn ROLLBACK_INCOMPLETE "the rollback of ${TC}/${TNS}/${TI} left: $(join_list "${LEFT[@]}")"
+}
+refuse() {  # refuse REASON DETAIL: the operator refused the PostgresRestore; a new target is rolled back first, then the pair fails
+  if [[ "$TGT_EXISTS" == false ]]; then
+    rollback_new_target
+    fail "$1" "${2}; rolled back: $(join_list ${ROLLED[@]+"${ROLLED[@]}"})${KEPT[*]:+; kept: $(join_list "${KEPT[@]}")}"
+  fi
+  fail "$1" "$2"
+}
+
 # ---- 8 (real) create the PostgresRestore and wait for it
 to_tgt
+[[ "$SYNC_LATER" != true ]] || render_restore "$SYNC_NAME"
+# the spec of a new target: the render of its entry as pushed (the fresh clone of the push)
+if [[ "$TGT_EXISTS" == false && -z "$SPEC_JSON" && "$ENTRY_PUSHED" == true ]]; then
+  if new_render="$(instance_render "$REPO" "$TC" "$TI" 2>/dev/null)" && new_spec="$(yq -o=json -I=0 'select(.kind == "Postgres") | .spec' <<<"$new_render")" && [[ -n "$new_spec" && "$new_spec" != null ]]; then
+    TSPEC_JSON="$new_spec"; render_restore "${SYNC_NAME:-$SBK}"
+  fi
+fi
+plan "PostgresRestore ${TNS}/${RNAME} on ${TC} as applied:"
+plan "    ${RESTORE_YAML//$'\n'/$'\n'    }"
+plan_save
+log "PostgresRestore ${TNS}/${RNAME} as applied:"
+printf '%s\n' "$RESTORE_YAML" | sed 's/^/    /' >&2
+if ! printf '%s\n' "$RESTORE_YAML" | tk -n "$TNS" apply --dry-run=server -f - >/dev/null 2>"$WORK/restore-dryrun.err"; then
+  refuse RESTORE_REJECTED "the operator refused PostgresRestore ${TNS}/${RNAME} in a server-side dry run (nothing was created): $(tr '\n' ' ' <"$WORK/restore-dryrun.err" | cut -c1-600)"
+fi
 log "creating PostgresRestore ${TNS}/${RNAME} (${METHOD}) -> ${TC}/${TI}"
-printf '%s\n' "$RESTORE_YAML" | tk -n "$TNS" apply -f - >/dev/null || fail CREATE_FAILED "$RNAME"
+printf '%s\n' "$RESTORE_YAML" | tk -n "$TNS" apply -f - >/dev/null 2>"$WORK/restore-create.err" \
+  || refuse CREATE_FAILED "${RNAME}: $(tr '\n' ' ' <"$WORK/restore-create.err" | cut -c1-600)"
 # START is the one clock of the restore phase: the wait for synced backups above counts against restoreTimeoutSeconds too
 while true; do
   j="$(tk -n "$TNS" get postgresrestore "$RNAME" -o json 2>/dev/null || echo '{}')"
@@ -922,7 +1024,7 @@ while true; do
 done
 
 pg_wait_ready "$TI" "$READY_TIMEOUT" || fail "TARGET_${POD_WATCH_REASON:-NOT_RUNNING}" "$TI: ${POD_WATCH_DETAIL:-}"
-[[ "$TGT_EXISTS" == true || -n "$SPEC_JSON" ]] || note "no spec file: ${TI} was created by the operator from spec.targetInstance.name alone, which fills in its spec (lab item: not verified how); the spec it has is read below"
+[[ "$TGT_EXISTS" == true || -n "$SPEC_JSON" ]] || note "no spec file: ${TI} was created from the render of its new entry (spec.targetInstance.spec); the spec it has now is read below"
 
 # ---- 5 (real) the restore-patch: the spec of the restored Postgres as the entry's restorePatch (lib.sh restore_patch_record, templates/_helpers.tpl
 # tpg.restoredPostgres). A new entry with a spec file recorded it in the commit of the entry. Everywhere else it is a commit of its own, now
