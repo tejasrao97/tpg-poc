@@ -56,8 +56,12 @@ def type_check(spec, types):
     else:
         cond = VALUE + ".matches(" + cel_raw(types[t]["pattern"]) + ")"
         if types[t].get("excludeAll"):
-            # "all" is a valid name for the pattern, but not a value of this type
-            cond = "(" + cond + " && !" + VALUE + ".split(',').exists(x, x.trim() == 'all'))"
+            # "all" matches the name pattern, but inside the brackets it is a keyword, not a name
+            # ([a, all] is refused); a bare "all" is the other form, where the type has bare: all
+            inside = "!" + VALUE + ".split(',').exists(x, x.matches(" + cel_raw(r'^[\[\s"\x27]*all[\]\s"\x27]*$') + "))"
+            if types[t].get("bare") == "all":
+                inside = "(" + VALUE + ".matches(" + cel_raw(r"^\s*all\s*$") + ") || " + inside + ")"
+            cond = "(" + cond + " && " + inside + ")"
     if spec.get("allowEmpty") and cond != "true":
         cond = "(" + VALUE + " == '' || " + cond + ")"
     return cond

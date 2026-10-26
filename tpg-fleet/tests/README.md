@@ -11,25 +11,30 @@ tests/run-all.sh --against-cli   # also compare every flag with the installed CL
 | Suite | What it covers | Requires |
 |---|---|---|
 | `cli-flags/` | Flags the pinned CLI version no longer accepts, in shell scripts, WorkflowTemplates and Markdown; jq and yq alternatives whose fallback is `true` or a non-zero number, in both repositories (`check_zero_defaults.py`, I22) | python3 (PyYAML) |
+| `regex-limits/` | Bash regexes in the workflow scripts stay within POSIX's 255 repeats (musl in the tools image); Round 23: the list patterns of `workflows/params/types.yaml` are RE2-safe (CEL), take the bracketed forms and refuse the comma forms, `[]` and empty elements | awk; python3 (PyYAML) for the type patterns |
 | `helm4/` | `workflows/scripts/helm-addons.sh` end to end against a Helm 4 CLI | python3, jq, yq (mikefarah) |
 | `git-merge/` | Round 22: the writers of `clusters/fleet.yaml` (`git_push_head`, `git_merge_remote`, `fleet_lock_*` in `workflows/scripts/lib.sh`, `fleet-merge3.sh`): the lock is waited for, taken over when stale and released; a push rejected after another run changed the same file merges key by key (a text rebase conflict included), a conflict of values fails | git, jq, yq |
 | `stuck-app/` | Round 22: `app_removed_or_force` and `app_stuck_reason`: an Application stuck with a ComparisonError is forced (finalizer cleared, `FORCED:` note), a healthy one never, `forceDeleteStuckApps=false` and a failed patch are reported | jq |
 | `shared-lib/` | The shared library block in `workflows/scripts/common.sh`: identical to the copy in tpg-aks-infra, retries, pod watch (including `--started-ok` for Vault) | jq |
-| `sync-engine/` | The Argo CD sync engine (`app_sync_wait` in `workflows/scripts/lib.sh`) against a scripted Argo CD API, including a sync off the fleet branch (`--off-branch`) and one source of a multi-source Application (`--revisions`) | jq |
-| `rollout/` | `rolloutMode` of tpg-day0, tpg-upgrade, tpg-patch and tpg-scale-instance (`workflows/scripts/plan-batches.sh`) | jq |
-| `params/` | Input types: `workflows/params/types.yaml`, the generated policy, the WorkflowTemplates, the clusterMap key registry and the Type columns of `docs/workflow-commands.md` agree; the clusterMap JSON and YAML schemas and examples per workflow (`workflows/params/schemas/`, Round 15, D88) are current and agree with `clustermap.py` | python3 (PyYAML, jsonschema) |
+| `sync-engine/` | The Argo CD sync engine (`app_sync_wait` in `workflows/scripts/lib.sh`) against a scripted Argo CD API, including a sync off the fleet branch (`--off-branch`) and one source of a multi-source Application (`--revisions`); Round 23 review: a selective sync (`--resources`) syncs the listed objects and does not wait for the Application | jq |
+| `rollout/` | `rolloutMode` of tpg-day0, tpg-upgrade, tpg-patch and tpg-scale-instance (`workflows/scripts/plan-batches.sh`), and the same modes over the pairs of tpg-restore (`P_PAIRS`) | jq |
+| `params/` | Input types: `workflows/params/types.yaml`, the generated policy, the WorkflowTemplates, the clusterMap key registry and the Type columns of `docs/workflow-commands.md` agree; the clusterMap JSON and YAML schemas and examples per workflow (`workflows/params/schemas/`, Round 15, D88) are current and agree with `clustermap.py`; Round 23 (phase 7): the Mandatory, Default and enum cells of the input tables agree with `types.yaml` and the templates, `params_schema.py --check` is clean, and the parameter files (the generated example and the worked examples of every workflow section of the docs) pass the schema, the admission policy on a real API server and the validate step | python3 (PyYAML, jsonschema, check-jsonschema); envtest, argo and openssl for the admission part |
 | `cluster-map/` | clusterMap validation (`clustermap.py`, `validate-params.sh` per workflow), the `lib.sh` accessors, the tpg-day0 version rule (FLEET_OVERRIDDEN, UPGRADE_REQUIRED, DOWNGRADE_NOT_ALLOWED, VERSION_UNKNOWN), the input combination rules (`highAvailability=true` with `readReplicas=0`, `readReplicas` above 0 with `highAvailability=false` where both are set, an input `readReplicas` not applied to an entry with `highAvailability: false`, `ferretReadOnlyReplicas` without HA), the `fleet-day0.sh` backstop for the same pairs, the tpg-scale-instance validate check (`replicas` above 0 with `enableHAIfNeeded=false` on an instance declared a single node), the `cron` and `k8sName` types, what `fleet-day0.sh` writes for `backupSchedule=operator` and the `ferret*` inputs, the tpg-scale-instance `maxReadReplicas`, `rolloutMode` and `maxParallel` inputs (`MAX_BELOW_CURRENT` at validation), the patch files of tpg-patch and tpg-create-instance: contents in `patchFiles`, a list of postgres patch files, absolute, `~/`, relative and `repo:` paths, a file of the wrong kind, unknown values and Postgres fields, operator keys outside the allow-list, unnamed contents, `patchMode=clear`, `clearKinds`, the renamed keys (`postgresValuesPatchFilePath`, `backupEnableSSL`); the backup CA sources (`caBundleFile`, `backupCaBundleVaultSecret`); `backupFullRetention` and `backupFullRetentionType` (Round 15) | python3, jq, yq (mikefarah) |
-| `scale/` | `scale-instance.sh plan`: `maxReadReplicas` alone or with a scale in one commit, the new cap bounding `replicas`, a cap kept when a scale does not happen (`MAX_BELOW_CURRENT`), the pre-check records that drive the rollout, and `plan-batches.sh` with the template's `batch-items` step | python3, jq, yq (mikefarah) |
-| `patch/` | tpg-patch: `patch-plan.sh` (stored names, current and previous with its commit, refused fields, the operator image tag and Secrets, the dry run, the diff with tracking annotations, `NO_CHANGE`, `patchMode=clear`, the postgresVersion guard, a Round 11 list; Round 15: one multi-document postgres file per instance, carry-over of kinds not named, `clearKinds`, `repo:` files, `PATCH_OVERRIDES_VALUE`, `PATCH_TARGET_NOT_RENDERED`, the backup CA bundle from a file or from Vault; documents carried over from creation, sizes and the storage class compared on the rendered instance) and `patch-cluster.sh` (the direct commit, the pull request synced before the merge, the merge without a second sync, the revert of a closed or timed-out pull request and of a failed sync, the operator's effective values file, `MERGED_CONTENT_DIFFERS`) | git, helm (skipped without it), python3, jq, yq |
-| `chart/` | `charts/tpg-instance`: Service exposure and its Azure annotations, `instance.serviceType` refused, `caBundle` only with `enableSSL: true` (and required then), the network policy objects, no empty NetworkPolicy peer list, the `highAvailability` block (only for enabled with read replicas), zero defaults left out, PostgresBackupSchedule and PostgresFerretDocumentDB, the patch map shapes, a multi-document postgres file (one document per kind, an unknown kind refused), `backup.fullRetentionType`, and kubeconform against the CRD schemas | helm (skipped without it), python3 (PyYAML), yq |
-| `day0-plan/` | tpg-day0 and tpg-create-instance: the plan (`fleet-day0.sh`, the CA bundle placeholder), ownership from the Argo CD Application's resource list (`day0-precheck.sh`), `ORPHAN_CRD`, `OPERATOR_NOT_INSTALLED`, `HA_NODES_EXCEED_ZONES`, `AZURE_BACKUP_UNSUPPORTED`, the creation rules, `ALREADY_EXISTS`, `INSTANCE_EXISTS`, `fleet-commit.sh` (passed clusters only, `FLEET_CHANGED_DURING_RUN`), `blocked-gate.sh`, the upgrade guard for absent instances, the patch files of tpg-day0 and tpg-create-instance (combined per instance as `<instance>-postgres-<hash>.yaml`, committed by `fleet-commit.sh`, written by `discover.sh`, kept for a repeated run), the CA bundle from a file or from Vault, and `FLEET_ENTRY_INVALID` for a fleet entry written before Round 15 | helm (skipped without it), python3, jq, yq |
+| `restore-map/` | The `clusterMap` of tpg-restore, a list of pairs (Round 23, phase 6a): `clustermap.py restore` (list shape, one cluster, namespace and instance per side, every key rule of decision 7 that needs no cluster, the namespace rules, the one-file rule with its whitespace message, the rules between pairs, the normalized pair JSON), `pitrEnabled` default false, a named backup into the same namespace, another namespace and another cluster, the `repo:` spec files limited to `restore-specs/`, `validate-params.sh restore` (`confirm` mandatory for an in-place pair when `dryRun` is false and refused on any other pair, inputs, removed flat inputs, the local spec file in `patchFiles`, the in-place guard `allowInPlaceRestore` read from a stub fleet repository, `IN_PLACE_NOT_ALLOWED`), `pack-patch-files.sh` for a pair, the template (steps, canary, `continueOn`, gate) and the entry point; Round 23 phase 6c: a side or an instance entry that is no mapping, a clusterMap that is not YAML or JSON | python3, jq, yq (mikefarah) |
+| `restore/` | `restore-pair.sh`, one pair of tpg-restore (Round 23, phase 6b), with the real `lib.sh`, `clustermap.py`, `patchcheck.py` and charts and stubs for the clusters (a directory of objects behind a `tk` stub that plays the operator and Argo CD), the fleet repository, Vault and `sleep`: dry runs that change nothing, every PITR type, the named-backup checks, the PITR derivation and its warnings, the matrix, the target rules (`TARGET_EXISTS` for a live Postgres of the target name that is not the source, also in a dry run, with the other pairs going on; `confirm` for an in-place pair only; spec file for a new target and in place; a spec file's own `backupLocation` and `imagePullSecret` win over the fleet's; namespace, owner of the shared Secrets, `NAMESPACE_SECRET_CONFLICT`), the restore-patch (stored name, entry record and seeding, `instance.restored`, mode base and over, same commit as the entry or a commit after the restore, the live snapshot read after the restore and what it leaves out, a snapshot that cannot be read or stored (`RESTORE_PATCH_NOT_RECORDED` names every unknown field), replaced and deleted on a re-restore, the source's restore never copied, the chart render equals the restored spec), tpg-upgrade on a restored instance, the version rule (`RESTORE_VERSION_LOWER`, `skipMinorVersionCheck`), `BACKUP_OF_OTHER_INSTANCE`, the location copy (create, reuse, conflict) and its Secret (never in a file, record or log), real runs (order of the steps, fleet entry, adoption, waits, timeouts, failures, `postRestoreBackup` (`POST_RESTORE_BACKUP_FAILED` is a warning), `keepSourceLocation`), `UNEXPECTED_ERROR`; Round 23 phase 6c: the pair shapes (a new instance on another cluster, in another namespace of the cluster, in the source namespace, in place) x a named backup and each PITR type x with and without a spec file as a read-only dry run (no create, apply, patch or delete call, nothing pushed) with the rendered PostgresRestore and location copy checked, the same three methods in real runs, `keepSourceLocation=false` keeping a copy that a Postgres of the namespace uses (`SOURCE_LOCATION_IN_USE`: the restored instance from the live snapshot or the spec file, another instance; an unreadable list or a failed delete is `SOURCE_LOCATION_NOT_REMOVED`), `FLEET_EDIT_FAILED`, `SECRET_NOT_SYNCED`, `SOURCE_LOCATION_UNKNOWN`, and a failed canary pair (non-zero exit, the second pair never starts); `RESTORE_RENDER_DIR=<dir>` runs only the shapes and leaves the rendered objects there for `crd-reference/`; Round 23, phase 7: the table of reasons in section 16 of `docs/workflow-commands.md` names every reason `restore-pair.sh` passes to `fail`, `block` and `warn` (and the ones it records itself and the validate step's `IN_PLACE_NOT_ALLOWED`), and no reason that no script writes | python3, jq, yq (mikefarah), helm; kubeconform (optional) |
+| `scale/` | `scale-instance.sh plan`: `maxReadReplicas` alone or with a scale in one commit, the new cap bounding `replicas`, a cap kept when a scale does not happen (`MAX_BELOW_CURRENT`), the pre-check records that drive the rollout, `plan-batches.sh` with the template's `batch-items` step, and a restored instance (the scale writes `instance.highAvailability`, which the chart renders over its restore-patch) | python3, jq, yq (mikefarah) |
+| `patch/` | tpg-patch: `patch-plan.sh` (stored names, current and previous with its commit, refused fields, the operator image tag and Secrets, the dry run, the diff with tracking annotations, `NO_CHANGE`, `patchMode=clear`, the postgresVersion guard, a Round 11 list; Round 15: one multi-document postgres file per instance, carry-over of kinds not named, `clearKinds`, `repo:` files, `PATCH_OVERRIDES_VALUE`, `PATCH_TARGET_NOT_RENDERED`, the backup CA bundle from a file or from Vault; documents carried over from creation, sizes and the storage class compared on the rendered instance; Round 23: a patch on a restored instance leaves its `restorePatch` alone, a values patch may not set `restorePatch` or `instance.restored`, and a values patch with an `instance:` key that reaches the Postgres is `RESTORED_VALUES_PATCH` on a restored instance while keys that do not reach it stay allowed) and `patch-cluster.sh` (the direct commit, the pull request synced before the merge, the merge without a second sync, the revert of a closed or timed-out pull request and of a failed sync, the operator's effective values file, `MERGED_CONTENT_DIFFERS`) | git, helm (skipped without it), python3, jq, yq |
+| `chart/` | `helm_artifacts/instance/tpg-instance`: Service exposure and its Azure annotations, `instance.serviceType` refused, `caBundle` only with `enableSSL: true` (and required then), the network policy objects, no empty NetworkPolicy peer list, the `highAvailability` block (only for enabled with read replicas), zero defaults left out, PostgresBackupSchedule and PostgresFerretDocumentDB, the patch map shapes, a multi-document postgres file (one document per kind, an unknown kind refused), `backup.fullRetentionType`, and kubeconform against the CRD schemas; Round 23 review: the owner flag of the shared Secrets follows the `clusters/fleet.yaml` value file at the synced commit (not the stale inline values), and the FerretDB pods have their own network policy pair; Round 23 re-review: the same through the real ApplicationSet values template with a stale `main` and a different synced `fleet.yaml` (fails without `cluster.name` in the template), and every NetworkPolicy of a render is checked for empty peers (FerretDB pair included); Round 23 second revision of phase 6b: a restored instance (`instance.restored`) renders from its restore-patch (mode base: the restore-patch's fields plus `backupLocation` and `imagePullSecret`, nothing of the chart defaults; later changes from the entry that differ, the postgres patch file last, overlays of the creation not applied; mode over: the normal render with the restore-patch over it; a re-restore applies the current file only) | helm (skipped without it), python3 (PyYAML), yq |
+| `day0-plan/` | tpg-day0 and tpg-create-instance: the plan (`fleet-day0.sh`, the CA bundle placeholder), ownership from the Argo CD Application's resource list (`day0-precheck.sh`), `ORPHAN_CRD`, `OPERATOR_NOT_INSTALLED`, `HA_NODES_EXCEED_ZONES`, `AZURE_BACKUP_UNSUPPORTED`, the creation rules, `ALREADY_EXISTS`, `INSTANCE_EXISTS`, `fleet-commit.sh` (passed clusters only, `FLEET_CHANGED_DURING_RUN`), `blocked-gate.sh`, the upgrade guard for absent instances, the patch files of tpg-day0 and tpg-create-instance (combined per instance as `<instance>-postgres-<hash>.yaml`, committed by `fleet-commit.sh`, written by `discover.sh`, kept for a repeated run), the CA bundle from a file or from Vault, and `FLEET_ENTRY_INVALID` for a fleet entry written before Round 15; Round 23 review: `NAMESPACE_SECRET_CONFLICT` for a `regsecret` or `backup-storage` Secret the fleet does not manage in the requested namespace; Round 23 re-review: the Secret is read by its metadata, only NotFound means "no Secret" (`CLUSTER_API_ERROR` otherwise) and a VaultStaticSecret owner must be tracked by a fleet Application; Round 23 second revision of phase 6b: a restored instance is `BLOCKED INSTANCE_RESTORED` (that instance only, flat and clusterMap inputs, create mode too), its entry is not changed and discover leaves it out | helm (skipped without it), python3, jq, yq |
 | `network-policy/` | tpg-network-policy planning (`network-policy.sh plan`): `apply`, `update`, `remove`, clusterMap rules over the inputs, the postgresVersion guard, `CILIUM_NOT_AVAILABLE`, `DRY_RUN_REJECTED`, `ACNS_NOT_ENABLED`, `INSTANCE_NOT_FOUND`, invalid CIDRs, dry run | helm (skipped without it), python3, jq, yq |
-| `submit/` | `scripts/submit/tpg-*.sh` through the numbered menus with stub `argo` and `kubectl`: type checks, optional inputs, map inputs, a pasted clusterMap, the kubectl fallback, Cancel, the tpg-scale-instance run kinds (scale, cap only), the patch files read and sent as `patchFiles`, the scripts run from any directory, through a link or with `TPG_FLEET_DIR` (Round 15, 1f), and `pack-patch-files.sh -o` reading the parameter file itself (2ii) | python3, jq, yq |
-| `rotate/` | `workflows/scripts/rotate-write.sh`, the write step of tpg-rotate-credential, with stub `kubectl` and `curl` (the Vault API): a wrapped value checked and written without `_secretName`, and in no file, log line or record of the step; a value wrapped for another `secretName`; a used token (`WRAPPING_TOKEN_INVALID`); an unwrap that breaks off (curl's error, never the response); password length; a CA bundle from `caBundleFile` and an expired one; an unexpected exit still recorded | jq, python3, openssl |
+| `backup-expire/` | Round 23: tpg-backup-expire (`backup-expire.sh`, `lib.sh` `backup_dependents`, `backup_expire`) with a stub operator: expire named, dependents BLOCKED with the list, includeDependents expires the chain newest first, purge all, dry run changes nothing, declined and timed-out expires, the validate step (confirm = the cluster names when dryRun=false, backups with purgeBackups refused); `delete/` also covers purgeBackups of the delete workflows against a fake storage account (SharedKey checked, listing paged, shared repoPath keeps its blobs, the key never leaks) | jq, yq |
+| `delete/` | `delete-instance.sh` and `delete-apps.sh` with instances that share a namespace (Round 23): the hand-over of the shared Secrets when the owner leaves (the successor's Application exists, commit, selective sync of the shared objects, tracking annotation and health, then the entry and the Application go; one owner at every step; a failure reverts the flag commit), the successor of a `tpg-delete-apps` run is an instance that stays, `NAMESPACE_SHARED` for `purgeNamespace` (also for instances of one run that disagree), the PVCs of one instance only, the namespace deleted after the last instance of a run and with `deleteOperator`, the audit copy matched by exactly `<instance>-<12 digits>.yaml`, the `instance_ns` chain (checkout, inventory, clone, `FLEET_UNREADABLE`), `inventory_instances` owners first, `day0-deploy.sh` syncing a non-owner only when the shared Secrets exist (`SHARED_SECRETS_MISSING`); Round 23 re-review: the namespace a re-run or an untracked delete resolved is the one `busy_operations`, `pg_state` and `backup-instance.sh` use (`instance_ns_override`: final backup in the custom namespace, busy operation blocks), the revert of a failed hand-over terminates the successor's running operation, syncs the old owner again and checks each of the three objects, the revert pull request of `PUSH_MODE=pr` is named in the detail, `POSTGRES_SKIPPED` hints by case, and an empty `instance.namespace` counts as absent | helm (skipped without it), python3, jq, yq |
+| `submit/` | `scripts/submit/tpg-*.sh` through the numbered menus with stub `argo` and `kubectl`: type checks, optional inputs, map inputs, a pasted clusterMap, the kubectl fallback, Cancel, the tpg-scale-instance run kinds (scale, cap only), the patch files read and sent as `patchFiles`, the scripts run from any directory, through a link or with `TPG_FLEET_DIR` (Round 15, 1f), and `pack-patch-files.sh -o` reading the parameter file itself (2ii); Round 23: plain names typed at a prompt are sent bracketed (`[a, b]`, `[path]`), bracketed list inputs and clusterMap sequences are read by the pack helper, a comma string or `[repo: x.yaml]` is refused; Round 23 phase 6c: `tpg-restore.sh` builds the pairs one by one (registered clusters from the hub, instances and namespaces from the clone's `clusters/fleet.yaml`, `sourceBackupName` or each PITR type with `bestEffort` and the repository keys, `confirm` for an in-place pair only, a spec file of `restore-specs/` or of the machine), checks each pair with `clustermap.py restore` and prints its normalized plan, loads or pastes a list (a map of clusters is refused), re-checks with `--confirm-required` for `dryRun=false`, and uses `kubectl` only for the hub's registered clusters | python3, jq, yq |
+| `rotate/` | `workflows/scripts/rotate-write.sh`, the write step of tpg-rotate-credential, with stub `kubectl` and `curl` (the Vault API): a wrapped value checked and written without `_secretName`, and in no file, log line or record of the step; a value wrapped for another `secretName`; a used token (`WRAPPING_TOKEN_INVALID`); an unwrap that breaks off (curl's error, never the response); password length; a CA bundle from `caBundleFile` and an expired one; an unexpected exit still recorded; Round 23 review: `rotate-cluster.sh` checks the namespaces of `fleet.yaml` (shared ones once), `FLEET_UNREADABLE` | jq, python3, openssl |
 | `pgdata/` | `tools/pgdata/pgdata.py` against a throwaway local PostgreSQL (initdb on a free port): every command and format, and the refused input (types, identifiers, `--where`, writes through `--sql`) | PostgreSQL server binaries and psycopg 3 (skipped without them) |
-| `crd-reference/` | `charts/crd-reference` and `tools/crd-defaults/generate.py`: the generated files are current, the zero-default registry, `tpg.prune` per kind, the examples against the JSON schemas, and parity of the objects written inline by `backup-instance.sh`, `postgres-upgrade.sh` and `restore.sh` with the reference templates | helm (skipped without it), python3 (PyYAML), yq, kubeconform (skipped without it) |
-| `admission/` | The three ValidatingAdmissionPolicies on a real kube-apiserver: the Workflow parameter types, the input combination rules, the Application sync policy, and `tpg-credential-writer` (Round 15, D87, with the ways around it the review found); every template of the repository passes them | envtest binaries (skipped without them), openssl |
-| `monitoring/` | `monitoring/grafana/generate.py --check` (alert rules, API payloads, PrometheusRule, dashboards and the reference section of `docs/monitoring.md`), the check mode on a copy, every alert, rule and dashboard named in `docs/monitoring.md`, and `promtool check rules` | python3 (PyYAML), promtool (skipped without it) |
+| `crd-reference/` | `helm_artifacts/instance/crd-reference` and `tools/crd-defaults/generate.py`: the generated files are current, the zero-default registry, `tpg.prune` per kind, the examples against the JSON schemas, and parity of the objects written inline by `backup-instance.sh` and `postgres-upgrade.sh` with the reference templates, and that `restore-pair.sh` renders its objects through the reference chart, and the PostgresRestore and location copy that `restore-pair.sh` renders for every pair shape (captured from `restore/`, 60 objects) against the CRD schemas with kubeconform -strict, the embedded `targetInstance.spec` included | helm (skipped without it), python3 (PyYAML), yq, kubeconform (skipped without it) |
+| `admission/` | The three ValidatingAdmissionPolicies on a real kube-apiserver: the Workflow parameter types, the input combination rules, the Application sync policy, and `tpg-credential-writer` (Round 15, D87, with the ways around it the review found); every template of the repository passes them; Round 23: the list types (bracketed, JSON, one value, comma string, `[]`, `[a, , b]`, `[all]`, `[repo: x.yaml]`) | envtest binaries (skipped without them), openssl |
+| `monitoring/` | `monitoring/grafana/generate.py --check` (alert rules, API payloads, PrometheusRule, dashboards and the reference section of `docs/monitoring.md`), the check mode on a copy, every alert, rule and dashboard named in `docs/monitoring.md`, and `promtool check rules`; Round 23 review: the replicas alert matches StatefulSets through the Postgres custom resource (an instance with no pod, two instances in one namespace) | python3 (PyYAML), promtool (skipped without it) |
 | `unused-keys/` | `tools/unused-keys/audit.py` (Round 15, D89): no chart value, `fleet.example.yaml` key, template input, `P_*` variable, Terraform variable or inventory key that nothing evaluates, except the entries of `allow-list.yaml`; a planted key fails the lint | python3 (PyYAML), helm (skipped without it) |
 
 `ssa/` (operator manifest patches and server-side apply field ownership) was
@@ -158,13 +163,59 @@ suite fails when:
   `clusterMap` input, a key has an unknown type, or its default input ("flag")
   is not an input of that workflow;
 - a row of an input table in `docs/workflow-commands.md` shows a Type other than
-  the `display` of its type, or an input has no row;
+  the `display` of its type, or an input has no row; in Round 23 the same check
+  covers the Mandatory column (`yes` is `mandatory: always` in `types.yaml`, a
+  condition is `conditional`, `no` is optional), the Default column (a cell of
+  literals is the default of the template, an empty cell means the template default
+  is empty) and the enum values (every value is named in the Description); a
+  self-test proves the check finds a wrong cell;
+- the parameter-file schemas, examples and generated blocks (Round 23, phase 7:
+  `workflows/params/params_schema.py --check`: `schemas/params-W.schema.{json,yaml}`
+  and `params-W.example.yaml` per workflow, W = the template name without `tpg-`,
+  and the block after the input table of each workflow section of
+  `docs/workflow-commands.md`, found by the workflow name, so renumbering the
+  document changes nothing) are out of date;
 - the clusterMap schemas (Round 15, D88) are out of date
   (`workflows/params/clustermap_schema.py --check`: the JSON and YAML schema and
   the example per workflow in `workflows/params/schemas/`, and the generated key
   tables in section 3 of `docs/workflow-commands.md`), an example fails
   `clustermap.py validate` or its schema, or a map that `clustermap.py` refuses for
-  its shape passes the schema (checked with jsonschema when installed).
+  its shape passes the schema (checked with jsonschema when installed);
+- a list pattern of `types.yaml` is not RE2-safe or takes a comma string (the `regex-limits` suite), or the
+  clusterMap schemas accept a string where a list belongs (Round 23, strict lists);
+- a YAML file under `workflows/params/` repeats a mapping key (Round 23,
+  `dupkeys.py`: a PyYAML loader that raises, naming the file, line and key). The
+  parsers keep the last duplicate silently, which once moved the `fleet:` path of
+  `backupEnableSSL` under `disableInitialBackup`;
+- a parameter file is judged differently by the schema, the admission policy and the
+  validate step (Round 23, phase 7, `check_param_files.py`). Three checks run on
+  each file: `jsonschema` over the schema (and `check-jsonschema`, the command of the
+  docs); the policy, evaluated by a kube-apiserver of `tests/envtest` with the Argo
+  CRDs, the 13 WorkflowTemplates and the policy, through the real
+  `argo submit --from workflowtemplate/W --parameter-file F`, which also proves how
+  argo 4.1.3 turns YAML values into strings (skipped, and listed, without envtest or
+  the argo CLI); and the validate step of the workflow offline (`validate-params.sh`
+  with a stub `kubectl` that lists four clusters and a fleet repository fixture;
+  for a file that names local files the one error "its contents are not in `patchFiles`"
+  is accepted, since their contents travel in `patchFiles`, which a documented file does not carry).
+  The files are the generated example of each workflow and every parameter-file
+  example of `docs/workflow-commands.md`: a yaml block whose first line is
+  `# NAME.yaml`, or a heredoc `cat > NAME.yaml <<'TAG'` in a bash block, bound to the
+  `argo submit ... --parameter-file NAME.yaml` commands (a definition nothing submits,
+  or a command whose file nothing defines, fails); a command whose file is
+  `workflows/params/schemas/params-W.example.yaml` is worked example 1 of tpg-W. Each
+  workflow needs that command and at least one defined example that names two clusters
+  or more, with a `clusterMap` where the workflow takes one (worked example 2). A `-p`
+  that repeats an input the file sets fails: argo 4.1.3 lists the input twice (the `-p` value
+  first) and does not replace the file's value. Negative cases (an unknown key, a renamed input, a wrong type,
+  a comma string, a bare name, `[]`, an empty element, `repo: x.yaml`, a map of
+  clusters for tpg-restore, a version written as a number), both list forms (the
+  YAML sequence and the bracketed string), a table of values per type that the schema and
+  the policy must judge alike, and every input that `types.yaml` marks
+  `mandatory: always` (the schema requires exactly those, and the validate step
+  refuses a run without each) complete it. Not testable offline, so listed at the end:
+  everything after the validate step (discover, the pre-check, the commits, the Argo CD
+  syncs, the verification on the clusters).
 
 ## cluster-map
 
@@ -172,8 +223,16 @@ suite fails when:
 `clusterMap`: unknown keys with a suggestion, wrong types, keys a workflow does
 not accept, missing required values (map key or input), a cluster without
 instances, `clusterMap` together with `clusters` or `instances`, `confirm` of
-the delete workflows (in any order), a `mode=backup` restore without an in-place target, YAML and JSON input, and a Postgres version written as a
-number (`16.10`). It also runs `fleet-day0.sh` with stub clusters to prove the
+the delete workflows (in any order), a tpg-restore named backup into another cluster (the rest of the restore pairs: `restore-map/`), YAML and JSON input, and a Postgres version written as a
+number (`16.10`). Strict lists (Round 23, phase 2): `clustermap.py list` and every list input of
+`validate-params.sh` take only the bracketed form, also with one value (`[a]`, `[a, b]`, JSON `["a","b"]`); a
+comma string, a bare name, `[]`, an empty element (`[a, , b]`), `[all]` and `repo: x.yaml` (the
+whitespace message `repo:<file path> "check for white spaces in between"`) are refused with the
+list syntax in the message, and so is a string where a clusterMap key needs a sequence; a
+single-file input holds exactly one file; a nested list and a line break inside an element are refused; `[all]`
+is refused for `clearKinds` too; where an input does not take `all` the message says so; a cluster name is matched
+literally (`[".*"]` is not registered); the rotate validate step's `selection` feeds discover and its `hasWrite`
+decides the write step. It also runs `fleet-day0.sh` with stub clusters to prove the
 version rule of tpg-day0: an input that nothing runs yet replaces the value in
 `fleet.yaml`, and a running operator or instance of another version blocks the
 cluster.
@@ -244,7 +303,7 @@ chart with the example patch files of `clusters/fleet.example.yaml`.
 
 ## chart
 
-Renders `charts/tpg-instance` with `helm template` for each case and checks the
+Renders `helm_artifacts/instance/tpg-instance` with `helm template` for each case and checks the
 objects with PyYAML: the three exposures and their annotations, the refusal of
 `instance.serviceType` and of an unknown exposure, `caBundle` with and without
 `enableSSL`, the network policy objects with and without ACNS, and that every
@@ -262,7 +321,7 @@ patch file content included; the PostgresBackupSchedule objects of
 `full` or with a malformed cron); the PostgresFerretDocumentDB (refused below
 Postgres 17.5 and for read-only proxies without HA; Services published like the
 instance; port 27017 in the network policy). Every rendered object is checked
-with `kubeconform -strict` against the schemas in `charts/crd-reference/schemas`,
+with `kubeconform -strict` against the schemas in `helm_artifacts/instance/crd-reference/schemas`,
 and `valuesOverride` (written by tpg-restore) wins over a values patch that turns
 FerretDB on.
 
@@ -282,9 +341,9 @@ PostgresFerretDocumentDB; an unknown kind fails the render), and
 
 ## crd-reference
 
-`charts/crd-reference` holds the 9 Tanzu for Postgres CRDs (`source-crds/`), one
+`helm_artifacts/instance/crd-reference` holds the 9 Tanzu for Postgres CRDs (`source-crds/`), one
 reference template per kind and the registry of fields that hold a zero default
-(`files/zero-defaults.yaml`, also in `charts/tpg-instance/files/`), all generated
+(`files/zero-defaults.yaml`, also in `helm_artifacts/instance/tpg-instance/files/`), all generated
 by `tools/crd-defaults/generate.py` (design decisions D69 and D73). The suite:
 
 1. runs the generator with `--check`: a CRD or `defaults-overlay.yaml` changed
@@ -296,11 +355,12 @@ by `tools/crd-defaults/generate.py` (design decisions D69 and D73). The suite:
 4. renders every `examples/<kind>.yaml` and validates it with
    `kubeconform -strict`, and checks that the schemas are closed (an unknown
    field fails);
-5. runs the inline objects of `backup-instance.sh` (PostgresBackup),
-   `postgres-upgrade.sh` (PostgresVersionUpgrade) and `restore.sh` (the source
-   PostgresBackupLocation copy and the PostgresRestore, in five modes) and
-   compares each with the reference template rendered from the same spec: a
-   zero default written by a script fails the suite.
+5. runs the inline objects of `backup-instance.sh` (PostgresBackup) and
+   `postgres-upgrade.sh` (PostgresVersionUpgrade) and compares each with the
+   reference template rendered from the same spec: a zero default written by a
+   script fails the suite; `restore-pair.sh` writes no inline object (it
+   renders the PostgresRestore and the location copy through this chart,
+   `tests/restore` checks the result).
 
 ## day0-plan
 
@@ -342,13 +402,26 @@ The apply phase (`network-policy.sh apply`: the sync, `archive_check`, the probe
 pods) needs a cluster with Cilium and is covered by the lab checks V48 to V50
 of the tpg-fleet README, not by this suite.
 
+## delete
+
+Runs `delete-instance.sh` and `delete-apps.sh` with the real `lib.sh`, `clustermap.py` and chart, and stubs
+for Git (a push writes `clusters/fleet.yaml` for the next clone), the Argo CD Applications and the target
+cluster. A stub sync renders the real chart of the Application from the pushed `fleet.yaml`; the Application
+whose chart renders the VaultStaticSecret `regsecret` becomes the one the tracking annotation names, as an
+apply by Argo CD would. The events file shows the order of commits, syncs, Application removals and
+deletes, so the hand-over order and the one-owner rule are assertions on it; the stub sync takes the
+`--resources` list of a selective sync, and switches (`sync-fail`, `no-move`, `vss-not-ready`) make the
+sync fail, succeed without moving the annotation, or leave the Secrets unhealthy. The fleet has `app-a` (owner),
+`app-b` and `app-c` in the namespace `shared`, and `orders-db` in `pg-orders-db`. The clusterMap of
+`tpg-delete-apps` is the normalized map (`work/cmap.json`).
+
 ## submit
 
 Runs the submit scripts with stdin from a here-document, so they use the
 numbered menus, in a `PATH` that holds only the tools they need, a stub
 `kubectl` (registered clusters, `create -f`) and, where the case wants it, a stub
 `argo` that records its arguments. Round 15: the 12 scripts (tpg-backup-retention
-is gone); a script run through a link or from another directory finds its clone,
+is gone; 13 in Round 23 with tpg-backup-expire); a script run through a link or from another directory finds its clone,
 a copy outside a clone stops with the `TPG_FLEET_DIR` hint and works with it
 (1f); `pack-patch-files.sh -o` reads the paths from a parameter file (relative to
 that file, `~/`, `..`, `repo:` left to the workflow, a CA file) and writes

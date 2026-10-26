@@ -186,7 +186,7 @@ ca_bundle_resolve() {
   # or returns 1 with CA_ERR (Round 15, D86). The source of the backup CA bundle of
   # an enableSSL instance: backupCaBundleFile or backupCaBundleVaultSecret of the
   # instance (ENTRY_JSON, its clusterMap keys), else of its cluster (clusterMap), else
-  # the inputs (P_BACKUP_CA_FILE, P_BACKUP_CA_VAULT), else ConfigMap tpg-settings
+  # the inputs (P_BACKUP_CA_FILE, bracketed: [path]; P_BACKUP_CA_VAULT), else ConfigMap tpg-settings
   # backupCaBundle. A file and a Vault secret on one level are refused.
   local c="$1" i="$2" e="$3" repo="${4:-${REPO:-}}" f v lvl tmp out
   CA_PEM=""; CA_SOURCE=""; CA_ERR=""
@@ -195,7 +195,7 @@ ca_bundle_resolve() {
     case "$lvl" in
       instance) f="$(jq -r '.backupCaBundleFile // ""' <<<"$e")"; v="$(jq -r '.backupCaBundleVaultSecret // ""' <<<"$e")" ;;
       cluster)  f="$(cmap_cval "$c" backupCaBundleFile)"; v="$(cmap_cval "$c" backupCaBundleVaultSecret)" ;;
-      input)    f="${P_BACKUP_CA_FILE:-}"; v="${P_BACKUP_CA_VAULT:-}" ;;
+      input)    f="$(file_item backupCaBundleFile "${P_BACKUP_CA_FILE:-}")"; v="${P_BACKUP_CA_VAULT:-}" ;;   # [path] -> path
     esac
     if [[ -n "$f" && -n "$v" ]]; then
       CA_ERR="${c}/${i}: backupCaBundleFile and backupCaBundleVaultSecret are both set (${lvl}): name one source"; return 1
@@ -232,14 +232,16 @@ ca_bundle_resolve() {
 
 # ----------------------------------------------------------------- Azure Blob
 blob_shared_key_auth() {
-  # blob_shared_key_auth ACCOUNT KEY DATE CANONICAL_RESOURCE
-  # SharedKey Authorization header value for a GET without body (Blob service,
+  # blob_shared_key_auth ACCOUNT KEY DATE CANONICAL_RESOURCE [VERB [EXTRA_HEADERS]]
+  # SharedKey Authorization header value for a request without body (Blob service,
   # x-ms-version 2021-08-06). CANONICAL_RESOURCE is the canonicalized resource
   # after /<account>, for example "/pg-backups-c1\nrestype:container" (with \n
-  # escapes). python3 (in the tools image) computes the HMAC; the key is passed
-  # in the environment, not as an argument.
-  local sts
-  sts="$(printf 'GET\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:%s\nx-ms-version:2021-08-06\n/%s%b' "$3" "$1" "$4")"
+  # escapes). VERB defaults to GET (Round 23: DELETE for Delete Blob). EXTRA_HEADERS
+  # are further x-ms-* headers that sort between x-ms-date and x-ms-version, each as
+  # "name:value\n" (x-ms-delete-snapshots:include\n). python3 (in the tools image)
+  # computes the HMAC; the key is passed in the environment, not as an argument.
+  local sts verb="${5:-GET}"
+  sts="$(printf '%s\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:%s\n%bx-ms-version:2021-08-06\n/%s%b' "$verb" "$3" "${6:-}" "$1" "$4")"
   printf 'SharedKey %s:%s' "$1" "$(STS="$sts" BLOB_KEY="$2" python3 -c '
 import base64, hashlib, hmac, os
 key = base64.b64decode(os.environ["BLOB_KEY"])
@@ -255,6 +257,129 @@ blob_container_status() {
   printf 'Authorization: %s\n' "$auth" | curl -sS -o /dev/null -w '%{http_code}' -H @- \
     -H "x-ms-date: ${date}" -H "x-ms-version: 2021-08-06" \
     "https://${account}.blob.core.windows.net/${container}?restype=container" || printf '000'
+}
+
+# ----- Blob listing and deletion (Round 23, purgeBackups of tpg-delete-instance and tpg-delete-apps)
+# The same SharedKey scheme as blob_container_status: the key comes from the caller (Vault,
+# vault_secret backup-storage accountKey), goes to python3 through the environment and is never
+# logged, never written to a file and never an argument of a program (the Authorization header
+# goes to curl on stdin, -H @-). Only blob names and counts are logged.
+BLOB_DELETED=0; BLOB_ERROR=""
+blob_date() { LC_ALL=C TZ=GMT date '+%a, %d %b %Y %H:%M:%S GMT'; }
+
+# A request that answers HTTP 429, 5xx or nothing (curl failure, HTTP 000) is tried again: 4 tries in all, waiting
+# BLOB_RETRY_BASE * 1, 2, 4 seconds between them (1, 2, 4 s; the tests set the base to 0). Any other status is
+# the answer (403 key rejected, 404 gone, 2xx done) and is returned at once. Every try signs its own request
+blob_retry() {
+  # blob_retry COMMAND [ARGS...] -> the HTTP status COMMAND printed on its last try
+  local code="" try wait=${BLOB_RETRY_BASE:-1}
+  for try in 1 2 3 4; do
+    code="$("$@")"
+    [[ "$code" =~ ^0+$ ]] && code=000   # curl failed: its -w printed 000 and the fallback another one
+    case "$code" in
+      000|429|5??) ;;
+      *) printf '%s' "$code"; return 0 ;;
+    esac
+    [[ "$try" -lt 4 ]] || break
+    log "  HTTP ${code} from the storage account (try ${try} of 4), waiting ${wait}s"
+    sleep "$wait"
+    wait=$((wait * 2))
+  done
+  printf '%s' "${code:-000}"
+}
+
+blob_list_page() { blob_retry _blob_list_page "$@"; }
+_blob_list_page() {
+  # blob_list_page ACCOUNT KEY CONTAINER PREFIX MARKER MAXRESULTS ENDPOINT OUT_XML -> HTTP status of List Blobs
+  # (flat listing of the blobs whose name starts with PREFIX, one page, from MARKER); the XML goes to OUT_XML
+  local account="$1" key="$2" container="$3" prefix="$4" marker="$5" max="$6" endpoint="$7" out="$8" date auth canon url
+  date="$(blob_date)"
+  canon="/${container}\ncomp:list\n"
+  [[ -z "$marker" ]] || canon+="marker:${marker}\n"
+  canon+="maxresults:${max}\nprefix:${prefix}\nrestype:container"
+  auth="$(blob_shared_key_auth "$account" "$key" "$date" "$canon")"
+  url="https://${account}.${endpoint}/${container}?restype=container&comp=list&prefix=$(jq -rn --arg s "$prefix" '$s | @uri')&maxresults=${max}"
+  [[ -z "$marker" ]] || url+="&marker=$(jq -rn --arg s "$marker" '$s | @uri')"
+  printf 'Authorization: %s\n' "$auth" | curl -sS --max-time 120 -o "$out" -w '%{http_code}' -H @- \
+    -H "x-ms-date: ${date}" -H "x-ms-version: 2021-08-06" "$url" || printf '000'
+}
+
+blob_delete_one() { blob_retry _blob_delete_one "$@"; }
+_blob_delete_one() {
+  # blob_delete_one ACCOUNT KEY CONTAINER ENCODED_BLOB_PATH ENDPOINT -> HTTP status of Delete Blob
+  # (202: deleted; 404: already gone; 429, 5xx and curl failures are tried again, blob_retry). The snapshots of the blob go with it.
+  local account="$1" key="$2" container="$3" path="$4" endpoint="$5" date auth
+  date="$(blob_date)"
+  auth="$(blob_shared_key_auth "$account" "$key" "$date" "/${container}/${path}" DELETE 'x-ms-delete-snapshots:include\n')"
+  printf 'Authorization: %s\n' "$auth" | curl -sS --max-time 120 -o /dev/null -w '%{http_code}' -X DELETE -H @- \
+    -H "x-ms-date: ${date}" -H "x-ms-delete-snapshots: include" -H "x-ms-version: 2021-08-06" \
+    "https://${account}.${endpoint}/${container}/${path}" || printf '000'
+}
+
+blob_delete_prefix() {
+  # blob_delete_prefix ACCOUNT KEY CONTAINER PREFIX [ENDPOINT]: delete every blob whose name starts with
+  # PREFIX (Azure Blob REST: List Blobs with prefix and NextMarker paging, 5000 names a page, then Delete
+  # Blob, 8 at a time), then list the prefix again: it must be empty. PREFIX is a folder, "ns/instance"
+  # (the trailing slash is added, so ns/orders never matches ns/orders-db); an empty prefix, "/", ".." or
+  # an empty segment is refused: that could empty the container. Sets BLOB_DELETED (blobs deleted) and
+  # BLOB_ERROR; returns 0 when nothing is left under PREFIX, 1 otherwise (BLOB_ERROR says why)
+  local account="$1" key="$2" container="$3" prefix="$4" endpoint="${5:-blob.core.windows.net}"
+  local page="$WORK/blob-page.xml" names="$WORK/blob-names" fails="$WORK/blob-failed" marker="" code n total=0 left name enc
+  BLOB_DELETED=0; BLOB_ERROR=""
+  prefix="${prefix#/}"; prefix="${prefix%/}"
+  if [[ -z "$prefix" || "/${prefix}/" == *"/../"* || "/${prefix}/" == *"//"* ]]; then
+    BLOB_ERROR="refused: the folder '${prefix}' would reach beyond the repository (an empty path, .. or an empty segment)"; return 1
+  fi
+  prefix="${prefix}/"
+  log "listing the blobs of ${account}/${container} under ${prefix}"
+  while :; do
+    code="$(blob_list_page "$account" "$key" "$container" "$prefix" "$marker" 5000 "$endpoint" "$page")"
+    case "$code" in
+      200) ;;
+      404) log "container ${container} not found (HTTP 404): nothing to delete"; return 0 ;;
+      *) BLOB_ERROR="List Blobs ${container}/${prefix} answered HTTP ${code}$([[ "$code" != 403 ]] || echo ' (the storage key was rejected)')"; return 1 ;;
+    esac
+    # the names of the page, "<name> TAB <name as it goes into a URL>", into $names; the NextMarker is printed
+    marker="$(python3 - "$page" "$names" <<'PY'
+import sys, urllib.parse
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+with open(sys.argv[2], "w") as out:
+    for b in root.iter("Blob"):
+        name = b.findtext("Name") or ""
+        if name:
+            out.write(name + "\t" + urllib.parse.quote(name, safe="/") + "\n")
+print(root.findtext("NextMarker") or "", end="")
+PY
+)" || { BLOB_ERROR="List Blobs ${container}/${prefix}: the answer is not valid XML"; return 1; }
+    n="$(wc -l < "$names")"
+    if [[ "$n" -gt 0 ]]; then
+      : > "$fails"
+      while IFS=$'\t' read -r name enc; do
+        # 8 deletes at a time; a failure is written to $fails (name and HTTP status)
+        while [[ "$(jobs -rp | wc -l)" -ge 8 ]]; do wait -n || true; done
+        ( c="$(blob_delete_one "$account" "$key" "$container" "$enc" "$endpoint")"
+          [[ "$c" == 202 || "$c" == 404 ]] || printf '%s\t%s\n' "$name" "$c" >> "$fails" ) </dev/null &
+      done < "$names"
+      wait || true
+      if [[ -s "$fails" ]]; then
+        BLOB_DELETED=$((BLOB_DELETED + n - $(wc -l < "$fails")))
+        BLOB_ERROR="Delete Blob failed for $(wc -l < "$fails") of ${n} blobs of a page, first ${container}/$(head -n1 "$fails" | cut -f1) answered HTTP $(head -n1 "$fails" | cut -f2)"
+        return 1
+      fi
+      BLOB_DELETED=$((BLOB_DELETED + n)); total=$((total + n))
+      log "deleted ${total} blobs under ${prefix} so far"
+    fi
+    [[ -n "$marker" ]] || break
+  done
+  # nothing may be left: list the prefix again
+  code="$(blob_list_page "$account" "$key" "$container" "$prefix" "" 1 "$endpoint" "$page")"
+  [[ "$code" == 200 ]] || { BLOB_ERROR="the check listing of ${container}/${prefix} answered HTTP ${code}"; return 1; }
+  left="$(python3 -c 'import sys, xml.etree.ElementTree as ET; print(len(list(ET.parse(sys.argv[1]).getroot().iter("Blob"))))' "$page" 2>/dev/null)" || left=""
+  # an answer that cannot be parsed leaves "left" empty, and an empty string is not zero: only a number counts
+  [[ "$left" =~ ^[0-9]+$ ]] || { BLOB_ERROR="the check listing of ${container}/${prefix} could not be read (the answer is not a blob list), so an empty prefix is not proven"; return 1; }
+  [[ "$left" -eq 0 ]] || { BLOB_ERROR="${left} blob(s) are still under ${container}/${prefix} after the delete"; return 1; }
+  return 0
 }
 
 # ----------------------------------------------------------------- run results
@@ -412,7 +537,13 @@ inventory_cluster() {
 }
 
 inventory_instances() {
-  run_data inventory | jq -r --arg c "$1" '.[] | select(.name == $c) | .instances[].name'
+  # inventory_instances CLUSTER [owners-first] -> the instances of the cluster in the run inventory.
+  # owners-first (the sync in tpg-day0 / tpg-create-instance only): the instances that own the Secrets of
+  # their namespace come first (Round 23, instance.sharedSecretsOwner), so a namespace shared by several
+  # instances has them before another instance there is synced. Without it the order is the inventory's
+  # (the upgrades and the pre-check keep it)
+  run_data inventory | jq -r --arg c "$1" --argjson o "$([[ "${2:-}" == owners-first ]] && echo true || echo false)" \
+    '.[] | select(.name == $c) | .instances | (if $o then sort_by(if .secretsOwner == false then 1 else 0 end) else . end) | .[].name'
 }
 
 # ----------------------------------------------------------------- Argo CD API
@@ -541,25 +672,26 @@ exposure_warning_rendered() {
 
 exposure_follow() {
   # exposure_follow INSTANCE TIMEOUT_SECONDS: after a sync, wait until the
-  # Services of pg-<instance> match the exposure of the live Postgres spec
+  # Services of the instance namespace match the exposure of the live Postgres spec
   # (design decision D64): as many LoadBalancer Services with an address as the
   # spec asks for (serviceType, and readOnlyServiceType when high availability
   # is on, plus the FerretDB Services of a PostgresFerretDocumentDB), and none
   # when all are ClusterIP. Sets EXPOSURE_DETAIL; returns 1
   # on timeout. (use_cluster first)
-  local i="$1" timeout="$2" start want have spec fspec
-  spec="$(tk -n "pg-$i" get postgres "$i" -o json 2>/dev/null || echo '{}')"
+  local i="$1" timeout="$2" start want have spec fspec ns
+  ns="$(instance_ns "$CLUSTER" "$i")" || { EXPOSURE_DETAIL="$FLEET_UNREADABLE_DETAIL"; return 1; }
+  spec="$(tk -n "$ns" get postgres "$i" -o json 2>/dev/null || echo '{}')"
   want="$(jq '[(.spec.serviceType == "LoadBalancer"),
                 ((.spec.readOnlyServiceType == "LoadBalancer") and (.spec.highAvailability.enabled == true))]
               | map(select(.)) | length' <<<"$spec")"
   # FerretDB Services (D71): ferretdb-rw-<instance>, and ferretdb-ro-<instance> with read-only proxies
-  fspec="$(tk -n "pg-$i" get postgresferretdocumentdb "$i" -o json 2>/dev/null || echo '{}')"
+  fspec="$(tk -n "$ns" get postgresferretdocumentdb "$i" -o json 2>/dev/null || echo '{}')"
   want=$(( want + $(jq '[(.spec.service.serviceType == "LoadBalancer"),
                 ((.spec.service.readOnlyServiceType == "LoadBalancer") and ((.spec.readOnly.replicas // 0) > 0))]
               | map(select(.)) | length' <<<"$fspec") ))
   start="$(date +%s)"
   while true; do
-    have="$(tk -n "pg-$i" get svc -o json 2>/dev/null | jq -r '[.items[] | select(.spec.type == "LoadBalancer")
+    have="$(tk -n "$ns" get svc -o json 2>/dev/null | jq -r '[.items[] | select(.spec.type == "LoadBalancer")
       | {n: .metadata.name, a: ((.status.loadBalancer.ingress // [])[0] | (.ip // .hostname // ""))}]')"
     if [[ "$(jq 'length' <<<"$have")" -eq "$want" ]] && jq -e 'all(.[]; .a != "")' <<<"$have" >/dev/null; then
       if [[ "$want" -eq 0 ]]; then EXPOSURE_DETAIL="ClusterIP only"
@@ -567,7 +699,7 @@ exposure_follow() {
       return 0
     fi
     if (( $(date +%s) - start >= timeout )); then
-      EXPOSURE_DETAIL="expected ${want} LoadBalancer Service(s) with an address in pg-${i}, found: $(jq -c '.' <<<"$have")"
+      EXPOSURE_DETAIL="expected ${want} LoadBalancer Service(s) with an address in ${ns}, found: $(jq -c '.' <<<"$have")"
       return 1
     fi
     log "${i}: waiting for the Services to follow the exposure (${want} load balancer(s) expected)"
@@ -576,26 +708,27 @@ exposure_follow() {
 }
 
 ferret_follow() {
-  # ferret_follow INSTANCE TIMEOUT_SECONDS: after a sync, when pg-<instance> has a
+  # ferret_follow INSTANCE TIMEOUT_SECONDS: after a sync, when the instance namespace has a
   # PostgresFerretDocumentDB (D71): the connection Secrets it names exist (the
   # operator creates them with the instance), then its Deployments
   # (app=ferretdb-rw-<instance>, and ferretdb-ro-<instance> with read-only
   # proxies) are available. Sets FERRET_REASON and FERRET_DETAIL ("" without
   # FerretDB); returns 1 on failure. (use_cluster first)
-  local i="$1" timeout="$2" f sec missing found start want ready sel
+  local i="$1" timeout="$2" f sec missing found start want ready sel ns
   FERRET_REASON=""; FERRET_DETAIL=""
-  f="$(tk -n "pg-$i" get postgresferretdocumentdb "$i" -o json 2>/dev/null)" || return 0
+  ns="$(instance_ns "$CLUSTER" "$i")" || { FERRET_REASON=FLEET_UNREADABLE; FERRET_DETAIL="$FLEET_UNREADABLE_DETAIL"; return 1; }
+  f="$(tk -n "$ns" get postgresferretdocumentdb "$i" -o json 2>/dev/null)" || return 0
   start="$(date +%s)"
   while true; do
     missing=""
     for sec in $(jq -r '.spec.postgres.connectionDetails | .readWrite.secretName, (.readOnly.secretName // empty)' <<<"$f"); do
-      tk -n "pg-$i" get secret "$sec" >/dev/null 2>&1 || missing="${missing:+${missing},}${sec}"
+      tk -n "$ns" get secret "$sec" >/dev/null 2>&1 || missing="${missing:+${missing},}${sec}"
     done
     [[ -n "$missing" ]] || break
     if (( $(date +%s) - start >= 120 )); then
-      found="$(tk -n "pg-$i" get secret -o name 2>/dev/null | sed 's#^secret/##' | grep -- '-db-secret$' | paste -sd, -)"
+      found="$(tk -n "$ns" get secret -o name 2>/dev/null | sed 's#^secret/##' | grep -- '-db-secret$' | paste -sd, -)"
       FERRET_REASON=FERRET_SECRET_MISSING
-      FERRET_DETAIL="${i}: connection Secret(s) ${missing} not found in pg-${i}; the db Secrets there: ${found:-none} (set ferretSecretName / ferretReadOnlySecretName)"
+      FERRET_DETAIL="${i}: connection Secret(s) ${missing} not found in ${ns}; the db Secrets there: ${found:-none} (set ferretSecretName / ferretReadOnlySecretName)"
       return 1
     fi
     sleep 10
@@ -603,7 +736,7 @@ ferret_follow() {
   want=1; [[ "$(jq -r '.spec.readOnly.replicas // 0' <<<"$f")" -gt 0 ]] && want=2
   sel="app in (ferretdb-rw-${i},ferretdb-ro-${i})"
   while true; do
-    ready="$(tk -n "pg-$i" get deployment -l "$sel" -o json 2>/dev/null \
+    ready="$(tk -n "$ns" get deployment -l "$sel" -o json 2>/dev/null \
       | jq '[.items[] | select((.status.availableReplicas // 0) >= (if .spec.replicas == null then 1 else .spec.replicas end))] | length')"
     if [[ "${ready:-0}" -ge "$want" ]]; then
       FERRET_DETAIL="FerretDB ready (${want} Deployment(s))"
@@ -611,7 +744,7 @@ ferret_follow() {
     fi
     if (( $(date +%s) - start >= timeout )); then
       FERRET_REASON=FERRET_NOT_READY
-      FERRET_DETAIL="${i}: ${ready:-0} of ${want} FerretDB Deployment(s) available; pods: $(tk -n "pg-$i" get pods -l "$sel" --no-headers 2>/dev/null \
+      FERRET_DETAIL="${i}: ${ready:-0} of ${want} FerretDB Deployment(s) available; pods: $(tk -n "$ns" get pods -l "$sel" --no-headers 2>/dev/null \
         | awk '{printf "%s%s=%s", (n++ ? ", " : ""), $1, $3}'); is the documentdb extension prepared (FERRET_EXTENSION_REQUIRED)?"
       return 1
     fi
@@ -733,6 +866,23 @@ _app_wait_idle() {
   done
 }
 
+: "${SYNC_OP_WAIT_SECONDS:=60}"        # _app_settle_op: how long a running operation may finish by itself
+: "${SYNC_TERMINATE_WAIT_SECONDS:=60}" # _app_settle_op: how long a terminated operation may take to end
+
+_app_settle_op() {
+  # _app_settle_op APP -> 0 when APP has no operation running or requested. A running operation is
+  # given SYNC_OP_WAIT_SECONDS to finish; then it is terminated (Argo CD API: DELETE
+  # /applications/APP/operation, what `argocd app terminate-op APP` calls) and given
+  # SYNC_TERMINATE_WAIT_SECONDS to end. An operation that times out in app_sync_wait keeps running in
+  # Argo CD: it would finish later and apply its objects over whatever was synced since. Returns 1
+  # when the operation is still there
+  local app="$1"
+  _app_wait_idle "$app" "$SYNC_OP_WAIT_SECONDS" && return 0
+  log "${app}: its operation is still running after ${SYNC_OP_WAIT_SECONDS}s; terminating it (argocd app terminate-op ${app})"
+  acd DELETE "/api/v1/applications/${app}/operation" >/dev/null 2>&1 || log "${app}: terminate request rejected (the operation may have just ended)"
+  _app_wait_idle "$app" "$SYNC_TERMINATE_WAIT_SECONDS"
+}
+
 _app_op_wait() {
   # _app_op_wait APP PREVIOUS_STARTED_AT DEADLINE -> 0 Succeeded, 1 Failed/Error
   # (message in SYNC_OP_MESSAGE), 2 timeout. Only an operation whose startedAt
@@ -772,7 +922,7 @@ _app_healthy() {
 app_sync_wait() {
   # app_sync_wait APP TIMEOUT_SECONDS [--revision SHA] [--revisions POSITION SHA]
   #               [--pods NAMESPACE SELECTOR] [--ready-fn FN] [--sync-options OPT,OPT]
-  #               [--prune] [--off-branch]
+  #               [--prune] [--off-branch] [--resources GROUP:KIND:[NAMESPACE/]NAME,...]
   # --revisions syncs one source of a multi-source Application at SHA (POSITION
   # counts from 1; the operator Applications read the fleet repository as source 2).
   # --off-branch: SHA is not on the fleet branch (a tpg-patch pull request branch,
@@ -783,7 +933,12 @@ app_sync_wait() {
   # mode=remove); objects annotated Prune=false (Postgres, backup location) stay.
   # --sync-options replaces the Application's sync options for this one operation
   # (Argo CD takes the options of the sync request instead of spec.syncPolicy).
-  local app="$1" timeout="$2" rev="" pns="" psel="" ready_fn="" sopts="" prune=false start deadline body out msg prev j rc
+  # --resources syncs only those objects (the sync request's resources list, the
+  # argocd app sync --resource GROUP:KIND:NAME format, a namespace before the name as
+  # NAMESPACE/NAME; the core group is empty): the operation's own result is the answer,
+  # and neither the health of the Application nor its Synced status is waited for - the
+  # caller waits for the objects it synced (ns_handover, day0-deploy.sh).
+  local app="$1" timeout="$2" rev="" pns="" psel="" ready_fn="" sopts="" res="" prune=false start deadline body out msg prev j rc
   local attempt=1 delay="$SYNC_RETRY_DELAY" remaining oos spos="" off=false
   shift 2
   while [[ $# -gt 0 ]]; do
@@ -795,17 +950,21 @@ app_sync_wait() {
       --sync-options) sopts="$2"; shift 2 ;;
       --prune) prune=true; shift ;;
       --off-branch) off=true; shift ;;
+      --resources) res="$2"; shift 2 ;;
       *) log "app_sync_wait: unknown option $1"; return 1 ;;
     esac
   done
   SYNC_FAIL_REASON=""; SYNC_FAIL_DETAIL=""
   start="$(date +%s)"; deadline=$((start + timeout))
   app_refresh "$app"
-  body="$(jq -cn --arg r "$rev" --arg sp "$spos" --arg o "$sopts" --argjson p "$prune" '{prune: $p,
+  body="$(jq -cn --arg r "$rev" --arg sp "$spos" --arg o "$sopts" --arg res "$res" --argjson p "$prune" '{prune: $p,
       retryStrategy: {limit: 2, backoff: {duration: "5s", factor: 2, maxDuration: "30s"}}}
     | if $r != "" and $sp != "" then .revisions = [$r] | .sourcePositions = [($sp | tonumber)]
       elif $r != "" then .revision = $r else . end
-    | if $o != "" then .syncOptions = {items: ($o | split(","))} else . end')"
+    | if $o != "" then .syncOptions = {items: ($o | split(","))} else . end
+    | if $res != "" then .resources = ($res | split(",") | map(split(":") as $p
+        | ($p[2] | if test("/") then split("/") else ["", .] end) as $n
+        | {group: $p[0], kind: $p[1], namespace: $n[0], name: $n[1]})) else . end')"
   while true; do
     if ! _app_wait_idle "$app" 300; then
       SYNC_FAIL_REASON=SYNC_BUSY
@@ -849,6 +1008,10 @@ app_sync_wait() {
     app_refresh "$app"
   done
 
+  if [[ -n "$res" ]]; then
+    log "${app}: the selected objects were synced (${res}); the Application as a whole is not waited for"
+    return 0
+  fi
   # Health: the pods of the Application every 5 seconds, or its health status
   remaining=$((deadline - $(date +%s))); [[ "$remaining" -ge 60 ]] || remaining=60
   if [[ -n "$pns" ]]; then
@@ -1353,12 +1516,19 @@ fleet_flush() {
 }
 
 # ----------------------------------------------------------------- Postgres helpers
-pg_state() { tk -n "pg-$1" get postgres "$1" -o jsonpath='{.status.currentState}' 2>/dev/null || true; }
+pg_state() {
+  # pg_state INSTANCE -> currentState of the Postgres object, empty when it cannot be read (also when the
+  # namespace of the instance cannot: instance_ns returns 1, nothing is guessed)
+  local ns
+  ns="$(instance_ns "$CLUSTER" "$1")" || return 0
+  tk -n "$ns" get postgres "$1" -o jsonpath='{.status.currentState}' 2>/dev/null || true
+}
 
 sts_ready() {
   # sts_ready INSTANCE -> 0 when readyReplicas equals spec.replicas
-  local j
-  j="$(tk -n "pg-$1" get statefulset "$1" -o json 2>/dev/null || echo '{}')"
+  local j ns
+  ns="$(instance_ns "$CLUSTER" "$1")" || return 1
+  j="$(tk -n "$ns" get statefulset "$1" -o json 2>/dev/null || echo '{}')"
   jq -e '(.spec.replicas // -1) == (.status.readyReplicas // -2)' <<<"$j" >/dev/null
 }
 
@@ -1375,8 +1545,10 @@ pg_wait_ready() {
   # pg_wait_ready INSTANCE TIMEOUT_SECONDS: print the instance pods every 5 seconds
   # until the Postgres object is Running and every pod is ready. Fails fast when a
   # pod cannot start (pods_watch). Sets POD_WATCH_REASON / POD_WATCH_DETAIL.
+  local ns
   _PG_WATCHED="$1"
-  pods_watch "pg-$1" "$2" --selector "postgres-instance=$1" --kubectl tk --label "Postgres $1" --done-fn _pg_ready
+  ns="$(instance_ns "$CLUSTER" "$1")" || { POD_WATCH_REASON=FLEET_UNREADABLE; POD_WATCH_DETAIL="$FLEET_UNREADABLE_DETAIL"; return 1; }
+  pods_watch "$ns" "$2" --selector "postgres-instance=$1" --kubectl tk --label "Postgres $1" --done-fn _pg_ready
 }
 
 operator_wait_ready() {
@@ -1403,14 +1575,279 @@ latest_cr() {
 major_of() { sed -E 's/^[^0-9]*([0-9]+).*/\1/' <<<"$1"; }
 
 # ----------------------------------------------------------------- instance operations
+# jq filter: an item (PostgresBackup, PostgresRestore, PostgresVersionUpgrade) that is an unfinished operation. One that
+# asks to be expired (spec.expire=true, Round 23) or sits in an expired phase is not: the operator may keep it
+OP_ACTIVE_JQ='select(((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed|Expired|Expiring)$") | not) and ((.spec.expire // false) != true))'
 busy_operations() {
-  # busy_operations INSTANCE -> kinds with an unfinished operation (empty when idle)
-  local ns="pg-$1" kind n
+  # busy_operations INSTANCE -> kinds with an unfinished operation (empty when idle). A PostgresBackup that
+  # asks to be expired (spec.expire=true, Round 23) or is in an expired phase (Expired, Expiring) is not an
+  # operation: the operator may keep such an object, and it must not block the later operations
+  # (OPERATION_IN_PROGRESS) for good
+  local ns kind n
+  ns="$(instance_ns "$CLUSTER" "$1")" || { printf 'unknown-namespace '; return 0; }   # busy until the namespace can be read
   for kind in postgresbackup postgresrestore postgresversionupgrade; do
     n="$(tk -n "$ns" get "$kind" -o json 2>/dev/null \
-      | jq -r '[.items[] | select((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed)$") | not)] | length')"
+      | jq -r "[.items[] | ${OP_ACTIVE_JQ}] | length")"
     [[ "${n:-0}" -eq 0 ]] || printf '%s ' "$kind"
   done
+}
+
+# ----------------------------------------------------------------- backup expiry and shared repositories (Round 23)
+# Expiring a backup (tpg-backup-expire, purgeBackups of the delete workflows) is the PostgresBackup field
+# spec.expire (CRD postgresbackups, default false: "Expire specifies if the backup should be expired from the
+# stanza"). The operator runs pgBackRest expire for the backup set; a full backup takes the differential and
+# incremental backups that depend on it along. A backup is identified by status.restoreLabel, the pgBackRest
+# label: 20260101-000000F (full), 20260101-000000F_20260102-000000D (differential), ..._20260103-000000I
+# (incremental). A differential depends on the full before it, an incremental on the backup before it, so the
+# dependents of a full are all backups up to the next full, those of a differential or an incremental are the
+# incrementals after it up to the next differential or full (backup_dependents).
+# LAB ITEM: how the operator reports the end of an expire (it may delete the PostgresBackup object or set a
+# condition) and what it does when pgBackRest declines (the last full backup, a set another set needs) is not
+# in the CRD; _backup_expire_state is the one place that reads it. Verify it on the lab cluster (a lab item of Round 23):
+#   - does the operator keep the object after an expire (phase Expired or Expiring) or delete it? A kept object
+#     with spec.expire=true is not an unfinished operation (busy_operations leaves it out)
+#   - does it write conditions with observedGeneration or lastTransitionTime? _backup_expire_state trusts a
+#     condition with observedGeneration only when it is at least metadata.generation; one without it only when its
+#     lastTransitionTime is not older than the patch (BE_SINCE, less 2 minutes for clock skew), or, with neither
+#     field, only when this run set spec.expire. An older Expired=False (a re-run where spec.expire is already
+#     true) is no answer, and without a fresh signal the step waits and times out like for any expire
+BACKUP_EXPIRE_OUTCOME=""; BACKUP_EXPIRE_DETAIL=""
+
+backup_list() {
+  # backup_list NAMESPACE INSTANCE -> the PostgresBackups of the instance as a JSON array, oldest first:
+  # [{name, label, kind (F, D, I or "" without a label), ts, phase, expire}]. Returns 1 when they cannot be read
+  # (use_cluster first)
+  local j
+  j="$(tk -n "$1" get postgresbackup -o json 2>/dev/null)" || return 1
+  jq -c --arg i "$2" '[.items[]? | select(.spec.sourceInstance.name == $i)
+      | (.status.restoreLabel // "") as $l
+      | {name: .metadata.name, label: $l, kind: ($l | if test("[FDI]$") then .[-1:] else "" end),
+         ts: ($l | split("_") | last | .[0:15]), phase: (.status.phase // ""), expire: (.spec.expire // false)}]
+      | sort_by(.ts, .name)' <<<"$j"
+}
+
+backup_dependents() {
+  # backup_dependents NAMESPACE NAME -> the backups that depend on PostgresBackup NAME, one per line, oldest
+  # first (derived from the restore labels, see above). Nothing for a backup without a label. Returns 1 when
+  # the backups cannot be read
+  local j
+  j="$(tk -n "$1" get postgresbackup -o json 2>/dev/null)" || return 1
+  jq -r --arg n "$2" '
+    def lbl: .status.restoreLabel // "";
+    def kind: (lbl | if test("[FDI]$") then .[-1:] else "" end);
+    def ts: (lbl | split("_") | last | .[0:15]);
+    [.items[]? | select(kind != "")] as $all
+    | ([$all[] | select(.metadata.name == $n)][0]) as $x
+    | if $x == null then empty else
+        ([$all[] | select(.spec.sourceInstance.name == $x.spec.sourceInstance.name)] | sort_by(ts, .metadata.name)) as $s
+        | ($s | map(.metadata.name) | index($n)) as $ix
+        | ($x | kind) as $k
+        | $s[$ix + 1:] as $after
+        | ($after | map(if $k == "F" then kind == "F" else kind != "I" end) | index(true)) as $stop
+        | ($after | if $stop == null then . else .[:$stop] end)[] | .metadata.name
+      end' <<<"$j"
+}
+
+_backup_expire_state() {
+  # _backup_expire_state < POSTGRESBACKUP_JSON -> "EXPIRED", "DECLINED <message>" or "PENDING": what the object
+  # says after spec.expire was set. A condition (or the phase) that names expire decides: true or an Expired
+  # phase is EXPIRED, false or a failed phase is DECLINED with the operator's message. Only conditions the
+  # operator wrote after this run's patch count: observedGeneration at least metadata.generation; without it,
+  # lastTransitionTime not older than BE_SINCE (the patch time less 2 minutes, empty when spec.expire was already
+  # true); with neither field, only when BE_SINCE is set. An Expired=False of an earlier generation, still on the
+  # object when spec.expire was already true, is not read as a refusal. LAB ITEM (see above)
+  jq -r --arg since "${BE_SINCE:-}" '
+    (.metadata.generation // 0) as $gen
+    | def fresh: if has("observedGeneration") then (.observedGeneration >= $gen)
+        elif $since == "" then false
+        elif (.lastTransitionTime // "") == "" then true
+        else (.lastTransitionTime >= $since) end;
+    def conds: [.status.conditions[]? | select(fresh) | select(((.type // "") + " " + (.reason // "")) | test("expire"; "i"))];
+    def msg: ([.status.conditions[]? | select(fresh) | select(.status == "False" or ((.reason // "") | test("fail|declin|error"; "i"))) | .message] | map(select(. != "")) | join("; "));
+    if ((.status.phase // "") | test("^expired$"; "i")) or (conds | any(.status == "True" and ((.reason // "") | test("fail|declin|error"; "i") | not))) then "EXPIRED"
+    elif (conds | any(.status == "False")) or ((.status.phase // "") | test("fail|declin"; "i")) then "DECLINED " + (msg | if . == "" then "pgBackRest did not expire the backup (no message on the object)" else . end)
+    else "PENDING" end'
+}
+
+_backup_expire_poll() {
+  # _backup_expire_poll NAMESPACE NAME: done-fn of the wait; sets BACKUP_EXPIRE_OUTCOME when the end is known
+  local j st
+  log_cmd "kubectl -n $1 get postgresbackup $2 --ignore-not-found -o json"
+  if ! j="$(tk -n "$1" get postgresbackup "$2" --ignore-not-found -o json 2>&1)"; then
+    log "  cannot read PostgresBackup $2: $(head -c 200 <<<"$j")"; return 1
+  fi
+  if [[ -z "$j" ]]; then
+    log "  PostgresBackup $2 is gone: the operator expired it"
+    BACKUP_EXPIRE_OUTCOME=EXPIRED; BACKUP_EXPIRE_DETAIL="expired (the PostgresBackup object was removed)"; return 0
+  fi
+  st="$(_backup_expire_state <<<"$j")"
+  log "  phase $(jq -r '.status.phase // "<none>"' <<<"$j"), expire state ${st%% *}"
+  case "$st" in
+    EXPIRED*) BACKUP_EXPIRE_OUTCOME=EXPIRED; BACKUP_EXPIRE_DETAIL="expired"; return 0 ;;
+    DECLINED*) BACKUP_EXPIRE_OUTCOME=DECLINED; BACKUP_EXPIRE_DETAIL="${st#DECLINED }"; return 0 ;;
+  esac
+  return 1
+}
+
+backup_expire() {
+  # backup_expire NAMESPACE NAME [TIMEOUT_SECONDS] (use_cluster first): set spec.expire=true on the PostgresBackup,
+  # then wait (logged polls, every 10 seconds) for the operator's answer. Returns, and sets BACKUP_EXPIRE_OUTCOME
+  # and BACKUP_EXPIRE_DETAIL:
+  #   0  EXPIRED   the backup was expired (the object is gone, or says so)
+  #   2  DECLINED  pgBackRest refused; the detail is the operator's message
+  #   3  TIMEOUT   no answer in time (the detail has the phase)
+  #   1  ERROR     the backup could not be read or patched; MISSING: there is no such PostgresBackup
+  local ns="$1" name="$2" timeout="${3:-600}" j
+  BACKUP_EXPIRE_OUTCOME=""; BACKUP_EXPIRE_DETAIL=""
+  if ! j="$(tk -n "$ns" get postgresbackup "$name" --ignore-not-found -o json 2>&1)"; then
+    BACKUP_EXPIRE_OUTCOME=ERROR; BACKUP_EXPIRE_DETAIL="PostgresBackup ${name} cannot be read: $(head -c 200 <<<"$j")"; return 1
+  fi
+  if [[ -z "$j" ]]; then BACKUP_EXPIRE_OUTCOME=MISSING; BACKUP_EXPIRE_DETAIL="no PostgresBackup ${name} in ${ns}"; return 1; fi
+  # BE_SINCE: which conditions count as this run's answer (_backup_expire_state); none by time on a re-run
+  if [[ "$(jq -r '.spec.expire // false' <<<"$j")" == true ]]; then BE_SINCE=""
+  else BE_SINCE="$(date -u -d '-2 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2M +%Y-%m-%dT%H:%M:%SZ)"; fi
+  export BE_SINCE
+  log_cmd "kubectl -n ${ns} patch postgresbackup ${name} --type merge -p '{\"spec\":{\"expire\":true}}'"
+  if ! j="$(tk -n "$ns" patch postgresbackup "$name" --type merge -p '{"spec":{"expire":true}}' 2>&1)"; then
+    BACKUP_EXPIRE_OUTCOME=ERROR; BACKUP_EXPIRE_DETAIL="spec.expire of ${name} cannot be set: $(head -c 300 <<<"$j")"; return 1
+  fi
+  if wait_logged "expire of PostgresBackup ${name}" $(( (timeout + 9) / 10 )) 10 _backup_expire_poll "$ns" "$name"; then
+    [[ "$BACKUP_EXPIRE_OUTCOME" == EXPIRED ]] && return 0
+    return 2
+  fi
+  j="$(tk -n "$ns" get postgresbackup "$name" --ignore-not-found -o json 2>/dev/null || true)"
+  [[ -n "$j" ]] || j='{}'
+  BACKUP_EXPIRE_OUTCOME=TIMEOUT
+  BACKUP_EXPIRE_DETAIL="no answer from the operator in ${timeout}s (phase $(jq -r '.status.phase // "none"' <<<"$j"))"
+  return 3
+}
+
+BE_EXPIRED=0; BE_DECLINED=(); BE_FAILED=(); BE_SKIPPED=0; BE_FAIL_OUTCOME=""
+backup_expire_all() {
+  # backup_expire_all NAMESPACE INSTANCE TIMEOUT_SECONDS (use_cluster first): expire every PostgresBackup of the
+  # instance that has a pgBackRest label, newest first, so a differential or incremental goes before the full it
+  # depends on and no expire cascades. Sets BE_EXPIRED (count), BE_DECLINED ("name: operator message", pgBackRest
+  # refused: reported, not a failure), BE_FAILED ("name: reason": no answer in time, an API error; BE_FAIL_OUTCOME
+  # says which: TIMEOUT or ERROR) and BE_SKIPPED
+  # (backups without a label: a failed backup has nothing in the repository). A backup that gets no answer (or an
+  # API error) stops the loop. Returns 0 when BE_FAILED is empty, 1 when the backups cannot be read or one failed
+  local list b name
+  BE_EXPIRED=0; BE_DECLINED=(); BE_FAILED=(); BE_SKIPPED=0; BE_FAIL_OUTCOME=""
+  list="$(backup_list "$1" "$2")" || { BE_FAILED+=("the PostgresBackups of ${2} cannot be read in ${1}"); BE_FAIL_OUTCOME=ERROR; return 1; }
+  BE_SKIPPED="$(jq '[.[] | select(.kind == "")] | length' <<<"$list")"
+  while read -r b; do
+    [[ -n "$b" ]] || continue
+    name="$(jq -r '.name' <<<"$b")"
+    backup_expire "$1" "$name" "$3" || true   # the outcome is BACKUP_EXPIRE_OUTCOME
+    case "$BACKUP_EXPIRE_OUTCOME" in
+      EXPIRED|MISSING) BE_EXPIRED=$((BE_EXPIRED + 1)) ;;   # gone by itself: the operator got there first
+      DECLINED) BE_DECLINED+=("${name}: ${BACKUP_EXPIRE_DETAIL}") ;;
+      *) BE_FAILED+=("${name}: ${BACKUP_EXPIRE_OUTCOME} ${BACKUP_EXPIRE_DETAIL}"); BE_FAIL_OUTCOME="$BACKUP_EXPIRE_OUTCOME"; break ;;   # no answer or an API error: stop, do not pile up expires
+    esac
+  done < <(jq -c 'map(select(.kind != "")) | reverse | .[]' <<<"$list")
+  [[ "${#BE_FAILED[@]}" -eq 0 ]]
+}
+
+# A repository (container, repoPath) of a PostgresBackupLocation may be used by more than one location: a
+# location of another instance with a pinned repoPath, the source location a restore re-creates in a target
+# namespace (Round 23), a second cluster. Its blobs are deleted only when no other location uses them.
+BL_CONTAINER=""; BL_PATH=""; BL_ENDPOINT=""; BL_SECRET=""
+location_repo() {
+  # location_repo NAMESPACE LOCATION (use_cluster first): the repository of a PostgresBackupLocation, in
+  # BL_CONTAINER, BL_PATH (repoPath), BL_ENDPOINT and BL_SECRET (the Secret with the storage account). Returns 1
+  # when the object does not exist or is not an Azure location
+  local j
+  BL_CONTAINER=""; BL_PATH=""; BL_ENDPOINT=""; BL_SECRET=""
+  j="$(tk -n "$1" get postgresbackuplocation "$2" --ignore-not-found -o json 2>/dev/null)" || return 1
+  [[ -n "$j" ]] || return 1
+  BL_CONTAINER="$(jq -r '.spec.storage.azure.container // empty' <<<"$j")"
+  [[ -n "$BL_CONTAINER" ]] || return 1
+  BL_PATH="$(jq -r '.spec.storage.azure.repoPath // "/"' <<<"$j")"
+  BL_ENDPOINT="$(jq -r '.spec.storage.azure.endpoint // "blob.core.windows.net"' <<<"$j")"
+  BL_SECRET="$(jq -r '.spec.storage.azure.secret.name // "backup-storage"' <<<"$j")"
+}
+
+repo_norm() { local p="/${1#/}"; p="${p%/}"; printf '%s' "${p:-/}"; }   # repoPath -> /a/b, "/" for the root
+repo_overlap() {  # repo_overlap PATH1 PATH2 -> 0 when they are the same folder or one is inside the other
+  local a b
+  a="$(repo_norm "$1")"; b="$(repo_norm "$2")"
+  [[ "$a" == "$b" || "$a" == / || "$b" == / || "$a" == "$b"/* || "$b" == "$a"/* ]]
+}
+
+REPO_SHARED_WITH=""
+_kubectl_no_such_resource() {
+  # _kubectl_no_such_resource ERROR_TEXT: 0 when kubectl's error says the API server has no such resource - a
+  # NotFound for the CRD, or "the server doesn't have a resource type" - and nothing else
+  [[ "$1" == *"(NotFound)"* || "$1" == *"the server doesn't have a resource type"* ]]
+}
+repo_shared() {
+  # repo_shared CLUSTER NAMESPACE LOCATION [CONTAINER REPOPATH ENDPOINT ACCOUNT]: 0 when the repository
+  # (storage account, container, repoPath - also a folder inside or around it) of the PostgresBackupLocation is
+  # used by another PostgresBackupLocation on ANY registered cluster, or when that cannot be ruled out (a
+  # cluster that cannot be scanned counts as sharing); 1 when none does. Fails closed: a cluster has no
+  # locations only when the API server says so (NotFound for the CRD, "the server doesn't have a resource
+  # type"); any other error of a lookup, a list jq cannot parse and an answer that is no list at all mean
+  # "not scanned" and the repository counts as shared. REPO_SHARED_WITH names them
+  # (cluster/namespace/location). The location itself (cluster, namespace, name) is not counted. Without
+  # CONTAINER.. the location is read (location_repo; ACCOUNT then is the account of the Secret
+  # in its namespace). Leaves the current cluster (use_cluster) as it was
+  local c="$1" ns="$2" loc="$3" cont="${4:-}" rp="${5:-}" ep="${6:-}" acct="${7:-}" saved="${CLUSTER:-}" clist cc rows parsed err errf ons oname ocont orp_ oep osec oacct rc=1
+  REPO_SHARED_WITH=""
+  if [[ -z "$cont" ]]; then
+    use_cluster "$c" || { REPO_SHARED_WITH="cluster ${c} cannot be used"; return 0; }
+    location_repo "$ns" "$loc" || { REPO_SHARED_WITH="the PostgresBackupLocation ${ns}/${loc} cannot be read"; CLUSTER="$saved"; return 0; }
+    cont="$BL_CONTAINER"; rp="$BL_PATH"; ep="$BL_ENDPOINT"
+    acct="$(_secret_account "$ns" "$BL_SECRET")"
+  fi
+  ep="${ep:-blob.core.windows.net}"
+  # the registry itself must be readable and list the cluster of the location: otherwise "no other location" proves nothing
+  if ! clist="$(registered_clusters 2>/dev/null)" || ! grep -Fqx -- "$c" <<<"$clist"; then
+    REPO_SHARED_WITH="the registered clusters cannot be listed (or ${c} is not among them): other locations were not scanned"
+    CLUSTER="$saved"; return 0
+  fi
+  for cc in $clist; do
+    if ! use_cluster "$cc" 2>/dev/null; then
+      REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (kubeconfig unavailable: not scanned)"; rc=0; continue
+    fi
+    # no CRD: only the answer of the API server proves "none here" (NotFound); a timeout, a refused or reset
+    # connection, a 401/403 or a 5xx does not, whatever /readyz says a moment later
+    mkdir -p "$WORK"; errf="$WORK/repo-shared.err"
+    if ! tk get crd postgresbackuplocations.sql.tanzu.vmware.com >/dev/null 2>"$errf"; then
+      err="$(cat "$errf" 2>/dev/null || true)"
+      if _kubectl_no_such_resource "$err"; then continue; fi
+      REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (CRD lookup failed: $(head -c 120 <<<"$err" | tr '\n' ' '): not scanned)"; rc=0; continue
+    fi
+    if ! rows="$(tk get postgresbackuplocation -A -o json 2>"$errf")"; then
+      err="$(cat "$errf" 2>/dev/null || true)"
+      if _kubectl_no_such_resource "$err"; then continue; fi
+      REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (locations not readable: $(head -c 120 <<<"$err" | tr '\n' ' '): not scanned)"; rc=0; continue
+    fi
+    # the rows, one location per line; jq must succeed and the answer must be a list (no rows from a parse failure)
+    if ! parsed="$(jq -r '(.items | if type == "array" then . else error("no items list") end)[]
+        | select(.spec.storage.azure.container != null)
+        | [.metadata.namespace, .metadata.name, .spec.storage.azure.container, (.spec.storage.azure.repoPath // "/"),
+           (.spec.storage.azure.endpoint // "blob.core.windows.net"), (.spec.storage.azure.secret.name // "backup-storage")] | @tsv' <<<"$rows" 2>/dev/null)"; then
+      REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }cluster ${cc} (locations not readable: the answer is no list of locations: not scanned)"; rc=0; continue
+    fi
+    while IFS=$'\t' read -r ons oname ocont orp_ oep osec; do
+      [[ -n "$ons" ]] || continue
+      [[ "$cc" == "$c" && "$ons" == "$ns" && "$oname" == "$loc" ]] && continue
+      [[ "$ocont" == "$cont" && "$oep" == "$ep" ]] || continue
+      repo_overlap "$orp_" "$rp" || continue
+      # the same container name behind another storage account is another repository
+      oacct="$(_secret_account "$ons" "$osec")"
+      [[ -z "$acct" || -z "$oacct" || "$acct" == "$oacct" ]] || continue
+      REPO_SHARED_WITH+="${REPO_SHARED_WITH:+, }${cc}/${ons}/${oname} (${orp_})"; rc=0
+    done <<<"$parsed"
+  done
+  CLUSTER="$saved"
+  return "$rc"
+}
+
+_secret_account() {
+  # _secret_account NAMESPACE SECRET -> the storage account name in the Secret (key accountName), or nothing
+  # when it cannot be read (the caller then does not tell accounts apart: shared is the safe answer)
+  tk -n "$1" get secret "$2" -o jsonpath='{.data.accountName}' 2>/dev/null | base64 -d 2>/dev/null || true
 }
 
 sync_instance_app() {
@@ -1418,8 +1855,9 @@ sync_instance_app() {
   # generate the Application when the instance is new, sync it (at REVISION,
   # default the fleet branch head) and watch the instance pods until it is
   # Healthy. Returns app_sync_wait's code, or 4 when the Application was not generated.
-  local app="tpg-$1-$2" inst="$2" timeout="$3" rev="${4:-}" i
+  local app="tpg-$1-$2" c="$1" inst="$2" timeout="$3" rev="${4:-}" i ins
   shift 3; [[ $# -gt 0 ]] && shift
+  ins="$(instance_ns "$c" "$inst")" || { SYNC_FAIL_REASON=FLEET_UNREADABLE; SYNC_FAIL_DETAIL="$FLEET_UNREADABLE_DETAIL"; return 4; }
   if ! app_exists "$app"; then
     appset_refresh tpg-instances
     for i in $(seq 1 40); do
@@ -1431,7 +1869,7 @@ sync_instance_app() {
   fi
   [[ -n "$rev" ]] || rev="$(fleet_head)"
   _PG_WATCHED="$inst"
-  app_sync_wait "$app" "$timeout" ${rev:+--revision "$rev"} --pods "pg-$inst" "postgres-instance=$inst" --ready-fn _pg_ready "$@"
+  app_sync_wait "$app" "$timeout" ${rev:+--revision "$rev"} --pods "$ins" "postgres-instance=$inst" --ready-fn _pg_ready "$@"
 }
 
 # ----------------------------------------------------------------- input parameters
@@ -1448,8 +1886,34 @@ norm_postgres_version() {
 }
 
 split_list() {
-  # split_list "a, b,,c" -> one trimmed item per line
+  # split_list "a, b,,c" -> one trimmed item per line. For INTERNAL values only: the
+  # comma-joined lists the steps pass to each other (the cluster selection, plan
+  # records, a clusterMap list joined by cmap_cval). A workflow INPUT is parsed by
+  # list_items below, which is strict.
   tr ',' '\n' <<<"$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true
+}
+
+# The list inputs of the workflows are strict (Round 23): bracketed even with one value,
+# [tpg-poc-01] or [a, b] (YAML flow) or ["a","b"] (JSON); only all (and auto for
+# components) stays bare. One parser, workflows/scripts/clustermap.py as_list, behind
+# these functions. A bad value prints the message (it names the input and shows the
+# syntax) on stderr and returns 1; an empty value is an unset input (no output, 0).
+#   list_items NAME VALUE [--bare WORD]... [--files] [--one]   one item per line
+#   list_csv   NAME VALUE ...                                  items joined with commas (the internal form)
+#   file_item  NAME VALUE                                      the one file of a single-file input: [./a.yaml]
+# --bare WORD: a value that is exactly WORD (all) is returned as that single item;
+# --files: the items are paths (repo: with whitespace gets its own message).
+list_items() { python3 "$TPG_LIB_DIR/clustermap.py" list "$@"; }
+list_csv() { list_items "$@" --csv; }
+file_item() { list_items "$1" "$2" --files --one; }
+list_flag() {
+  # list_flag NAME VALUE [OPTS] -> the list input as a JSON array, or "" (a JSON string) when the
+  # input is empty, the form the clusterMap rules take (--files --one: a single-file input as
+  # ["path"]). A bad value is recorded as INVALID_INPUT on result.git (LIST_FLAG_KEY) and
+  # returns 1: call it as  x="$(list_flag ...)" || exit 1
+  local out
+  out="$(list_items "$@" --json 2>&1)" || { record "${LIST_FLAG_KEY:-result.git}" FAILED INVALID_INPUT "$out"; return 1; }
+  if [[ "$out" == "[]" ]]; then printf '""'; else printf '%s' "$out"; fi
 }
 
 # ----------------------------------------------------------------- clusterMap
@@ -1511,11 +1975,11 @@ cmap_ival() {
 
 selected_instances() {
   # selected_instances REPO CLUSTER -> instances this run acts on, one per line:
-  # the clusterMap entries of the cluster, else the instances input (a list, or
+  # the clusterMap entries of the cluster, else the instances input (a bracketed list, or
   # all/empty for every instance declared for the cluster in clusters/fleet.yaml)
   if cmap_set; then cmap_instances "$2"; return; fi
   if [[ -z "${P_INSTANCES:-}" || "${P_INSTANCES}" == "all" ]]; then fleet_instances "$1" "$2"; return; fi
-  split_list "$P_INSTANCES"
+  list_items instances "$P_INSTANCES"
 }
 
 cmap_guard() {
@@ -1523,11 +1987,12 @@ cmap_guard() {
   # for the instance or the live instance runs that version (use_cluster first).
   # Otherwise prints the mismatch and returns 1: the caller records
   # SKIPPED_VERSION_MISMATCH and leaves the instance alone.
-  local want live
+  local want live ns
   cmap_set || return 0
   want="$(cmap_ival "$1" "$2" postgresVersion)"
   [[ -n "$want" ]] || return 0
-  live="$(tk -n "pg-$2" get postgres "$2" -o jsonpath='{.spec.postgresVersion.name}' 2>/dev/null || true)"
+  ns="$(instance_ns "$1" "$2")" || { printf 'the namespace of %s cannot be read, so the live version cannot be checked (FLEET_UNREADABLE)' "$2"; return 1; }
+  live="$(tk -n "$ns" get postgres "$2" -o jsonpath='{.spec.postgresVersion.name}' 2>/dev/null || true)"
   [[ "$live" == "$want" ]] && return 0
   printf 'clusterMap postgresVersion is %s, the live instance runs %s' "$want" "${live:-nothing}"
   return 1
@@ -1545,7 +2010,7 @@ cmap_guard() {
 # contents in the input patchFiles, {"<path>": "<base64>"} (scripts/submit fill it;
 # scripts/submit/pack-patch-files.sh -o PARAMETER_FILE packs every local path of a
 # parameter file for a plain argo submit). repo:<path> names a file of the fleet
-# branch (charts/tpg-instance/patches/ or overlays/, patches/operator/ or overlays/operator/),
+# branch (helm_artifacts/instance/tpg-instance/patches/ or overlays/, helm_artifacts/operator/patches/ or helm_artifacts/operator/overlays/),
 # which is copied.
 # The workflow stores the files in the fleet repository and records them per
 # target in clusters/fleet.yaml, one current file per kind and the one before it (the
@@ -1554,11 +2019,11 @@ cmap_guard() {
 #     current: patches/<instance>-postgres-<hash>.yaml   one document per Tanzu Postgres
 #     previous: {path, commit}                           kind the chart renders (D81)
 #   clusters.<c>.instances.<i>.patches.postgresValues:  chart values
-#     current: patches/<name>-<uid>.yaml               (relative to charts/tpg-instance)
+#     current: patches/<name>-<uid>.yaml               (relative to helm_artifacts/instance/tpg-instance)
 #   clusters.<c>.operator.patches.values:               operator chart values
-#     current: patches/operator/<name>-<uid>.yaml       (repository path)
+#     current: helm_artifacts/operator/patches/<name>-<uid>.yaml       (repository path)
 # Only current is applied. The operator Application reads a fixed file per
-# cluster, patches/operator/clusters/<c>.yaml, a copy of its current file, so a
+# cluster, helm_artifacts/operator/patches/clusters/<c>.yaml, a copy of its current file, so a
 # sync at the commit of a pull request branch sees the new file (the ApplicationSet
 # itself reads clusters/fleet.yaml on the fleet branch). The instance chart reads
 # clusters/fleet.yaml at the synced commit for the same reason.
@@ -1568,10 +2033,10 @@ OPERATOR_NS="tanzu-postgres-operator"
 # Sets the fleet.yaml key, the stored-file folders, the wording and the prefix of the codes.
 patch_group() {
   PATCH_GROUP="$1"
-  PATCH_INSTANCE_DIR="charts/tpg-instance/${1}"
-  PATCH_OPERATOR_DIR="${1}/operator"
-  PATCH_EFFECTIVE_DIR="${1}/operator/clusters"
-  if [[ "$1" == overlays ]]; then PATCH_NOUN=overlay; PATCH_CODE=OVERLAY; else PATCH_NOUN=patch; PATCH_CODE=PATCH; fi
+  PATCH_INSTANCE_DIR="helm_artifacts/instance/tpg-instance/${1}"
+  PATCH_OPERATOR_DIR="helm_artifacts/operator/${1}"
+  PATCH_EFFECTIVE_DIR="helm_artifacts/operator/${1}/clusters"
+  if [[ "$1" == overlays ]]; then PATCH_NOUN="overlay"; PATCH_CODE="OVERLAY"; else PATCH_NOUN="patch"; PATCH_CODE="PATCH"; fi
 }
 patch_group patches
 # the Tanzu Postgres kinds a postgres patch document may target, in the order the
@@ -1655,7 +2120,7 @@ patch_names() {
 patch_names_plan() {
   # patch_names_plan REPO KIND=PATH...: a stored name for every PATH that has none
   # yet in this run (one UID per file, unused in REPO), recorded as patch.names.
-  # KIND postgresValues: charts/tpg-instance/patches/; operator: patches/operator/
+  # KIND postgresValues: helm_artifacts/instance/tpg-instance/patches/; operator: helm_artifacts/operator/patches/
   local repo="$1" names a kind p n uid dir
   shift
   names="$(patch_names)"
@@ -1679,7 +2144,7 @@ patch_names_plan() {
 
 patch_store() {
   # patch_store REPO PATH KIND -> the path clusters/fleet.yaml records (chart-relative
-  # patches/<n> for postgresValues, patches/operator/<n> for operator); writes the
+  # patches/<n> for postgresValues, helm_artifacts/operator/patches/<n> for operator); writes the
   # file (patchFiles, or the repository for repo:) under its stored name, once per checkout
   local repo="$1" p dest
   p="$(patch_norm "$2")"
@@ -1687,7 +2152,7 @@ patch_store() {
   [[ -n "$dest" ]] || { log "patch_store: no stored name for ${p} (patch.names)"; return 1; }
   mkdir -p "$repo/${dest%/*}"
   [[ -f "$repo/$dest" ]] || patch_file_write "$p" "$repo/$dest" "$repo" || { log "patch_store: no contents for ${p}"; return 1; }
-  if [[ "$3" == operator ]]; then printf '%s' "$dest"; else printf '%s' "${dest#charts/tpg-instance/}"; fi
+  if [[ "$3" == operator ]]; then printf '%s' "$dest"; else printf '%s' "${dest#helm_artifacts/instance/tpg-instance/}"; fi
 }
 
 patch_docs_json() {  # patch_docs_json FILE -> the YAML documents of FILE as a JSON list (empty ones left out)
@@ -1713,8 +2178,8 @@ patch_combine() {
   tmp="$(mktemp -d)"
   cur="$(patch_ref "$repo/$FLEET_REL" "$c" "$i" postgres)" || cur=""
   docs='[]'
-  if [[ -n "$cur" && -f "$repo/charts/tpg-instance/$cur" ]]; then
-    docs="$(patch_docs_json "$repo/charts/tpg-instance/$cur" | patch_doc_keys)"
+  if [[ -n "$cur" && -f "$repo/helm_artifacts/instance/tpg-instance/$cur" ]]; then
+    docs="$(patch_docs_json "$repo/helm_artifacts/instance/tpg-instance/$cur" | patch_doc_keys)"
   fi
   if [[ -n "$clear" ]]; then
     docs="$(jq -c --arg k "$clear" '($k | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $ks
@@ -1731,20 +2196,20 @@ patch_combine() {
   docs="$(jq -c --argjson o "$PATCH_DOC_ORDER" 'sort_by(._key as $k | ($o | index($k)) as $x | if $x == null then 99 else $x end) | map(del(._key))' <<<"$docs")"
   if [[ "$(jq 'length' <<<"$docs")" -eq 0 ]]; then rm -rf "${tmp:?}"; printf ''; return 0; fi
   printf '%s' "$docs" | yq -p=json -o=yaml '.[] | split_doc' > "$tmp/out.yaml"
-  if [[ -n "$cur" && -f "$repo/charts/tpg-instance/$cur" ]] && cmp -s "$tmp/out.yaml" "$repo/charts/tpg-instance/$cur"; then
+  if [[ -n "$cur" && -f "$repo/helm_artifacts/instance/tpg-instance/$cur" ]] && cmp -s "$tmp/out.yaml" "$repo/helm_artifacts/instance/tpg-instance/$cur"; then
     rm -rf "${tmp:?}"; printf '%s' "$cur"; return 0
   fi
   h="$(sha256sum "$tmp/out.yaml" | cut -c1-12)"
   out=""
   for n in 5 6 7 8 12; do
     out="${PATCH_GROUP}/${i}-postgres-${h:0:$n}.yaml"
-    [[ -f "$repo/charts/tpg-instance/$out" ]] || break
-    cmp -s "$tmp/out.yaml" "$repo/charts/tpg-instance/$out" && break
+    [[ -f "$repo/helm_artifacts/instance/tpg-instance/$out" ]] || break
+    cmp -s "$tmp/out.yaml" "$repo/helm_artifacts/instance/tpg-instance/$out" && break
     out=""
   done
   [[ -n "$out" ]] || { log "patch_combine: no free name for ${i}"; rm -rf "${tmp:?}"; return 1; }
-  mkdir -p "$repo/charts/tpg-instance/${PATCH_GROUP}"
-  [[ -f "$repo/charts/tpg-instance/$out" ]] || cp "$tmp/out.yaml" "$repo/charts/tpg-instance/$out"
+  mkdir -p "$repo/helm_artifacts/instance/tpg-instance/${PATCH_GROUP}"
+  [[ -f "$repo/helm_artifacts/instance/tpg-instance/$out" ]] || cp "$tmp/out.yaml" "$repo/helm_artifacts/instance/tpg-instance/$out"
   rm -rf "${tmp:?}"
   printf '%s' "$out"
 }
@@ -1770,7 +2235,7 @@ patch_materialize() {
   [[ -n "$files" ]] || return 0
   while IFS=$'\t' read -r p b; do
     [[ -n "$p" ]] || continue
-    rel="${p#charts/tpg-instance/}"
+    rel="${p#helm_artifacts/instance/tpg-instance/}"
     grep -qF -- "$rel" "$repo/$FLEET_REL" 2>/dev/null || continue
     [[ -f "$repo/$p" ]] && continue
     mkdir -p "$repo/${p%/*}"
@@ -1785,7 +2250,8 @@ patch_current_paths() {  # patch_current_paths REPO -> every current patch file 
     | (
       ((($c.operator.patches.values.current // ""), ($c.operator.overlays.values.current // "")) | select(. != "")),
       (($c.instances // {}) | to_entries[] | .value as $e | (($e.patches // {}), ($e.overlays // {})) | to_entries[]
-        | (.value.current // "") | select(. != "") | "charts/tpg-instance/" + .)
+        | (.value.current // "") | select(. != "") | "helm_artifacts/instance/tpg-instance/" + .),
+      (($c.instances // {}) | to_entries[] | (.value.restorePatch.current // "") | select(. != "") | "helm_artifacts/instance/tpg-instance/" + .)
     )' "$1/$FLEET_REL" 2>/dev/null | sort -u
 }
 
@@ -1801,9 +2267,10 @@ patch_restore_referenced() {
   done < <(patch_current_paths "$repo")
 }
 
-patch_kind_path() {  # patch_kind_path CLUSTER INSTANCE KIND [GROUP] -> yq path of the kind node (postgres, postgresValues, operator)
+patch_kind_path() {  # patch_kind_path CLUSTER INSTANCE KIND [GROUP] -> yq path of the kind node (postgres, postgresValues, operator, restorePatch)
   local g="${4:-$PATCH_GROUP}"
   if [[ "$3" == operator ]]; then printf '.clusters["%s"].operator.%s.values' "$1" "$g"
+  elif [[ "$3" == restorePatch ]]; then printf '.clusters["%s"].instances["%s"].restorePatch' "$1" "$2"   # tpg-restore: no kind level, no group
   else printf '.clusters["%s"].instances["%s"].%s.%s' "$1" "$2" "$g" "$3"; fi
 }
 
@@ -1840,7 +2307,7 @@ patch_set_current() {
   old="$(patch_ref "$repo/$FLEET_REL" "$2" "$3" "$4")" || old=""
   [[ "$old" != "$5" ]] || return 0
   if [[ -n "$old" ]]; then
-    full="$old"; [[ "$4" == operator ]] || full="charts/tpg-instance/$old"
+    full="$old"; [[ "$4" == operator ]] || full="helm_artifacts/instance/tpg-instance/$old"
     commit="$(patch_commit_of "$repo" "$full")"
   fi
   OLD="$old" NEW="$5" SHA="$commit" yq -i "
@@ -1850,10 +2317,101 @@ patch_set_current() {
     | (select(strenv(OLD) != \"\") | ${path}.previous) = {\"path\": strenv(OLD), \"commit\": strenv(SHA)}" "$repo/$FLEET_REL"
 }
 
+# ---- restore-patch (Round 23, tpg-restore): the spec of a restored instance (the spec file of the pair, or the spec read
+# from the cluster after the restore), stored in the chart and recorded as clusters.<c>.instances.<i>.restorePatch
+# {current, previous: {path, commit}, mode: base | over, postgresPatch} (chart-relative paths, no kind level, no group),
+# with instance.restored: true in the same entry. The chart renders the Postgres of such an instance from the current
+# file (templates/_helpers.tpl tpg.restoredPostgres: mode base = the file is the base, mode over = the normal render
+# with the file over it). The file that falls out of the two-generation window is deleted (its commit stays in
+# previous.commit and in Git): the folder holds the recorded files only, which scripts/validate.sh checks.
+RESTORE_PATCH_DIR="helm_artifacts/instance/tpg-instance/restore-patch"
+restore_patch_store() {
+  # restore_patch_store REPO INSTANCE SPEC_JSON -> the chart-relative path restore-patch/<instance>-restore-<uid>.yaml
+  # (the stored-name scheme of patch_store); writes the file: one kind: Postgres document, the spec of the spec
+  # file as it is given to the PostgresRestore, no metadata. 1 when no unused name was found.
+  local repo="$1" i="$2" n uid
+  mkdir -p "$repo/$RESTORE_PATCH_DIR"
+  for _ in 1 2 3 4 5 6 7 8; do
+    uid="$(patch_uid)"; n="restore-patch/$(patch_stored_name "${i}-restore.yaml" "$uid")"
+    [[ -e "$repo/helm_artifacts/instance/tpg-instance/$n" ]] && continue
+    jq -n --argjson s "$3" '{apiVersion: "sql.tanzu.vmware.com/v1", kind: "Postgres", spec: $s}' \
+      | yq -p=json -o=yaml '.' > "$repo/helm_artifacts/instance/tpg-instance/$n" || return 1
+    printf '%s' "$n"; return 0
+  done
+  log "restore_patch_store: no unused name for ${i} after 8 tries"; return 1
+}
+restore_patch_previous() {  # restore_patch_previous REPO CLUSTER INSTANCE -> restorePatch.previous.path (chart-relative), empty when none
+  C="$2" I="$3" yq -r '.clusters[strenv(C)].instances[strenv(I)].restorePatch.previous.path // ""' "$1/$FLEET_REL" 2>/dev/null
+}
+restore_patch_set() {
+  # restore_patch_set REPO CLUSTER INSTANCE NEW: NEW (a path from restore_patch_store) becomes the current restore-patch;
+  # the former current becomes previous (patch_set_current) and the file that was previous is deleted
+  local repo="$1" gone
+  gone="$(restore_patch_previous "$repo" "$2" "$3")"
+  patch_set_current "$repo" "$2" "$3" restorePatch "$4" || return 1
+  if [[ -n "$gone" && "$gone" != "$(restore_patch_previous "$repo" "$2" "$3")" && "$gone" != "$4" ]]; then
+    rm -f "${repo:?}/helm_artifacts/instance/tpg-instance/${gone:?}"
+  fi
+}
+restore_seed_json() {
+  # restore_seed_json MODE SPEC_JSON -> {"set": {entry instance keys}, "del": [keys to remove first]}: the fleet-equivalent fields
+  # of the restore-patch's spec as instance: keys of the entry (templates/_helpers.tpl tpg.restoredEntrySpec reads them back):
+  #   postgresVersion, storageClassName, storageSize, walStorageSize, resources  <- the same spec fields
+  #   highAvailability {enabled, readReplicas}   <- spec.highAvailability (absent: false, 0: a single node, explicit in the entry)
+  #   exposure, readOnlyExposure                 <- spec.serviceType / readOnlyServiceType (LoadBalancer + the internal
+  #                                                 annotation "true": internalLoadBalancer; LoadBalancer: loadBalancer;
+  #                                                 else clusterIP)
+  #   serviceAnnotations, readOnlyServiceAnnotations  <- the annotations of the spec verbatim (when not empty)
+  # mode base: the spec is the whole truth, so every key above that the spec lacks is removed from the entry (no value of the
+  # source's entry or of an earlier deployment survives); mode over: only the keys the spec sets are written. A serviceType
+  # the exposure keys cannot say (NodePort) leaves all service keys out (the chart then compares none of them).
+  jq -c --arg mode "$1" '
+    def exp($t; $a): if $t == "LoadBalancer" then (if (($a // {})["service.beta.kubernetes.io/azure-load-balancer-internal"] // "") == "true" then "internalLoadBalancer" else "loadBalancer" end) else "clusterIP" end;
+    . as $s
+    | ($mode == "base") as $base
+    | ["postgresVersion", "storageClassName", "storageSize", "walStorageSize", "resources", "highAvailability",
+       "exposure", "readOnlyExposure", "serviceAnnotations", "readOnlyServiceAnnotations"] as $keys
+    | (((($s.serviceType // "ClusterIP") | IN("ClusterIP", "LoadBalancer")) and (($s.readOnlyServiceType // "ClusterIP") | IN("ClusterIP", "LoadBalancer")))) as $svc_ok
+    | ($s.serviceType != null or $s.readOnlyServiceType != null or $s.serviceAnnotations != null or $s.readOnlyServiceAnnotations != null) as $svc_set
+    | ( {}
+        + (if ($s.postgresVersion.name // "") != "" then {postgresVersion: $s.postgresVersion.name} else {} end)
+        + (["storageClassName", "storageSize", "walStorageSize"] | map(select($s[.] != null) | {(.): $s[.]}) | add // {})
+        + (if ($s.resources // {}) != {} then {resources: $s.resources} else {} end)
+        + (if $base or $s.highAvailability != null
+             then {highAvailability: {enabled: ($s.highAvailability.enabled // false), readReplicas: ($s.highAvailability.readReplicas // 0)}} else {} end)
+        + (if $svc_ok and ($base or $svc_set)
+             then {exposure: exp($s.serviceType; $s.serviceAnnotations), readOnlyExposure: exp($s.readOnlyServiceType; $s.readOnlyServiceAnnotations)}
+               + (if ($s.serviceAnnotations // {}) != {} then {serviceAnnotations: $s.serviceAnnotations} else {} end)
+               + (if ($s.readOnlyServiceAnnotations // {}) != {} then {readOnlyServiceAnnotations: $s.readOnlyServiceAnnotations} else {} end)
+             else {} end) ) as $set
+    | {set: $set, del: ((if $base then $keys else [] end) + ($set | keys) | unique)}' <<<"$2"
+}
+restore_patch_record() {
+  # restore_patch_record REPO CLUSTER INSTANCE NEW MODE SPEC_JSON: NEW (a path from restore_patch_store) becomes the current
+  # restore-patch of the entry in clusters/fleet.yaml (the former current becomes previous), with restorePatch.mode MODE
+  # (base | over), instance.restored: true and the fleet-equivalent fields of the spec written into instance: (restore_seed_json).
+  # For mode over restorePatch.postgresPatch records the postgres patch file that is current now: the chart applies that one under
+  # the restore-patch and a file tpg-patch sets later over it. A re-restore replaces all of it.
+  local repo="$1" c="$2" i="$3" new="$4" mode="$5" spec="$6" f="$1/$FLEET_REL" pp="" seed
+  restore_patch_set "$repo" "$c" "$i" "$new" || return 1
+  [[ "$mode" != over ]] || pp="$(patch_ref "$f" "$c" "$i" postgres patches 2>/dev/null || true)"
+  seed="$(restore_seed_json "$mode" "$spec")" || return 1
+  # shellcheck disable=SC2016  # yq variables, not shell
+  C="$c" I="$i" M="$mode" PP="$pp" S="$seed" yq -i '
+    (strenv(S) | from_json) as $s
+    | .clusters[strenv(C)].instances[strenv(I)].instance =
+        (((.clusters[strenv(C)].instances[strenv(I)].instance // {}) | with_entries(select(.key as $k | ($s.del | contains([$k])) | not))) * $s.set)
+    | .clusters[strenv(C)].instances[strenv(I)].instance.restored = true
+    | .clusters[strenv(C)].instances[strenv(I)].restorePatch.mode = strenv(M)
+    | (select(strenv(PP) != "") | .clusters[strenv(C)].instances[strenv(I)].restorePatch.postgresPatch) = strenv(PP)
+    | (select(strenv(PP) == "") | .clusters[strenv(C)].instances[strenv(I)].restorePatch) |= del(.postgresPatch)' "$f" || return 1
+  fleet_yaml_style "$f"   # the merge above wrote JSON-style maps: block YAML as the rest of the file
+}
+
 operator_effective_rel() { printf '%s/%s.yaml' "$PATCH_EFFECTIVE_DIR" "$1"; }   # CLUSTER (the current patch_group)
 
 operator_effective_write() {
-  # operator_effective_write REPO CLUSTER: <group>/operator/clusters/<c>.yaml follows
+  # operator_effective_write REPO CLUSTER: helm_artifacts/operator/<group>/clusters/<c>.yaml follows
   # the cluster's current operator values file (removed when there is none)
   local repo="$1" cur eff
   cur="$(patch_ref "$repo/$FLEET_REL" "$2" "" operator)" || cur=""
@@ -1987,14 +2545,27 @@ patch_values_errors() {
   # patch_values_errors FILE NAME CLUSTER INSTANCE MODE -> one error per line: the
   # chart values a postgresValues patch may not set
   local f="$1" n="$2" k
-  for k in .instance.name .instance.postgresVersion .instance.highAvailability .instance.serviceType .instance.disableInitialBackup .backup.repoPath .cluster .patches .overlays .valuesOverride; do
+  for k in .instance.name .instance.postgresVersion .instance.highAvailability .instance.serviceType .instance.disableInitialBackup .backup.repoPath .cluster .patches .overlays .restorePatch .instance.restored .valuesOverride; do
     yq -e "${k} == null" "$f" >/dev/null 2>&1 || echo "${n}: ${k#.} cannot be set by a values ${PATCH_NOUN}$( [[ "$5" == create ]] && printf ' (it comes from the inputs; instance.serviceType is replaced by instance.exposure)')"
   done
   for k in .backup.enableSSL .backup.caBundle; do
     yq -e "${k} == null" "$f" >/dev/null 2>&1 || echo "${n}: ${k#.} comes from the inputs backupEnableSSL, backupCaBundleFile and backupCaBundleVaultSecret"
   done
+  # Round 23: the namespace is immutable and the owner of the shared Secrets one per namespace; the workflows own both
+  for k in .instance.namespace .instance.sharedSecretsOwner; do
+    yq -e "${k} == null" "$f" >/dev/null 2>&1 || echo "${n}: ${k#.} cannot be set by a values ${PATCH_NOUN}: the namespace is the clusterMap key namespace of tpg-day0 and tpg-create-instance (immutable), and the workflows move the owner of the shared Secrets"
+  done
   [[ "$5" == running ]] || return 0
   yq -e '.instance.storageClassName == null' "$f" >/dev/null 2>&1 || echo "${n}: instance.storageClassName cannot change on a running instance"
+  # Round 23: a restored instance (tpg-restore, instance.restored) has its Postgres rendered from its restore-patch; a values patch
+  # that sets an instance: key which reaches the Postgres object (templates/postgres.yaml, tpg.services: the sizes, resources and the
+  # Service fields) is refused. Keys that do not reach it (backup, network, ferret, ...) stay allowed
+  if [[ "$(fleet_instance_value "$REPO" "$3" "$4" '.instance.restored' false)" == true ]]; then
+    for k in .instance.storageSize .instance.walStorageSize .instance.resources .instance.exposure .instance.readOnlyExposure .instance.serviceAnnotations .instance.readOnlyServiceAnnotations .instance.allowedSourceRanges .instance.internalLoadBalancerSubnet; do
+      yq -e "${k} == null" "$f" >/dev/null 2>&1 \
+        || echo "${n}: RESTORED_VALUES_PATCH: ${k#.} cannot be set by a values ${PATCH_NOUN} on ${4}: it was restored by tpg-restore and its Postgres is rendered from its restore-patch; change it with tpg-scale-instance (highAvailability), tpg-upgrade component=postgres (postgresVersion) or a postgres patch file (storageSize, resources, the Service fields, ...)"
+    done
+  fi
   # tpg-instances ignores these PostgresBackupLocation fields (ignoreDifferences with
   # RespectIgnoreDifferences), so a sync would never apply them to a running instance
   for k in .backup.additionalParameters .backup.forcePathStyle; do
@@ -2064,6 +2635,437 @@ instance_values() {
     * $i * {"instance": {"name": strenv(I)}}' "$1/$FLEET_REL"
 }
 
+# ----------------------------------------------------------------- instance namespace (Round 23)
+# The namespace of an instance is instance.namespace of its entry in clusters/fleet.yaml
+# (tpg-day0 and tpg-create-instance, clusterMap key namespace; immutable), pg-<instance>
+# when the entry has none. Every workflow reads it here; none derives pg-<instance> itself.
+# Instances may share a namespace: one of them owns the Secrets the chart names the same in
+# every instance (instance.sharedSecretsOwner, see fleet_ns_owners).
+instance_ns_repo_local() {
+  # instance_ns_repo_local -> a checkout of the fleet repository the step already has
+  # (INSTANCE_NS_REPO, FLEET_CLONE, REPO, $WORK/repo, or the one instance_ns_repo made)
+  local r
+  for r in "${INSTANCE_NS_REPO:-}" "${FLEET_CLONE:-}" "${REPO:-}" "$WORK/repo" "$WORK/ns-repo"; do
+    [[ -n "$r" && -f "$r/$FLEET_REL" ]] && { printf '%s' "$r"; return 0; }
+  done
+  return 1
+}
+
+instance_ns_repo() {
+  # instance_ns_repo -> instance_ns_repo_local, else a clone made for reading the namespaces
+  # ($WORK/ns-repo). Prints nothing (returns 1) when the repository cannot be had
+  instance_ns_repo_local && return 0
+  git_clone "$WORK/ns-repo" >/dev/null 2>&1 && [[ -f "$WORK/ns-repo/$FLEET_REL" ]] && { printf '%s' "$WORK/ns-repo"; return 0; }
+  return 1
+}
+
+instance_ns_in() {
+  # instance_ns_in REPO CLUSTER INSTANCE -> the namespace of the instance in that checkout of the
+  # fleet repository: instance.namespace of its entry (through instance_effective), else
+  # pg-<instance>. The one place that knows the default
+  instance_effective "$1" "$2" "$3" '.instance.namespace' "pg-$3"
+}
+
+FLEET_UNREADABLE_DETAIL="the fleet repository could not be read for the namespace of an instance: this step has no checkout of it, the instance is not in the run inventory and a clone failed (Vault, GitHub)"
+
+instance_ns_override() {
+  # instance_ns_override CLUSTER INSTANCE NAMESPACE: from here on, in this shell and in every script it
+  # starts, instance_ns CLUSTER INSTANCE is NAMESPACE (INSTANCE_NS_OVERRIDE, exported, "<cluster>/<instance>=<ns>"
+  # words). A workflow that resolved the namespace of an instance by other means than its entry (the audit
+  # copy of a deleted entry, the live Postgres: gone_instance_ns) sets it once, so every helper it calls
+  # (busy_operations, pg_state, backup-instance.sh) works in that namespace and none falls back to the
+  # pg-<instance> of a checkout that has no entry. The last override of an instance wins
+  export INSTANCE_NS_OVERRIDE="${INSTANCE_NS_OVERRIDE:+${INSTANCE_NS_OVERRIDE} }${1}/${2}=${3}"
+}
+
+instance_ns() {
+  # instance_ns CLUSTER INSTANCE -> the namespace of the instance: the one set with instance_ns_override;
+  # else instance.namespace of its entry in clusters/fleet.yaml (instance_ns_in) in a checkout the step
+  # already has; else the namespace the run inventory recorded (discover.sh); else a clone is made and read.
+  # pg-<instance> only when a checkout of the fleet repository was actually read and the instance
+  # has no namespace there. When nothing could be read (no checkout, the instance not in the
+  # inventory, the clone failed) it prints nothing and returns 1, and the caller stops with
+  # FLEET_UNREADABLE (FLEET_UNREADABLE_DETAIL): a guessed pg-<instance> would act on another namespace
+  local c="$1" i="$2" repo ns="" kv
+  for kv in ${INSTANCE_NS_OVERRIDE:-}; do
+    [[ "${kv%%=*}" == "${c}/${i}" ]] && ns="${kv#*=}"
+  done
+  if [[ -n "$ns" ]]; then
+    printf '%s' "$ns"
+    return 0
+  fi
+  if repo="$(instance_ns_repo_local)"; then
+    instance_ns_in "$repo" "$c" "$i"
+    return 0
+  fi
+  ns="$(run_data inventory 2>/dev/null | jq -r --arg c "$c" --arg i "$i" \
+    '.[]? | select(.name == $c) | .instances[]? | select(.name == $i) | .namespace // empty' 2>/dev/null | head -n1 || true)"
+  if [[ -n "$ns" ]]; then
+    printf '%s' "$ns"
+    return 0
+  fi
+  if repo="$(instance_ns_repo)"; then
+    instance_ns_in "$repo" "$c" "$i"
+    return 0
+  fi
+  log "namespace of ${c}/${i}: ${FLEET_UNREADABLE_DETAIL}"
+  return 1
+}
+
+instance_ns_known() {
+  # instance_ns_known REPO CLUSTER INSTANCE -> the namespace an instance is expected in: its entry
+  # in clusters/fleet.yaml, else the audit copy of a deleted entry (clusters/deleted), else
+  # pg-<instance>: the expectation for an instance nothing records (REPO was read and has neither an
+  # entry nor a copy). A live Postgres of that name elsewhere is not found by this; the callers
+  # compare it with where the Postgres actually is (delete-apps: POSTGRES_SKIPPED, gone_instance_ns)
+  local copy ns
+  if fleet_has_instance "$1" "$2" "$3"; then
+    instance_ns_in "$1" "$2" "$3"
+  elif copy="$(deleted_copy "$1" "$2" "$3")"; then
+    ns="$(yq -r '.instance.namespace // ""' "$copy")"
+    printf '%s' "${ns:-pg-$3}"
+  else
+    printf 'pg-%s' "$3"
+  fi
+}
+
+instance_ns_source() {
+  # instance_ns_source REPO CLUSTER INSTANCE -> where instance_ns_known takes the namespace from: "entry"
+  # (clusters/fleet.yaml), "copy" (the audit copy of a deleted entry) or "default" (nothing records it)
+  if fleet_has_instance "$1" "$2" "$3"; then printf entry
+  elif deleted_copy "$1" "$2" "$3" >/dev/null; then printf copy
+  else printf default
+  fi
+}
+
+deleted_copy() {
+  # deleted_copy REPO CLUSTER INSTANCE -> the newest audit copy of the deleted entry of INSTANCE:
+  # clusters/deleted/<cluster>/<instance>-<UTC yyyymmddHHMM>.yaml (delete-instance.sh writes that name).
+  # Exactly that name - the instance, a dash, twelve digits: a prefix glob "orders-*.yaml" would take
+  # the copy of "orders-db" for "orders" and a re-run would use its namespace. Returns 1 without a copy
+  local f b best=""
+  for f in "$1/clusters/deleted/$2/"*.yaml; do
+    [[ -f "$f" ]] || continue
+    b="${f##*/}"
+    [[ "$b" == "$3"-* && "${b#"$3"-}" =~ ^[0-9]{12}\.yaml$ ]] || continue
+    if [[ -z "$best" || "$f" > "$best" ]]; then best="$f"; fi
+  done
+  [[ -n "$best" ]] || return 1
+  printf '%s' "$best"
+}
+
+deleted_backup_repo() {
+  # deleted_backup_repo REPO CLUSTER INSTANCE -> 0 when the newest audit copy of the deleted entry of INSTANCE
+  # (deleted_copy) records where its backups are (deleted.backupLocation.container, written by delete-instance.sh):
+  # a re-run with purgeBackups=true can find the repository after the Postgres, the entry and the location
+  # object are gone. 1 without a copy or without that record
+  local copy
+  copy="$(deleted_copy "$@")" || return 1
+  [[ -n "$(yq -r '.deleted.backupLocation.container // ""' "$copy")" ]]
+}
+
+live_postgres_namespaces() {
+  # live_postgres_namespaces INSTANCE -> the namespaces that have a Postgres named INSTANCE
+  # (use_cluster first), one per line
+  tk get postgres -A -o json 2>/dev/null | jq -r --arg i "$1" '.items[]? | select(.metadata.name == $i) | .metadata.namespace' 2>/dev/null | sort -u || true
+}
+
+GONE_NS=""; GONE_REASON=""; GONE_DETAIL=""
+gone_instance_ns() {
+  # gone_instance_ns REPO CLUSTER INSTANCE (use_cluster first): the namespace of an instance whose
+  # entry is no longer in clusters/fleet.yaml (a re-run of tpg-delete-instance, tpg-delete-apps).
+  # Sets GONE_NS. The audit copy (deleted_copy) says where it was; the live Postgres lookup checks it:
+  #   - a Postgres of that name lives in another namespace than the copy says: refused (NAMESPACE_MISMATCH)
+  #   - no copy: the one namespace that has a Postgres of that name; two or more is NAMESPACE_AMBIGUOUS
+  #     (nothing is guessed); none at all: pg-<instance>, nothing exists there to act on
+  # Returns 1 with GONE_REASON and GONE_DETAIL on a refusal
+  local copy cns="" live n
+  GONE_NS=""; GONE_REASON=""; GONE_DETAIL=""
+  if copy="$(deleted_copy "$1" "$2" "$3")"; then
+    cns="$(yq -r '.instance.namespace // ""' "$copy")"; cns="${cns:-pg-$3}"
+  fi
+  live="$(live_postgres_namespaces "$3")"
+  n="$(printf '%s' "$live" | grep -c . || true)"
+  if [[ -n "$cns" ]]; then
+    if [[ "$n" -gt 0 ]] && ! grep -Fqx -- "$cns" <<<"$live"; then
+      GONE_REASON=NAMESPACE_MISMATCH
+      GONE_DETAIL="the audit copy ${copy#"$1/"} says ${3} was in namespace ${cns}, but the Postgres ${3} on ${2} is in $(paste -sd, - <<<"$live"); nothing is deleted - check which instance this is"
+      return 1
+    fi
+    GONE_NS="$cns"
+  elif [[ "$n" -eq 1 ]]; then
+    GONE_NS="$live"
+  elif [[ "$n" -gt 1 ]]; then
+    GONE_REASON=NAMESPACE_AMBIGUOUS
+    GONE_DETAIL="no entry and no audit copy for ${3}, and a Postgres named ${3} runs in $(paste -sd, - <<<"$live") on ${2}; delete it by hand, or restore the entry in clusters/fleet.yaml (with instance.namespace) first"
+    return 1
+  else
+    GONE_NS="pg-${3}"
+  fi
+}
+
+fleet_ns_table() {
+  # fleet_ns_table REPO CLUSTER -> one line per instance of the cluster in clusters/fleet.yaml, TAB
+  # separated: instance, namespace (instance.namespace, default pg-<instance>; "" counts as absent, as in
+  # instance_ns_in), owner (true unless instance.sharedSecretsOwner is false). One pass with one yq call. Both are keys of the entry that no
+  # patch file can set (patch_values_errors), so the entry, with the cluster level instance defaults
+  # instance_values merges in, is what instance_ns_in and instance_effective would return, instance by instance
+  # shellcheck disable=SC2016  # yq variables, not shell
+  C="$2" yq -r '.clusters[strenv(C)] as $c | ($c.instances // {}) | to_entries[]
+    | ((($c.instance // {}) * (.value.instance // {})) as $x
+       | [.key, (($x.namespace | select(. != "")) // ("pg-" + .key)), (((($x.sharedSecretsOwner | tostring) == "false") | not) | tostring)] | @tsv)' "$1/$FLEET_REL"
+}
+
+fleet_ns_members() {
+  # fleet_ns_members REPO CLUSTER NAMESPACE -> the instances of clusters/fleet.yaml whose
+  # namespace is NAMESPACE, one per line
+  fleet_ns_table "$1" "$2" | awk -F'\t' -v ns="$3" '$2 == ns { print $1 }'
+}
+
+fleet_ns_owners() {
+  # fleet_ns_owners REPO CLUSTER NAMESPACE -> the instances of the namespace that render the
+  # shared Secrets (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage):
+  # instance.sharedSecretsOwner is not false (the default is true, so an entry written before
+  # Round 23 owns its Secrets). Exactly one per namespace; the plan steps keep it so
+  fleet_ns_table "$1" "$2" | awk -F'\t' -v ns="$3" '$2 == ns && $3 == "true" { print $1 }'
+}
+
+ns_secrets_app() {
+  # ns_secrets_app NAMESPACE -> the Argo CD Application (tpg-<cluster>-<instance>) whose tracking
+  # annotation is on the VaultStaticSecret regsecret of the namespace, empty when there is none
+  # (use_cluster first). Argo CD owns an object through that one annotation, so the Application it
+  # names is the only owner of the shared Secrets at any moment
+  tk -n "$1" get vaultstaticsecret regsecret -o json 2>/dev/null \
+    | jq -r '(.metadata.annotations["argocd.argoproj.io/tracking-id"] // "") | split(":")[0]' 2>/dev/null || true
+}
+
+_secrets_app_is() { [[ "$(ns_secrets_app "$1")" == "$2" ]]; }   # NAMESPACE APP
+
+# The objects the instance that owns the shared Secrets renders (templates/vault-secrets.yaml), as the
+# GROUP:KIND:NAMESPACE/NAME list of app_sync_wait --resources
+shared_secrets_resources() {
+  printf ':ServiceAccount:%s/tpg-vso,secrets.hashicorp.com:VaultStaticSecret:%s/regsecret,secrets.hashicorp.com:VaultStaticSecret:%s/backup-storage' "$1" "$1" "$1"
+}
+
+sync_shared_secrets() {
+  # sync_shared_secrets CLUSTER INSTANCE NAMESPACE TIMEOUT_SECONDS [REVISION]: sync only the shared
+  # objects (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage) of the Application of
+  # INSTANCE. Nothing else of the Application is touched or waited for: a declared instance that was never
+  # deployed gets no Postgres from this, and an Application that is degraded for other reasons does
+  # not block it. Returns app_sync_wait's code (SYNC_FAIL_REASON, SYNC_FAIL_DETAIL)
+  app_sync_wait "tpg-$1-$2" "$4" ${5:+--revision "$5"} --resources "$(shared_secrets_resources "$3")"
+}
+
+SHARED_DETAIL=""
+ensure_shared_secrets() {
+  # ensure_shared_secrets CLUSTER INSTANCE NAMESPACE TIMEOUT_SECONDS [REVISION] (use_cluster first): an
+  # instance that does not own the shared Secrets of its namespace (instance.sharedSecretsOwner false)
+  # does not render regsecret and backup-storage; its Postgres needs them (spec.imagePullSecret, the backup
+  # location). Returns 0 when both Secrets exist in the namespace. Otherwise the owner's shared objects are
+  # synced first (sync_shared_secrets: only those objects, the owner's Postgres is not touched) and the
+  # Secrets are waited for; returns 1 with SHARED_DETAIL (naming the owner) when there is no owner, its
+  # Application does not exist, the sync fails or Vault Secrets Operator does not create the Secrets
+  local c="$1" i="$2" ns="$3" timeout="$4" rev="${5:-}" repo owner sec
+  if tk -n "$ns" get secret regsecret >/dev/null 2>&1 && tk -n "$ns" get secret backup-storage >/dev/null 2>&1; then
+    return 0
+  fi
+  repo="$(instance_ns_repo_local)" || { SHARED_DETAIL="${i}: regsecret or backup-storage is missing in ${ns} and the fleet repository is not available to find the owner of the shared Secrets"; return 1; }
+  owner="$(fleet_ns_owners "$repo" "$c" "$ns" | grep -vFx -- "$i" | head -n1 || true)"
+  if [[ -z "$owner" ]]; then
+    SHARED_DETAIL="${i} does not own the shared Secrets of ${ns} (instance.sharedSecretsOwner false) and no other instance of the namespace does, so regsecret and backup-storage are missing in ${ns}; set instance.sharedSecretsOwner on one instance of ${ns} in clusters/fleet.yaml"
+    return 1
+  fi
+  log "${i}: regsecret or backup-storage is missing in ${ns}; syncing the shared objects of its owner ${owner} first"
+  if ! app_exists "tpg-${c}-${owner}"; then
+    SHARED_DETAIL="${i}: regsecret or backup-storage is missing in ${ns}, and tpg-${c}-${owner}, the instance that owns the shared Secrets there, has no Argo CD Application yet (tpg-day0 or tpg-create-instance for ${owner} first)"
+    return 1
+  fi
+  if ! sync_shared_secrets "$c" "$owner" "$ns" "$timeout" "$rev"; then
+    SHARED_DETAIL="${i}: the shared Secrets of ${ns} are missing and the sync of their owner ${owner} failed: ${SYNC_FAIL_REASON} ${SYNC_FAIL_DETAIL}"
+    return 1
+  fi
+  for sec in regsecret backup-storage; do
+    wait_logged "Secret ${ns}/${sec}" 30 10 secret_present "$ns" "$sec" \
+      || { SHARED_DETAIL="${i}: ${ns}/${sec} was not created from Vault after the shared objects of ${owner} were synced (VaultStaticSecret: $(vss_summary "$ns" "$sec"))"; return 1; }
+  done
+}
+
+_secrets_adopted() {
+  # _secrets_adopted NAMESPACE APP [tracking]: one poll (for wait_logged) of "the shared objects of the
+  # namespace are tracked by APP and the VaultStaticSecrets are healthy" - the same rule as the Argo CD
+  # health check of VaultStaticSecret (the Ready condition, else SecretSynced, is True). With "tracking"
+  # only the per-object tracking is checked (each of the three objects on its own, no health)
+  local ns="$1" app="$2" kind name json t
+  for kind in serviceaccount:tpg-vso vaultstaticsecret:regsecret vaultstaticsecret:backup-storage; do
+    name="${kind#*:}"; kind="${kind%%:*}"
+    log_cmd "kubectl -n ${ns} get ${kind} ${name}"
+    json="$(tk -n "$ns" get "$kind" "$name" -o json 2>/dev/null)" || { log "  ${kind}/${name} does not exist yet"; return 1; }
+    t="$(jq -r '(.metadata.annotations["argocd.argoproj.io/tracking-id"] // "") | split(":")[0]' <<<"$json")"
+    [[ "$t" == "$app" ]] || { log "  ${kind}/${name} is tracked by '${t:-nothing}', not by ${app}"; return 1; }
+    if [[ "$kind" == vaultstaticsecret && "${3:-}" != tracking ]] && ! jq -e '(.status.conditions // []) as $c
+        | (($c | map(select(.type == "Ready")) | first) // ($c | map(select(.type == "SecretSynced")) | first) // {}) | .status == "True"' <<<"$json" >/dev/null; then
+      log "  ${kind}/${name} is not synced from Vault yet: $(vss_summary "$ns" "$name")"
+      return 1
+    fi
+  done
+}
+
+_secrets_trackers() {
+  # _secrets_trackers NAMESPACE -> what tracks each shared object: "ServiceAccount/tpg-vso=<app>, ..." ("none" = absent)
+  local ns="$1" kind name out=""
+  for kind in serviceaccount:tpg-vso vaultstaticsecret:regsecret vaultstaticsecret:backup-storage; do
+    name="${kind#*:}"; kind="${kind%%:*}"
+    out+="${out:+, }${kind}/${name}=$(tk -n "$ns" get "$kind" "$name" -o json 2>/dev/null | jq -r '(.metadata.annotations["argocd.argoproj.io/tracking-id"] // "nothing") | split(":")[0]' 2>/dev/null || true)"
+    [[ "$out" != *"=" ]] || out+="none"
+  done
+  printf '%s' "$out"
+}
+
+_flag_get() {  # _flag_get REPO CLUSTER INSTANCE -> "true", "false" or "" (no key) for instance.sharedSecretsOwner
+  C="$2" I="$3" yq -r '.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner | select(. != null)' "$1/$FLEET_REL"
+}
+_flag_set() {  # _flag_set REPO CLUSTER INSTANCE VALUE: instance.sharedSecretsOwner = true | false; "" removes the key (the chart default is true)
+  if [[ -n "$4" ]]; then
+    C="$2" I="$3" V="$4" yq -i '.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner = (strenv(V) == "true")' "$1/$FLEET_REL"
+  else
+    C="$2" I="$3" yq -i 'del(.clusters[strenv(C)].instances[strenv(I)].instance.sharedSecretsOwner)' "$1/$FLEET_REL"
+  fi
+}
+
+_handover_revert() {
+  # _handover_revert REPO CLUSTER INSTANCE SUCCESSOR NAMESPACE INSTANCE_FLAG SUCCESSOR_FLAG WHY TIMEOUT REVISION:
+  # a hand-over failed after its flag commit was pushed. Without a revert Git would name SUCCESSOR the owner
+  # while the Application of INSTANCE still tracks the Secrets and no longer renders them: a later sync with
+  # prune of INSTANCE would delete them. Push the old flags back (INSTANCE owns them again), then make
+  # Argo CD agree, whatever state the failed sync left (a selective sync can apply some of the three objects
+  # and fail on another, and a sync that timed out keeps running and may finish later):
+  #   - the successor's operation is waited for (bounded) or terminated, so it cannot finish after the revert
+  #   - the shared objects of INSTANCE are synced again (idempotent: objects it already tracks are re-applied
+  #     unchanged), whatever the annotation of regsecret says
+  #   - each of ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage is checked to be
+  #     tracked by INSTANCE's Application (tracking only, not health); what is not is named in the report
+  # and report HANDOVER_FAILED.
+  local repo="$1" c="$2" i="$3" succ="$4" ns="$5" ip="$6" sp="$7" why="$8" timeout="$9" rev="${10:-}" ok=true
+  HANDOVER_REASON=HANDOVER_FAILED
+  _flag_set "$repo" "$c" "$i" "$ip"
+  _flag_set "$repo" "$c" "$succ" "$sp"
+  if git_commit_push "$repo" "revert the hand-over of the shared Secrets of ${c}/${ns} from ${i} to ${succ}" "$FLEET_REL"; then
+    HANDOVER_DETAIL="${why}; the owner flags were reverted in Git (${PUSHED_REVISION:0:12}), ${i} owns the shared Secrets of ${ns} again; ${i} was not deleted"
+    if ! _app_settle_op "tpg-${c}-${succ}"; then
+      ok=false
+      HANDOVER_DETAIL+="; the sync operation of tpg-${c}-${succ} is still running and could not be terminated (it may apply the shared objects later)"
+    fi
+    if ! sync_shared_secrets "$c" "$i" "$ns" "$timeout" "${PUSHED_REVISION:-$rev}"; then
+      ok=false
+      HANDOVER_DETAIL+="; the shared objects could not be synced back to tpg-${c}-${i} (${SYNC_FAIL_REASON})"
+    fi
+    if ! wait_logged "shared objects of ${ns} tracked by tpg-${c}-${i}" 6 10 _secrets_adopted "$ns" "tpg-${c}-${i}" tracking; then
+      ok=false
+      HANDOVER_DETAIL+="; NOT every shared object is tracked by tpg-${c}-${i} ($(_secrets_trackers "$ns")): sync tpg-${c}-${i} again (its shared objects) before anything prunes"
+    elif [[ "$ok" == true ]]; then
+      HANDOVER_DETAIL+="; ServiceAccount tpg-vso and VaultStaticSecrets regsecret and backup-storage are tracked by tpg-${c}-${i} again"
+    fi
+  elif [[ "${PUSH_MODE:-direct}" == "pr" && -n "${PR_NUMBER:-}" ]]; then
+    HANDOVER_DETAIL="${why}; the revert of the owner flags was NOT merged: it is pull request #${PR_NUMBER}${PR_URL:+ (${PR_URL})} - close it (a merge later would undo what the next run finishes); ${succ} is the owner in clusters/fleet.yaml but ${i} still tracks the Secrets - run tpg-delete-instance for ${i} again (it finishes the hand-over)"
+  else
+    HANDOVER_DETAIL="${why}; the revert of the owner flags was NOT pushed: ${succ} is the owner in clusters/fleet.yaml but ${i} still tracks the Secrets - run tpg-delete-instance for ${i} again (it finishes the hand-over)"
+  fi
+}
+
+ns_handover() {
+  # ns_handover REPO CLUSTER INSTANCE NAMESPACE TIMEOUT_SECONDS [STAYING] (use_cluster first):
+  # INSTANCE is about to leave a namespace that other fleet instances use. The shared Secrets
+  # (ServiceAccount tpg-vso, VaultStaticSecrets regsecret and backup-storage, and the Secrets that
+  # Vault Secrets Operator keeps for them) must stay, and exactly one Argo CD Application owns them at
+  # any moment (two Applications that render the same object fight over it). STAYING is the list of
+  # the instances (space separated) that are still in the namespace when the run is over: the
+  # successor is picked from them, never from an instance that leaves in the same run
+  # (tpg-delete-apps); without it every other member of the namespace may take over. The order:
+  #   0 check   the successor's Application exists (nothing is changed when it does not)
+  #   1 commit  instance.sharedSecretsOwner false on INSTANCE and removed (true) on the successor, one
+  #             commit; no Application syncs by itself (tpg-instances has no automated sync), so the
+  #             objects stay tracked by INSTANCE's Application
+  #   2 sync    only the shared objects of the successor's Application are synced at that commit,
+  #             without prune and without waiting for the rest of the Application: the chart takes the
+  #             owner flag from clusters/fleet.yaml at the synced revision (tpg.sharedSecretsOwnerValue), so
+  #             the successor renders them whatever the inline values of the ApplicationSet say yet, and
+  #             the apply moves the tracking annotation from INSTANCE's Application to the successor's
+  #             in one update (the owner changes atomically; the objects are never deleted, so the
+  #             Secrets the Postgres pods use stay)
+  #   3 check   the three objects are tracked by the successor's Application and the VaultStaticSecrets
+  #             are healthy (wait_logged)
+  # on a failure in 2 or 3 the flag commit is reverted (_handover_revert) and the hand-over reports
+  # HANDOVER_FAILED; only after a successful hand-over does the caller remove INSTANCE from
+  # clusters/fleet.yaml, which removes its Application (the Applications of tpg-instances have no
+  # resources finalizer, so deleting one leaves the objects; these are tracked by the successor by then).
+  # A namespace that has an owner already (INSTANCE is not the owner): when INSTANCE's Application
+  # still tracks the objects, steps 2 and 3 run for that owner (a hand-over that stopped half way).
+  # Sets HANDOVER_NOTE; returns 1 with HANDOVER_REASON and HANDOVER_DETAIL on failure.
+  local repo="$1" c="$2" i="$3" ns="$4" timeout="$5" stay="${6-}" o others cand owners other_owners succ rev="" app
+  local commit=false tracked=false ip="" sp="" why
+  HANDOVER_NOTE=""; HANDOVER_REASON=""; HANDOVER_DETAIL=""
+  others="$(fleet_ns_members "$repo" "$c" "$ns" | grep -vFx -- "$i" || true)"
+  [[ -n "$others" ]] || return 0
+  cand="$others"
+  if [[ $# -ge 6 ]]; then
+    cand="$(for o in $others; do [[ " ${stay} " == *" ${o} "* ]] && printf '%s\n' "$o"; done)"
+    [[ -n "$cand" ]] || { HANDOVER_NOTE="no other instance of ${ns} stays: the shared Secrets go with the namespace"; return 0; }
+  fi
+  owners="$(fleet_ns_owners "$repo" "$c" "$ns")"
+  other_owners="$(grep -vFx -- "$i" <<<"$owners" || true)"
+  if grep -Fqx -- "$i" <<<"$owners" || [[ -z "$other_owners" ]]; then
+    succ="$(grep -Fx -f <(printf '%s\n' "$other_owners") <<<"$cand" | head -n1 || true)"
+    [[ -n "$succ" ]] || succ="$(head -n1 <<<"$cand")"
+    commit=true
+  else
+    succ="$(head -n1 <<<"$other_owners")"
+  fi
+  app="tpg-${c}-${succ}"
+  _secrets_app_is "$ns" "tpg-${c}-${i}" && tracked=true
+  if [[ "$tracked" == true ]]; then
+    # step 0: before anything is pushed
+    appset_refresh tpg-instances
+    if ! wait_logged "Application ${app} exists" 4 15 app_exists "$app"; then
+      HANDOVER_REASON=HANDOVER_FAILED
+      HANDOVER_DETAIL="${app} does not exist, so it cannot take over the shared Secrets of ${ns} from ${i}; nothing was changed (is ${succ} synced by the ApplicationSet tpg-instances?)"
+      return 1
+    fi
+  fi
+  if [[ "$commit" == true ]]; then
+    ip="$(_flag_get "$repo" "$c" "$i")"; sp="$(_flag_get "$repo" "$c" "$succ")"
+    if fleet_has_instance "$repo" "$c" "$i"; then _flag_set "$repo" "$c" "$i" false; fi
+    _flag_set "$repo" "$c" "$succ" ""
+    if ! git_commit_push "$repo" "move the shared Secrets of ${c}/${ns} from ${i} to ${succ}" "$FLEET_REL"; then
+      HANDOVER_REASON=GIT_PUSH_FAILED; HANDOVER_DETAIL="the hand-over of the shared Secrets of ${ns} from ${i} to ${succ} was not pushed (pushMode=${PUSH_MODE:-direct})"
+      return 1
+    fi
+    rev="$PUSHED_REVISION"
+  fi
+  if [[ "$tracked" == true ]]; then
+    [[ -n "$rev" ]] || rev="$(fleet_head)"
+    appset_refresh tpg-instances
+    why=""
+    if ! sync_shared_secrets "$c" "$succ" "$ns" "$timeout" "$rev"; then
+      why="${SYNC_FAIL_REASON}: ${SYNC_FAIL_DETAIL}"
+    elif ! wait_logged "shared Secrets of ${ns} adopted by ${app}" 12 10 _secrets_adopted "$ns" "$app"; then
+      why="the shared objects of ${ns} are tracked by '$(ns_secrets_app "$ns")' (or not healthy), not by ${app}, after the sync"
+    fi
+    if [[ -n "$why" ]]; then
+      if [[ "$commit" == true ]]; then
+        _handover_revert "$repo" "$c" "$i" "$succ" "$ns" "$ip" "$sp" "$why" "$timeout" "$rev"
+      else
+        HANDOVER_REASON=HANDOVER_FAILED
+        HANDOVER_DETAIL="${why}; ${i} still tracks the shared Secrets of ${ns} in Argo CD, run tpg-delete-instance again after ${app} syncs"
+      fi
+      return 1
+    fi
+    HANDOVER_NOTE="shared Secrets of ${ns} moved to ${succ}"
+  else
+    HANDOVER_NOTE="shared Secrets of ${ns} stay with ${succ}"
+  fi
+  return 0
+}
+
 instance_effective() {
   # instance_effective REPO CLUSTER INSTANCE YQ_PATH DEFAULT -> the value the chart
   # sees for YQ_PATH: the instance's Helm values (instance_values), then its
@@ -2076,8 +3078,8 @@ instance_effective() {
   # the overlay file (initial deployment), then the patch file on top of it
   for g in overlays patches; do
     f="$(patch_ref "$1/$FLEET_REL" "$2" "$3" postgresValues "$g")" || f=""
-    if [[ -n "$f" && -f "$1/charts/tpg-instance/$f" ]]; then
-      n=$((n + 1)); cp "$1/charts/tpg-instance/$f" "$d/${n}.yaml"
+    if [[ -n "$f" && -f "$1/helm_artifacts/instance/tpg-instance/$f" ]]; then
+      n=$((n + 1)); cp "$1/helm_artifacts/instance/tpg-instance/$f" "$d/${n}.yaml"
     fi
   done
   # valuesOverride (written by tpg-restore) wins over the patch files, as in tpg.ctx
@@ -2096,8 +3098,8 @@ instance_render() {
   # instance from it, Round 14), then the instance values without patches
   local vals
   vals="$(mktemp)"
-  instance_values "$1" "$2" "$3" | yq 'del(.patches) | del(.overlays)' > "$vals"
-  helm template "$3" "$1/charts/tpg-instance" --namespace "pg-$3" \
+  instance_values "$1" "$2" "$3" | yq 'del(.patches) | del(.overlays) | del(.restorePatch)' > "$vals"
+  helm template "$3" "$1/helm_artifacts/instance/tpg-instance" --namespace "$(instance_ns_in "$1" "$2" "$3")" \
     -f "$1/$TEMPLATE_CLUSTER_REL" -f "$1/$TEMPLATE_INSTANCE_REL" -f "$1/$FLEET_REL" -f "$vals"
   local rc=$?
   rm -f "$vals"

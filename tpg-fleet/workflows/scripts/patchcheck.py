@@ -3,6 +3,7 @@
 
   patchcheck.py values|operator FILE.json --schemas patch-schemas.json [--name NAME]
   patchcheck.py postgres FILE.json... --schemas patch-schemas.json [--name NAME]... [--instance I]
+  patchcheck.py spec FILE.json --schemas patch-schemas.json [--name NAME]
 
 values is postgresValuesPatchFilePath, postgres postgresPatchFilePath (a list of
 files), operator operatorValuesPatchFilePath (tpg-day0 and tpg-create-instance:
@@ -30,6 +31,9 @@ validate step, in the tools image, and in scripts/submit/pack-patch-files.sh).
             asked for, because a patch sets only what it changes). At most one
             document per kind (per schedule object) across the files of a target
   operator  only the keys the operator values allow-list names, each with its type
+  spec      targetInstanceSpecFilePath of tpg-restore (Round 23): one file holding exactly one kind: Postgres
+            document (apiVersion, kind, spec; no metadata, because the name and namespace come from the pair),
+            its spec checked like a postgres patch document
 The rules that need clusters/fleet.yaml or the cluster (fields other workflows
 own, sizes that would shrink, the operator image tag against the cluster's
 operator version, Secrets and issuers that must exist) are checked later by
@@ -258,6 +262,26 @@ def check_postgres(docs_by_file, schema, names, errors, instance=None):
                 seen[k] = name
 
 
+def check_spec(docs, schema, name, errors):
+    """tpg-restore targetInstanceSpecFilePath: one file, exactly one kind: Postgres document."""
+    if isinstance(docs, dict):
+        docs = [docs]
+    docs = [d for d in docs if d is not None and d != {}] if isinstance(docs, list) else []
+    kinds = [str(d.get("kind", "none")) if isinstance(d, dict) else kind_of(d) for d in docs]
+    if len(docs) != 1 or kinds[0] != "Postgres":
+        errors.append(f"{name}: targetInstanceSpecFilePath takes exactly one kind: Postgres document "
+                      f"(the file holds {len(docs)} document{'s' if len(docs) != 1 else ''}"
+                      f"{': ' + ', '.join(kinds) if docs else ''}); the spec of the new instance, "
+                      f"apiVersion: sql.tanzu.vmware.com/v1, kind: Postgres and spec")
+        return
+    doc = dict(docs[0])
+    if "metadata" in doc:
+        errors.append(f"{name}: metadata is not used: the name and namespace of the new instance come from the pair "
+                      f"(targetClusterConfig); keep only apiVersion, kind and spec")
+        del doc["metadata"]
+    check_postgres_doc(doc, schema, name, errors)
+
+
 def check_operator(doc, schema, name, errors):
     if not isinstance(doc, dict):
         errors.append(f"{name}: an operator values patch must be a YAML map (got {kind_of(doc)})")
@@ -321,7 +345,7 @@ def check_operator(doc, schema, name, errors):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("kind", choices=["values", "postgres", "operator"])
+    ap.add_argument("kind", choices=["values", "postgres", "operator", "spec"])
     ap.add_argument("files", nargs="+")
     ap.add_argument("--schemas", required=True)
     ap.add_argument("--name", action="append", default=[])
@@ -345,6 +369,11 @@ def main():
     errors = []
     if a.kind == "postgres":
         check_postgres(docs, schema, names, errors, a.instance)
+    elif a.kind == "spec":
+        if len(docs) != 1:
+            print("spec: one file is checked at a time")
+            return 1
+        check_spec(docs[0], schema, names[0], errors)
     else:
         if len(docs) != 1:
             print(f"{a.kind}: one file is checked at a time")

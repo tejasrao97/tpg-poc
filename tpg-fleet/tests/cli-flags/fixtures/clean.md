@@ -13,7 +13,7 @@ helm upgrade --install cert-manager cert-manager --repo https://charts.jetstack.
   --version v1.21.2 -n cert-manager --create-namespace -f values.yaml --wait --timeout 15m
 helm registry login tanzu-sql-postgres.packages.broadcom.com --username "$U" --password-stdin
 helm get values kps -n monitoring -o yaml
-helm template orders-db charts/tpg-instance -f values.yaml --namespace pg-orders-db
+helm template orders-db helm_artifacts/instance/tpg-instance -f values.yaml --namespace pg-orders-db
 ```
 
 An all-namespaces listing is `helm list -A`, and a cascading delete is
@@ -23,5 +23,6 @@ An all-namespaces listing is `helm list -A`, and a cascading delete is
 kubectl --context aks-tpg-poc-01 get storageclass tpg-data-retain -o jsonpath='{.parameters.skuName}'
 kubectl rollout status deploy/argocd-server -n argocd --timeout=10s
 argo submit --from workflowtemplate/tpg-day0 -p clusters=all -p dryRun=true --watch
+argo submit --from workflowtemplate/tpg-scale-instance -p 'clusters=[aks-tpg-poc-01, aks-tpg-poc-02]' -p 'instances=[orders-db]' -p replicas=2 --watch
 argocd app sync tpg-aks-tpg-poc-01-platform --grpc-web
 ```

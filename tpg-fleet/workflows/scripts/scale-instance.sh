@@ -34,6 +34,8 @@
 #   true, the step applies enabled false and readReplicas 0 to the live object
 #   with a server-side apply as field manager tpg-scale and records warning
 #   HA_FIELD_CO_OWNED naming the managers (D72).
+# A restored instance (tpg-restore, instance.restored): the entry fields written here differ from its restore-patch, so the chart renders
+# them over it (templates/_helpers.tpl tpg.restoredPostgres); the restore-patch itself is never touched.
 # P_DRY_RUN=true records the plan per instance and changes nothing.
 MODE="$1"; WF="$2"
 # shellcheck source=workflows/scripts/lib.sh
@@ -99,8 +101,9 @@ if [[ "$MODE" == "plan" ]]; then
     if ! g="$(cmap_guard "$C" "$I")"; then record_entry "$key" SKIPPED_VERSION_MISMATCH "" "$g"; continue; fi
     [[ "$(pg_state "$I")" == "Running" ]] || { ifail NOT_RUNNING "currentState=$(pg_state "$I")"; continue; }
     busy=""
+    ins="$(instance_ns "$C" "$I")" || { ifail FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"; continue; }
     for kind in postgresversionupgrade postgresrestore; do
-      n="$(tk -n "pg-${I}" get "$kind" -o json 2>/dev/null \
+      n="$(tk -n "$ins" get "$kind" -o json 2>/dev/null \
         | jq -r '[.items[] | select((.status.phase // "") | test("^(Succeeded|Failed|PreCheckFailed)$") | not)] | length')"
       [[ "${n:-0}" -eq 0 ]] || busy="${busy}${kind} "
     done
@@ -214,7 +217,7 @@ key="result.${C}.${I}"
 fail() { record "$key" FAILED "$1" "${2:-}"; exit 1; }
 result_guard "$key"
 use_cluster "$C" || fail NOT_REGISTERED
-ns="pg-${I}"
+ns="$(instance_ns "$C" "$I")" || fail FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"
 app="tpg-${C}-${I}"
 rev="$(run_data revision | jq -r '.detail // empty')"
 [[ -n "$rev" ]] || rev="$(fleet_head)"

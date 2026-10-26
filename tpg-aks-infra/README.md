@@ -644,7 +644,7 @@ For pre-created clusters, first copy `inventory/clusters.example.yaml` to `inven
 | hub-secrets | `steps/40-hub-secrets.sh` | | | Credential pre-checks, the three credentials written to Vault, Argo CD repositories through VaultStaticSecrets, `tpg-settings` (including `backupCaBundle`, checked against the blob endpoint with openssl, and `acnsEnabled`), `argocd-workflow-token`, the Argo Workflows log archive (`argo/artifact-repositories`, `VaultStaticSecret argo/argo-artifacts`) |
 | addons | `steps/45-helm-addons.sh` | | | Helm releases: `cert-manager` and the Vault Secrets Operator on targets. Standalone: the remote-write credential in Vault, `kps` and the remote-write gateway on the hub (and Secret `monitoring/grafana-admin`), `kps` + `tpg-ksm` on targets, and a check that every target's metrics reach the hub. Azure: the managed Prometheus add-on on clusters that lack it, the Grafana role check, the dashboard import |
 | bootstrap | `steps/50-bootstrap-fleet.sh` | | | AppProjects `tpg` and `tpg-hub`, ApplicationSets, `tpg-hub-workflows` (which also installs the three admission policies `tpg-workflow-parameters`, `tpg-application-sync` and `tpg-credential-writer`, and the ServiceAccounts `argo/tpg-workflow` and `argo/tpg-credential-writer`), monitoring option |
-| verify | `steps/60-verify.sh` | | | Read-only checks, including the Argo CD RBAC deny block (with the `argocd` CLI), AppProject `tpg-hub`, the three admission policies and their bindings, the ServiceAccounts `argo/tpg-workflow` and `argo/tpg-credential-writer`, the templates (`tpg-patch`, `tpg-create-instance`, `tpg-network-policy`, ...), `backupCaBundle` and `acnsEnabled` in `tpg-settings`, and per target the Azure fields of the PostgresBackupLocation CRD and CiliumNetworkPolicy (advisory); a target's StorageClass `tpg-data-retain` missing before its `tpg-<cluster>-platform` Application has ever synced is a warning (tpg-day0 creates it), an issue after that. Ends with "All checks passed ..." or a summary of the issues grouped by resource with the clusters each one fails on (and advisory warnings apart), exit 1 |
+| verify | `steps/60-verify.sh` | | | Read-only checks, including the Argo CD RBAC deny block (with the `argocd` CLI), AppProject `tpg-hub`, the three admission policies and their bindings, the ServiceAccounts `argo/tpg-workflow` and `argo/tpg-credential-writer`, the templates (`tpg-lib` and the thirteen workflows, `tpg-backup-expire` and `tpg-restore` among them), `backupCaBundle` and `acnsEnabled` in `tpg-settings`, per target the Azure fields of the PostgresBackupLocation CRD and CiliumNetworkPolicy (advisory), and, when `FLEET_LOCAL_DIR` holds the tpg-fleet clone, every instance declared in its `clusters/fleet.yaml` in its namespace (Round 23: `instance.namespace`, default `pg-<instance>`, not a reserved namespace, exactly one instance per namespace renders the shared Secrets; a namespace or Postgres that does not exist yet is a warning until tpg-day0 or tpg-create-instance creates it); a target's StorageClass `tpg-data-retain` missing before its `tpg-<cluster>-platform` Application has ever synced is a warning (tpg-day0 creates it), an issue after that. Ends with "All checks passed ..." or a summary of the issues grouped by resource with the clusters each one fails on (and advisory warnings apart), exit 1 |
 
 ### Options
 
@@ -728,7 +728,7 @@ Who may read and write what is set by five policies in `tpg-fleet/vault/policies
 |---|---|---|---|
 | `tpg-setup` | `auth/kubernetes` (hub) | `vault/tpg-setup` | `tpg-admin`: the `tpg` mount, auth mounts, roles and policies, and `sys/wrapping/wrap` (used by these scripts and `scripts/vault-secret.sh`) |
 | `tpg-workflow` | `auth/kubernetes` (hub) | `argo/tpg-workflow` | `tpg-workflow`: read the shared paths and `tpg/ca-bundles/*` |
-| `tpg-credential-writer` | `auth/kubernetes` (hub) | `argo/tpg-credential-writer` | `tpg-credential-writer`: create, update and read the five shared credential paths, `tpg/ca-bundles/*` and `tpg/custom/*` (no delete); 15-minute tokens. Only the `write` step of `tpg-rotate-credential` runs as this ServiceAccount; the admission policy `tpg-credential-writer` refuses any other Workflow that names it, references that template or changes the run's spec, and keeps the workflow ServiceAccounts to the run records among the ConfigMaps of `argo` and to pod metadata (`tpg-fleet/docs/workflow-commands.md`, section 16) |
+| `tpg-credential-writer` | `auth/kubernetes` (hub) | `argo/tpg-credential-writer` | `tpg-credential-writer`: create, update and read the five shared credential paths, `tpg/ca-bundles/*` and `tpg/custom/*` (no delete); 15-minute tokens. Only the `write` step of `tpg-rotate-credential` runs as this ServiceAccount; the admission policy `tpg-credential-writer` refuses any other Workflow that names it, references that template or changes the run's spec, and keeps the workflow ServiceAccounts to the run records among the ConfigMaps of `argo` and to pod metadata (`tpg-fleet/docs/workflow-commands.md`, section 17) |
 | `tpg-argocd` | `auth/kubernetes` (hub) | `tpg-vso` in `argocd` and `argo` | `tpg-argocd`: read the registry token, the read PAT and the backup storage key (for the workflow log archive) |
 | `tpg-vso` | `auth/k8s-<cluster>` (one per target) | `tpg-vso` in any namespace | `tpg-target`: read the registry token, the backup key and the monitoring remote-write credential |
 
@@ -805,16 +805,16 @@ It prints, to the terminal only, the Argo CD URL with the admin password, where 
 export KUBECONFIG="$PWD/.work/kubeconfig"
 # Dry run: validates the inputs, shows the clusters/fleet.yaml change and runs the pre-check
 argo submit -n argo --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct \
   -p dryRun=true --watch
 # Deploy
 argo submit -n argo --from workflowtemplate/tpg-day0 \
-  -p clusters=all -p instances=orders-db -p highAvailability=true \
+  -p clusters=all -p 'instances=[orders-db]' -p highAvailability=true \
   -p operatorVersion=v4.5.0 -p postgresVersion=postgres-17.6 -p pushMode=direct --watch
 ```
 
-Add instances to a cluster that runs the operator with `tpg-create-instance`, and set their network policy with `tpg-network-policy`. `tpg-fleet/scripts/submit/tpg-<workflow>.sh` asks for the inputs interactively instead. See `tpg-fleet/docs/workflow-commands.md` for every workflow with examples.
+Add instances to a cluster that runs the operator with `tpg-create-instance`, and set their network policy with `tpg-network-policy`. An instance runs in `pg-<instance>` unless its `clusterMap` entry names a `namespace` (Round 23). `tpg-fleet/scripts/submit/tpg-<workflow>.sh` asks for the inputs interactively instead. See `tpg-fleet/docs/workflow-commands.md` for every workflow with examples.
 
 ## Scaling from 3 to n clusters
 
@@ -827,7 +827,7 @@ No per-cluster folder is needed in `tpg-fleet`: every cluster uses `clusters/_te
   1. Append the cluster to `inventory/clusters.yaml`.
   2. Run `scripts/run.sh --hub <mode> --targets precreated`.
 
-Then run `tpg-day0 -p clusters=<new> ...` with the same inputs as the other clusters.
+Then run `tpg-day0 -p 'clusters=[<new>]' ...` with the same inputs as the other clusters.
 
 ## Monitoring options
 

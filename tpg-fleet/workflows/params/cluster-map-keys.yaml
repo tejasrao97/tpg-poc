@@ -2,7 +2,8 @@
 #
 # clusterMap is optional on tpg-day0, tpg-create-instance, tpg-upgrade,
 # tpg-patch, tpg-backup, tpg-scale-instance,
-# tpg-delete-instance, tpg-delete-apps and tpg-network-policy. It selects the targets (clusters and the instances on each)
+# tpg-delete-instance, tpg-delete-apps and tpg-network-policy, and the only input of
+# tpg-backup-expire (Round 23). It selects the targets (clusters and the instances on each)
 # and carries per-cluster and per-instance values:
 #
 #   <cluster>:                     a registered cluster
@@ -17,25 +18,31 @@
 # "flag"). An unknown key fails the run with the closest known key.
 #
 # Adding a key is one entry here:
-#   type       string | name | boolean | integer | posint | quantity | enum |
+#   type       string | name | namespace (a DNS label of at most 63 characters; "reserved" lists the
+#              refused names) | boolean | integer | posint | quantity | enum |
 #              operatorVersion | postgresVersion |
-#              patchFile (one .yaml/.yml file: a path of the submitting machine,
-#                absolute or relative, whose contents come in patchFiles, or
-#                repo:<path> in the fleet repository) |
-#              patchFileList (a list of such files) |
-#              caFile (one PEM file: a path of the submitting machine or
+#              patchFile (one .yaml/.yml file, in brackets: [./a.yaml]; a path of the
+#                submitting machine, absolute or relative, whose contents come in
+#                patchFiles, or repo:<path> in the fleet repository) |
+#              patchFileList (a list of such files: [./a.yaml, repo:<path>]) |
+#              caFile (one PEM file, in brackets: a path of the submitting machine or
 #                repo:<path>, .pem, .crt or .cer) |
 #              kindList (Postgres, PostgresBackupLocation, PostgresBackupSchedule,
 #                PostgresFerretDocumentDB, postgresValues, operatorValues, or all) |
-#              nameList (DNS labels) | cidrList (IPv4/IPv6 CIDRs) |
+#              nameList (DNS labels) | k8sNameList (Kubernetes object names, as PostgresBackup names) | cidrList (IPv4/IPv6 CIDRs) |
 #              fqdnList (host names, * allowed as the first label) |
 #              stringMap (annotation or label keys to string values) |
 #              cron (5 fields; allowNone: true also takes none or an empty value) |
 #              k8sName (a Kubernetes object name)
-#              A list is a YAML/JSON list or a comma-separated string; a
-#              stringMap is a YAML/JSON mapping. Neither may be empty: a key
-#              that should no longer apply is removed, not set to [] or {}
-#              (an empty value cannot clear a value set at a lower level).
+#              A list is a YAML/JSON sequence, also with one value ([tpg-poc-01]);
+#              a comma-separated string is refused with the list syntax (Round 23).
+#              patchFile and caFile are a sequence of exactly one path. kindList
+#              also takes the bare word all. A file entry with whitespace ("repo: x.yaml",
+#              which YAML reads as a mapping) fails with
+#              repo:<file path> "check for white spaces in between". A stringMap is a
+#              YAML/JSON mapping. Neither may be empty: a key that should no longer
+#              apply is removed, not set to [] or {} (an empty value cannot clear a
+#              value set at a lower level).
 #   values     enum only: the accepted values
 #   repoDir    patchFile, patchFileList: the folder a repo:<path> must be in
 #   workflows  workflow -> required | optional | guard
@@ -55,6 +62,18 @@
 # are read by the step script of each workflow that lists them.
 #
 # renamed: keys that were renamed (Round 15); the old name is refused with the new one.
+#
+# restore (Round 23, phase 6): the clusterMap of tpg-restore is not a map of clusters but a LIST of
+# pairs, so it has its own section at the end of this file and is not one of "workflows" above.
+# Each pair is {sourceClusterConfig, targetClusterConfig}, and each side is
+# <cluster>: <namespace>: <instance>: {keys}, exactly one of each. "source" and "target" list the
+# keys of the instance level of each side; a key written "a.b.c" sits under a, then b (pitrConfig:
+# {type: ...}). Each entry has type (as above, plus timestamp, lsn, stanzaName and backupLabel), doc
+# and optionally values. The rules between the keys (which key is required, refused or restricted
+# by pitrEnabled and pitrConfig.type, one file, confirm, ...) are in clustermap.py restore
+# (process_restore) and, where a schema can say them, in the generated
+# workflows/params/schemas/clustermap-restore.schema.json; the namespace of the target follows the
+# namespace key above (reserved, reservedPrefixes).
 version: 1
 
 renamed:
@@ -71,6 +90,7 @@ workflows:
   - delete-instance
   - delete-apps
   - network-policy
+  - backup-expire
 
 cluster:
   operatorVersion:
@@ -90,18 +110,18 @@ cluster:
     fleet: [.cluster.maxReadReplicas]
     format: number
   operatorValuesPatchFilePath:
-    doc: "An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:patches/operator/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0"
+    doc: "An operator values file: a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/patches/<file>. tpg-patch: it becomes the current operator values patch file, applied on top of the operator overlay of tpg-day0"
     # a file of the submitting machine (its contents come in patchFiles) or
-    # repo:patches/operator/<file>; stored as patches/operator/<name>-<uid>.yaml.
+    # repo:helm_artifacts/operator/patches/<file>; stored as helm_artifacts/operator/patches/<name>-<uid>.yaml.
     type: patchFile
-    repoDir: patches/operator/
+    repoDir: helm_artifacts/operator/patches/
     workflows: {patch: optional}
   operatorValuesOverlayFilePath:
-    doc: "An operator values overlay file (Round 22; tpg-day0 only; was operatorValuesPatchFilePath): a path of the submitting machine (its contents in patchFiles) or repo:overlays/operator/<file>. Applied when the run installs the operator, recorded as clusters.<c>.operator.overlays.values; an operator that runs with another overlay is BLOCKED OVERLAY_USE_TPG_PATCH (use tpg-patch operatorValuesPatchFilePath, which stacks on top)"
-    # stored as overlays/operator/<name>-<uid>.yaml; the tpg-operator ApplicationSet reads
-    # overlays/operator/clusters/<cluster>.yaml before the patch copy
+    doc: "An operator values overlay file (Round 22; tpg-day0 only; was operatorValuesPatchFilePath): a path of the submitting machine (its contents in patchFiles) or repo:helm_artifacts/operator/overlays/<file>. Applied when the run installs the operator, recorded as clusters.<c>.operator.overlays.values; an operator that runs with another overlay is BLOCKED OVERLAY_USE_TPG_PATCH (use tpg-patch operatorValuesPatchFilePath, which stacks on top)"
+    # stored as helm_artifacts/operator/overlays/<name>-<uid>.yaml; the tpg-operator ApplicationSet reads
+    # helm_artifacts/operator/overlays/clusters/<cluster>.yaml before the patch copy
     type: patchFile
-    repoDir: overlays/operator/
+    repoDir: helm_artifacts/operator/overlays/
     workflows: {day0: optional}
   patchMode:
     doc: "apply or clear, for the operator file of this cluster and the default of its instances"
@@ -248,14 +268,33 @@ instance:
     # PostgresBackupLocation enableSSL (renamed from enableSSL in Round 15)
     type: boolean
     workflows: {day0: optional, create-instance: optional}
+    fleet: [.backup.enableSSL]
+    format: boolean
+  namespace:
+    doc: "Round 23: the namespace of the instance, default pg-<instance>; written to clusters/fleet.yaml as instance.namespace and immutable (a different value for an instance that exists is refused). Instances may share a namespace: the first one owns the shared Secrets (regsecret, backup-storage, ServiceAccount tpg-vso), each has its own network policy selected by the postgres-instance label, and purgeNamespace is refused while another instance of the namespace remains. Reserved namespaces (every namespace the fleet installs into, and any name starting with kube-) are refused. Every other workflow reads the namespace from clusters/fleet.yaml"
+    # chart value instance.namespace (templates/_helpers.tpl tpg.required); the tpg-instances
+    # ApplicationSet destination.namespace. The one list of namespaces an instance may not use
+    # (workflows/scripts/clustermap.py, the clusterMap schemas, tpg-aks-infra 60-verify.sh and
+    # docs/workflow-commands.md read it from here): every namespace the fleet installs into,
+    # that is the Kubernetes system namespaces, Argo CD (argocd) and Argo Workflows (argo),
+    # Vault (vault), the Vault Secrets Operator (vault-secrets-operator-system) and its
+    # VaultAuth/VaultConnection namespace (tpg-vault), cert-manager, the monitoring stack
+    # (monitoring; the Azure option installs into kube-system), the Tanzu Postgres operator
+    # (OPERATOR_NS in workflows/scripts/lib.sh, chart value network.operatorNamespace) and
+    # default (the tpg-platform Application); and every name starting with a reservedPrefixes
+    # entry (kube-: the Kubernetes system namespaces and any other the cluster keeps for itself)
+    type: namespace
+    reserved: [kube-system, kube-public, kube-node-lease, default, argocd, argo, vault, vault-secrets-operator-system, tpg-vault, cert-manager, monitoring, tanzu-postgres-operator]
+    reservedPrefixes: [kube-]
+    flag: ""
+    workflows: {day0: optional, create-instance: optional}
+    fleet: [.instance.namespace]
   disableInitialBackup:
     doc: "Round 22: true writes the annotation sql.tanzu.vmware.com/skip-initial-backup: \"true\" on the new Postgres instance, so the operator takes no initial backup at creation; false (the default) leaves the operator's behaviour. Only new instances"
     # chart value instance.disableInitialBackup; templates/postgres.yaml writes the annotation only when true
     type: boolean
     workflows: {day0: optional, create-instance: optional}
     fleet: [.instance.disableInitialBackup]
-    format: boolean
-    fleet: [.backup.enableSSL]
     format: boolean
   backupCaBundleFile:
     doc: "The backup CA bundle of this instance (backupEnableSSL true): a PEM file of the submitting machine (its contents in patchFiles) or repo:ca-bundles/<file>. Wins over the cluster level and the inputs; not together with backupCaBundleVaultSecret"
@@ -290,32 +329,32 @@ instance:
     workflows: {day0: optional, create-instance: optional}
     fleet: [.backup.fullRetentionType]
   postgresPatchFilePath:
-    doc: "One or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:charts/tpg-instance/patches/<file>. Combined into one stored file charts/tpg-instance/patches/<instance>-postgres-<hash>.yaml; the objects a run does not send are carried over from the current file. Applied on top of the overlay of tpg-day0 and tpg-create-instance"
+    doc: "One or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined into one stored file helm_artifacts/instance/tpg-instance/patches/<instance>-postgres-<hash>.yaml; the objects a run does not send are carried over from the current file. Applied on top of the overlay of tpg-day0 and tpg-create-instance"
     # a list of partial manifests, one Tanzu Postgres kind per document (Postgres,
     # PostgresBackupLocation, PostgresBackupSchedule, PostgresFerretDocumentDB; at
     # most one per kind, and per schedule object): files of the submitting machine
-    # (contents in patchFiles) or repo:charts/tpg-instance/patches/<file>. Combined
+    # (contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/patches/<file>. Combined
     # into one stored multi-document file, recorded as patches.postgres.current
     # (Round 15, design decision D81); the kinds a run does not send are carried over
     type: patchFileList
-    repoDir: charts/tpg-instance/patches/
+    repoDir: helm_artifacts/instance/tpg-instance/patches/
     workflows: {patch: optional}
   postgresOverlayFilePath:
-    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresPatchFilePath): one or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:charts/tpg-instance/overlays/<file>. Combined into one stored file charts/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, recorded as overlays.postgres.current and applied at the initial deployment"
+    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresPatchFilePath): one or more files (a list) of Postgres, PostgresBackupLocation, PostgresBackupSchedule and PostgresFerretDocumentDB documents, one document per object: paths of the submitting machine (their contents in patchFiles) or repo:helm_artifacts/instance/tpg-instance/overlays/<file>. Combined into one stored file helm_artifacts/instance/tpg-instance/overlays/<instance>-postgres-<hash>.yaml, recorded as overlays.postgres.current and applied at the initial deployment"
     type: patchFileList
-    repoDir: charts/tpg-instance/overlays/
+    repoDir: helm_artifacts/instance/tpg-instance/overlays/
     workflows: {create-instance: optional, day0: optional}
   postgresValuesPatchFilePath:
-    doc: "A tpg-instance chart values file: a path of the submitting machine or repo:charts/tpg-instance/patches/<file>, stored as charts/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay"
+    doc: "A tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/patches/<file>, stored as helm_artifacts/instance/tpg-instance/patches/<name>-<uid>.yaml. Renamed from valuesPatchFilePath in Round 15; applied on top of the overlay"
     # tpg-instance chart values (renamed from valuesPatchFilePath in Round 15),
     # recorded as patches.postgresValues.current
     type: patchFile
-    repoDir: charts/tpg-instance/patches/
+    repoDir: helm_artifacts/instance/tpg-instance/patches/
     workflows: {patch: optional}
   postgresValuesOverlayFilePath:
-    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:charts/tpg-instance/overlays/<file>, stored as charts/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current"
+    doc: "Round 22 (tpg-day0, tpg-create-instance; was postgresValuesPatchFilePath): a tpg-instance chart values file: a path of the submitting machine or repo:helm_artifacts/instance/tpg-instance/overlays/<file>, stored as helm_artifacts/instance/tpg-instance/overlays/<name>-<uid>.yaml and recorded as overlays.postgresValues.current"
     type: patchFile
-    repoDir: charts/tpg-instance/overlays/
+    repoDir: helm_artifacts/instance/tpg-instance/overlays/
     workflows: {create-instance: optional, day0: optional}
   patchMode:
     doc: "apply or clear, for the patch files of this instance"
@@ -357,7 +396,7 @@ instance:
     type: boolean
     workflows: {delete-instance: optional, delete-apps: optional}
   purgeNamespace:
-    doc: "As the input: delete the namespace (needs purgePvcs true)"
+    doc: "As the input: delete the namespace (needs purgePvcs true). Refused (NAMESPACE_SHARED) while another instance of clusters/fleet.yaml, or another Postgres, uses the namespace; tpg-delete-apps deletes a shared namespace after the last instance of the run, and with deleteOperator whoever else is there"
     type: boolean
     workflows: {delete-instance: optional, delete-apps: optional}
   finalBackup:
@@ -365,6 +404,20 @@ instance:
     type: enum
     values: ["true", "false", required]
     workflows: {delete-instance: optional, delete-apps: optional}
+  purgeBackups:
+    doc: "Round 23. tpg-delete-instance, tpg-delete-apps: as the input - expire every PostgresBackup of the instance while it runs, then delete every blob left under its container and repoPath after it is gone (irreversible; needs finalBackup false; a repoPath another PostgresBackupLocation on any registered cluster uses is expired only, blobs kept and reported). tpg-backup-expire: true expires every backup of the instance and never deletes blobs; not together with backups"
+    type: boolean
+    workflows: {delete-instance: optional, delete-apps: optional, backup-expire: optional}
+  backups:
+    doc: "Round 23, tpg-backup-expire: the PostgresBackup names to expire (a list in brackets, [orders-db-full-202609010100]). A full backup that has dependent differential or incremental backups needs includeDependents: true (else the instance is BLOCKED and the dependents are listed). Not together with purgeBackups"
+    type: k8sNameList
+    flag: ""
+    workflows: {backup-expire: optional}
+  includeDependents:
+    doc: "Round 23, tpg-backup-expire: true also expires the differential and incremental backups that depend on the listed ones (dependents first); required to expire a backup that has dependents. With backups only"
+    type: boolean
+    flag: ""
+    workflows: {backup-expire: optional}
   # ---- exposure (design decision D64): how the instance's Services are
   # published. The chart turns exposure into spec.serviceType and the Azure
   # load balancer annotations; serviceAnnotations are added as given.
@@ -444,3 +497,48 @@ instance:
     workflows: {day0: optional, create-instance: optional, network-policy: optional}
     fleet: [.network.egressToFqdns]
     format: list
+
+restore:
+  source:
+    sourceBackupName:
+      doc: "The PostgresBackup to restore, in the namespace of the source instance. Mandatory when the target restores a named backup (pitrEnabled false, which is the default when pitrEnabled is absent): PostgresRestore spec.sourceBackup.name, into the same namespace, another namespace or another cluster (the workflow re-creates the source PostgresBackupLocation in the target namespace, and the operator syncs the backups of that name there). With pitrEnabled true it only names the backup that gives the backup location and the stanza when the source instance no longer exists"
+      type: k8sName
+  target:
+    pitrEnabled:
+      doc: "Default false. true: point-in-time recovery from the backup repository (PostgresRestore spec.pitr; pitrConfig.type says to where); false, or absent: restore the backup named by sourceBackupName of the source (spec.sourceBackup), which is then mandatory"
+      type: boolean
+    pitrConfig.type:
+      doc: "pitrEnabled true, mandatory: latest (newest WAL), time (pitrConfig.timestamp), lsn or transaction (pitrConfig.target)"
+      type: enum
+      values: [latest, time, lsn, transaction]
+    pitrConfig.target:
+      doc: "type lsn: a log sequence number such as 0/3000060; type transaction: a transaction ID (a number); mandatory for those two types, refused for the others (spec.pitr.target)"
+      type: string
+    pitrConfig.timestamp:
+      doc: "type time, mandatory: a UTC time such as 2026-09-15T08:30:00Z (spec.pitr.timestamp); refused for the other types"
+      type: timestamp
+    pitrConfig.sourceBackupConfig.srcBackupLocationName:
+      doc: "The PostgresBackupLocation that holds the backups (spec.pitr.sourceBackupLocation.name). Optional: derived from the source instance, or from the backup sourceBackupName names; a difference from what the source reports is a warning. Mandatory when there is neither a live source instance nor a sourceBackupName"
+      type: k8sName
+    pitrConfig.sourceBackupConfig.srcStanzaName:
+      doc: "The pgBackRest stanza (spec.pitr.sourceBackupLocation.stanzaName). Optional and derived as srcBackupLocationName; mandatory under the same condition"
+      type: stanzaName
+    pitrConfig.sourceBackupConfig.srcBackupLabel:
+      doc: "The pgBackRest backup to start the recovery from, such as 20260915-020000F or 20260916-010000I as in pgBackRest info (spec.pitr.sourceBackupLocation.set). Refused with type latest; empty: the newest backup before the recovery point"
+      type: backupLabel
+    bestEffort:
+      doc: "pitrEnabled true: mandatory for time, lsn and transaction (true: recover as far as the WAL allows when the target is invalid or not reached; false: fail instead), refused for latest and with pitrEnabled false (spec.pitr.bestEffort)"
+      type: boolean
+    targetInstanceSpecFilePath:
+      doc: "The spec of the restored Postgres instance: one file with exactly one kind: Postgres document, in brackets, [./orders-dr.yaml] (a file of the submitting machine, its contents in patchFiles) or [repo:helm_artifacts/instance/tpg-instance/restore-specs/<file>] in the fleet repository (that folder only). Its spec is the source of truth: it is rendered as it is as spec.targetInstance.spec of the PostgresRestore (not merged over a chart render) and stored in the fleet repository as the instance's restore-patch, which Argo CD's chart renders the restored instance from (no chart default is filled in). Allowed for a new target and for an in-place restore (it overrides the existing instance's values). Without it a new target copies the source instance's entry of clusters/fleet.yaml and the operator fills the instance spec; an in-place restore sends only spec.targetInstance.name; either way the spec read from the cluster after the restore is stored as the restore-patch. Mandatory when the new target's source is not in fleet.yaml"
+      type: patchFile
+      repoDir: helm_artifacts/instance/tpg-instance/restore-specs/
+    confirm:
+      doc: "The target instance name, repeated. Only for an in-place restore (source and target are the same cluster, namespace and instance), where it is mandatory for a real restore (dryRun false): the restore overwrites the instance's data. Refused on any other pair as meaningless: a restore into another instance never overwrites one, and a target that already exists is refused at plan time (TARGET_EXISTS: restore in place or choose a new instance name). A name that is not the target instance is always refused. The schema cannot compare the two sides, so validate-params.sh enforces it"
+      type: name
+    skipMinorVersionCheck:
+      doc: "true writes the annotation sql.tanzu.vmware.com/skip-minor-version-check: \"true\" on the PostgresRestore (default false)"
+      type: boolean
+    postRestoreBackup:
+      doc: "true takes a full backup of the target once the restored instance runs (default false)"
+      type: boolean

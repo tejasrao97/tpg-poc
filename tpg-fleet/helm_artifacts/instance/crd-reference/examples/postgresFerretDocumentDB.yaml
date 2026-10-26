@@ -1,0 +1,12 @@
+# Example for helm_artifacts/instance/crd-reference (the 4.5 documentation sample, adapted to the
+# fleet names). Render it with:
+#   helm template ref helm_artifacts/instance/crd-reference -f helm_artifacts/instance/crd-reference/examples/postgresFerretDocumentDB.yaml
+postgresFerretDocumentDB:
+  enabled: true
+  name: orders-db
+  spec:
+    readWrite: {replicas: 1}
+    postgres:
+      connectionDetails:
+        readWrite: {secretName: orders-db-app-user-db-secret}
+    service: {serviceType: ClusterIP}

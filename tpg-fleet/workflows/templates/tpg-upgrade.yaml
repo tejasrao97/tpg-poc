@@ -40,14 +40,14 @@ spec:
       description: "operator: chart version such as v4.5.0; postgres: PostgresVersion such as postgres-17.6. With clusterMap: the default of the component"
       value: ""
     - name: clusters
-      description: "List: comma-separated registered clusters, or all (without clusterMap)"
+      description: "List: registered clusters in brackets, [aks-tpg-poc-01, aks-tpg-poc-02] (also with one value), or all (without clusterMap)"
       value: ""
     - name: pushMode
       description: "direct: push to the fleet branch; pr: open a pull request and continue after it is merged"
       value: ""
       enum: ["", "direct", "pr"]
     - name: instances
-      description: "List: component=postgres only (mandatory there): comma-separated instances, or all (without clusterMap)"
+      description: "List: component=postgres only (mandatory there): instances in brackets, [orders-db], or all (without clusterMap)"
       value: ""
     - name: clusterMap
       description: "Map (YAML or JSON): cluster -> {operatorVersion, instances: {instance -> {postgresVersion, preUpgradeBackup, allowMajor}}}; the operator first, then the instances"

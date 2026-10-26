@@ -28,7 +28,7 @@ additionalProperties:
     instances:
       type: object
       minProperties: 0
-      description: The instances of the cluster (namespace pg-<instance>)
+      description: 'The instances of the cluster (namespace: the key namespace of tpg-day0 and tpg-create-instance, default pg-<instance>)'
       propertyNames:
         pattern: ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$
       additionalProperties:
@@ -54,7 +54,7 @@ additionalProperties:
             - false
             - 'true'
             - 'false'
-            description: 'As the input: delete the namespace (needs purgePvcs true) [Boolean; optional (default: the input purgeNamespace)]'
+            description: 'As the input: delete the namespace (needs purgePvcs true). Refused (NAMESPACE_SHARED) while another instance of clusters/fleet.yaml, or another Postgres, uses the namespace; tpg-delete-apps deletes a shared namespace after the last instance of the run, and with deleteOperator whoever else is there [Boolean; optional (default: the input purgeNamespace)]'
           finalBackup:
             enum:
             - 'true'
@@ -63,3 +63,10 @@ additionalProperties:
             - true
             - false
             description: 'As the input: true (a final backup, best effort), false (none) or required (fail when the instance is not Running) [Enum; optional (default: the input finalBackup)]'
+          purgeBackups:
+            enum:
+            - true
+            - false
+            - 'true'
+            - 'false'
+            description: 'Round 23. tpg-delete-instance, tpg-delete-apps: as the input - expire every PostgresBackup of the instance while it runs, then delete every blob left under its container and repoPath after it is gone (irreversible; needs finalBackup false; a repoPath another PostgresBackupLocation on any registered cluster uses is expired only, blobs kept and reported). tpg-backup-expire: true expires every backup of the instance and never deletes blobs; not together with backups [Boolean; optional (default: the input purgeBackups)]'

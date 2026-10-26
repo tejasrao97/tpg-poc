@@ -4,6 +4,7 @@
 # Regression of the tpg-delete-apps run in which `git pull --rebase` stopped on a text conflict in
 # fleet.yaml and the operator delete was never pushed. Needs bash, git and jq; yq (mikefarah) is
 # replaced by a small ruby shim for `yq -o=json -I=0 FILE` and `yq -P` when it is not installed.
+# shellcheck disable=SC2015  # ok/bad: A && ok || bad, as in the other suites
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 for t in git jq; do command -v "$t" >/dev/null || { echo "SKIP tests/git-merge: $t not installed" >&2; exit 0; }; done
@@ -27,7 +28,13 @@ T="$(mktemp -d)"; trap 'rm -rf "$T" "${SHIM:-}"' EXIT
 # --- the helpers of lib.sh and fleet-merge3.sh
 awk '/^# -+ writers of clusters\/fleet.yaml/ {p=1} /^github_repo\(\) \{/ {exit} p {print}' "$ROOT/workflows/scripts/lib.sh" > "$T/helpers.sh"
 grep -q "^git_push_head()" "$T/helpers.sh" && ok "the push helpers are in lib.sh" || { bad "helpers not found"; exit 1; }
-SCRIPTS_DIR="$ROOT/workflows/scripts"; ARGO_NS=argo; WF=wf-test
+# read by the helpers of lib.sh
+# shellcheck disable=SC2034
+SCRIPTS_DIR="$ROOT/workflows/scripts"
+# shellcheck disable=SC2034
+ARGO_NS=argo
+# shellcheck disable=SC2034
+WF=wf-test
 log() { printf '%s\n' "$*" >> "$T/step.log"; }
 setting() { echo main; }
 sleep() { :; }
@@ -91,8 +98,9 @@ git -C "$T/Bprobe" config user.name t; git -C "$T/Bprobe" config user.email t@t
 if git -C "$T/Bprobe" rebase -q origin/main >/dev/null 2>&1; then bad "the text rebase of B does not conflict (test needs a harder case)"; else ok "the text rebase of B stops on a conflict (as in the tpg-delete-apps log)"; fi
 git_push_head "$T/B" && ok "writer B pushes after merging key by key" || bad "B push" "$(cat "$T/step.log")"
 git -C "$T/seed" pull -q origin main 2>/dev/null
-final="$(yq -o=json -I=0 "$T/seed/clusters/fleet.yaml" | jq -c '[(.clusters.c2.instances | keys), .clusters.c1.instances.billing.instance.postgresVersion]')"
-[[ "$final" == '[["alpha","orders"],18.0]' ]] && ok "origin holds both changes: A's new instance and B's version bump" || bad "origin content" "$final"
+# compared as a number: yq prints 18.0 as 18, the ruby shim keeps 18.0
+final="$(yq -o=json -I=0 "$T/seed/clusters/fleet.yaml" | jq -c '[(.clusters.c2.instances | keys), (.clusters.c1.instances.billing.instance.postgresVersion == 18)]')"
+[[ "$final" == '[["alpha","orders"],true]' ]] && ok "origin holds both changes: A's new instance and B's version bump" || bad "origin content" "$final"
 [[ "$(git -C "$T/origin.git" log --format=%s main | head -3 | paste -sd'|' -)" == "billing to 18.0|add c2/alpha|base" ]] && ok "history: three commits, none lost, no merge commit" || bad "history" "$(git -C "$T/origin.git" log --format=%s main)"
 grep -q "merging the changed files key by key" "$T/step.log" && grep -q "pushed: billing to 18.0" "$T/step.log" && ok "the step log says what it did" || bad "log" "$(cat "$T/step.log")"
 [[ -z "$(git -C "$T/B" status --porcelain)" && ! -d "$T/B/.git/rebase-merge" && ! -d "$T/B/.git/rebase-apply" ]] && ok "no half-finished rebase is left in the clone" || bad "rebase state left"
@@ -110,7 +118,9 @@ grep -q "GIT_MERGE_FAILED" "$T/step.log" && grep -q "changed the same value diff
 # --- the lock
 jq -r '.data.holder' "$KCM" | grep -q '^$' && ok "the lock is released after every push" || bad "lock still held" "$(cat "$KCM")"
 echo '{"metadata":{"resourceVersion":"50"},"data":{"holder":"other-run","time":"'"$(date +%s)"'"}}' > "$KCM"
+# shellcheck disable=SC2034  # read by fleet_lock_acquire
 FLEET_LOCK_HELD=0; : > "$T/step.log"
+# shellcheck disable=SC2317  # sleep is called by fleet_lock_acquire
 ( sleep() { jq -c '.data.holder = "" | .metadata.resourceVersion = "51"' "$KCM" > "$KCM.n" && mv "$KCM.n" "$KCM"; }; fleet_lock_acquire ) && ok "a held lock is waited for and taken when released" || bad "lock wait"
 echo '{"metadata":{"resourceVersion":"60"},"data":{"holder":"dead-run","time":"1000"}}' > "$KCM"
 fleet_lock_acquire && grep -q "took over a stale lock of dead-run" "$T/step.log" && ok "a lock older than 3 minutes is taken over" || bad "stale lock" "$(cat "$T/step.log")"

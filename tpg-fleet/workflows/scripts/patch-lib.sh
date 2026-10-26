@@ -31,7 +31,7 @@
 #                                     rendered objects against the live ones. Sets
 #                                     PATCH_CHANGED (targets with a change)
 # Every refusal is appended to C_ERRS; the caller records it (PATCH_REFUSED).
-PATCH_CHART_PREFIX="charts/tpg-instance/"
+PATCH_CHART_PREFIX="helm_artifacts/instance/tpg-instance/"
 patch_schemas_file() {
   if [[ -f "$TPG_LIB_DIR/patch-schemas.json" ]]; then printf '%s' "$TPG_LIB_DIR/patch-schemas.json"
   else printf '%s' "$TPG_LIB_DIR/../params/patch-schemas.json"; fi
@@ -42,18 +42,18 @@ ARGOCD_MANAGER="argocd-controller"
 patch_targets() {  # patch_targets CLUSTER INVENTORY_JSON -> the targets of the cluster (JSON)
   # {operator: null | {path, mode, clear},
   #  instances: [{name, postgres: null | {paths, mode, clear}, postgresValues: null | {path, mode, clear}}]}
-  # apply: the path inputs and clusterMap keys (paths: comma-separated);
+  # apply: the path inputs (bracketed lists) and clusterMap keys (paths: comma-separated, the internal form);
   # clear: clearKinds (instance key, cluster key, input), whose instance kinds clear
   # the instance's files and operatorValues the cluster's operator file (D82)
   local c="$1" inv="$2" op opm ock out i pg val m ik ca
   opm="$(cmap_cval "$c" patchMode "${P_PATCH_MODE:-apply}")"
-  ock="$(cmap_cval "$c" clearKinds "${P_CLEAR_KINDS:-}")"
+  ock="$(cmap_cval "$c" clearKinds "$(list_csv clearKinds "${P_CLEAR_KINDS:-}" --bare all)")"
   if [[ "$opm" == clear ]]; then
     op=""
     if [[ ",${ock// /}," == *",all,"* || ",${ock// /}," == *",operatorValues,"* ]]; then op="clear"; fi
     out="$(jq -cn --arg p "$op" '{operator: (if $p == "" then null else {path: "", mode: "clear"} end), instances: []}')"
   else
-    op="$(cmap_cval "$c" operatorValuesPatchFilePath "${P_OPERATOR_VALUES_PATCH:-}")"
+    op="$(cmap_cval "$c" operatorValuesPatchFilePath "$(file_item operatorValuesPatchFilePath "${P_OPERATOR_VALUES_PATCH:-}")")"
     out="$(jq -cn --arg p "$op" '{operator: (if $p == "" then null else {path: $p, mode: "apply"} end), instances: []}')"
   fi
   for i in $(jq -r --arg c "$c" '.[] | select(.name == $c) | .instances[].name' <<<"$inv"); do
@@ -67,8 +67,8 @@ patch_targets() {  # patch_targets CLUSTER INVENTORY_JSON -> the targets of the 
         postgres: (if $pg == "" then null else {paths: "", mode: "clear", clear: $pg} end),
         postgresValues: (if $v == "" then null else {path: "", mode: "clear"} end)}]' <<<"$out")"
     else
-      pg="$(cmap_ival "$c" "$i" postgresPatchFilePath "${P_POSTGRES_PATCH:-}")"
-      val="$(cmap_ival "$c" "$i" postgresValuesPatchFilePath "${P_VALUES_PATCH:-}")"
+      pg="$(cmap_ival "$c" "$i" postgresPatchFilePath "$(list_csv postgresPatchFilePath "${P_POSTGRES_PATCH:-}" --files)")"
+      val="$(cmap_ival "$c" "$i" postgresValuesPatchFilePath "$(file_item postgresValuesPatchFilePath "${P_VALUES_PATCH:-}")")"
       # a CA bundle source of the instance, its cluster or the inputs (Round 15, D86)
       ca="$(cmap_ival "$c" "$i" backupCaBundleFile)$(cmap_ival "$c" "$i" backupCaBundleVaultSecret)$(cmap_cval "$c" backupCaBundleFile)$(cmap_cval "$c" backupCaBundleVaultSecret)${P_BACKUP_CA_FILE:-}${P_BACKUP_CA_VAULT:-}"
       [[ -n "$pg$val$ca" ]] || continue
@@ -228,14 +228,15 @@ patch_warnings() {  # patch_warnings CLUSTER: after the render, the overrides an
 
 # ---- rendering
 patch_operator_render() {  # patch_operator_render CLUSTER OUT_FILE: the operator chart with the effective values file
-  local c="$1" opv eff host
+  local c="$1" opv eff ovl host
   opv="$(C="$c" yq -r '.clusters[strenv(C)].operator.version // ""' "$REPO/$FLEET_REL")"
   eff="$REPO/$(operator_effective_rel "$c")"
+  ovl="$REPO/$(patch_group overlays; operator_effective_rel "$c")"   # the subshell leaves the current patch_group alone
   host="tanzu-sql-postgres.packages.broadcom.com"
   local -a vf=()
   # the overlay values file (initial deployment) first, the patch file on top: the order of the
   # tpg-operator ApplicationSet's valueFiles
-  [[ -f "$REPO/overlays/operator/clusters/${c}.yaml" ]] && vf=(-f "$REPO/overlays/operator/clusters/${c}.yaml")
+  [[ -f "$ovl" ]] && vf=(-f "$ovl")
   [[ -f "$eff" ]] && vf+=(-f "$eff")
   vault_secret broadcom-registry password \
     | helm registry login "$host" --username "$(vault_secret broadcom-registry username)" --password-stdin >/dev/null 2>&1 || true
@@ -285,20 +286,21 @@ patch_size_check() {  # patch_size_check CLUSTER INSTANCE: a volume of the rende
 }
 
 patch_dry_run() {  # patch_dry_run CLUSTER (use_cluster first): the after renders through the API server
-  local c="$1" i f docs dr
+  local c="$1" i f docs dr ns
   for i in $(jq -r '.instances[]' <<<"$PREP_PLAN"); do
     f="$WORK/render/after-${c}-${i}.yaml"
     [[ -s "$f" ]] || continue
+    ns="$(instance_ns "$c" "$i")" || { C_ERRS+=("${i}: ${FLEET_UNREADABLE_DETAIL}"); continue; }
     docs="$(yq 'select(.kind == "Postgres" or .kind == "PostgresBackupLocation"
                or .kind == "PostgresBackupSchedule" or .kind == "PostgresFerretDocumentDB")' "$f")"
     exposure_warning_rendered "$c" "$i" "$(cat "$f")"
     # FerretDB switched on by a values patch (D71): the documentdb extension is a manual step
     if yq -e 'select(.kind == "PostgresFerretDocumentDB") | .metadata.name' "$f" >/dev/null 2>&1 \
-       && ! tk -n "pg-${i}" get postgresferretdocumentdb "$i" >/dev/null 2>&1; then
+       && ! tk -n "$ns" get postgresferretdocumentdb "$i" >/dev/null 2>&1; then
       record_entry "warning.${c}.${i}.ferret" WARNING FERRET_EXTENSION_REQUIRED \
         "${i}: FerretDB (Tech Preview) needs the documentdb extension in the instance; prepare it by hand (Runbook, FerretDB) or the FerretDB proxies do not start"
     fi
-    if [[ -n "$docs" ]] && ! dr="$(tk -n "pg-${i}" apply --server-side --dry-run=server --field-manager="$ARGOCD_MANAGER" \
+    if [[ -n "$docs" ]] && ! dr="$(tk -n "$ns" apply --server-side --dry-run=server --field-manager="$ARGOCD_MANAGER" \
         --force-conflicts -f - <<<"$docs" 2>&1)"; then
       C_ERRS+=("${i}: the API server rejects the patched instance: $(tr '\n' ' ' <<<"$dr" | cut -c1-400)")
     fi
@@ -387,7 +389,8 @@ patch_diff() {
   : > "$WORK/diff-${c}.txt"
   for t in $(jq -r '.instances[]' <<<"$PREP_PLAN") $( [[ "$(jq -r '.operator' <<<"$PREP_PLAN")" == "true" ]] && echo operator); do
     before="$WORK/render/before-${c}-${t}.yaml"; after="$WORK/render/after-${c}-${t}.yaml"
-    if [[ "$t" == operator ]]; then app="tpg-${c}-operator"; ns="$OPERATOR_NS"; else app="tpg-${c}-${t}"; ns="pg-${t}"; fi
+    if [[ "$t" == operator ]]; then app="tpg-${c}-operator"; ns="$OPERATOR_NS"
+    else app="tpg-${c}-${t}"; ns="$(instance_ns "$c" "$t")" || { C_ERRS+=("${t}: ${FLEET_UNREADABLE_DETAIL}"); continue; }; fi
     [[ -f "$before" ]] || : > "$before"
     removed="$(patch_removed "$before" "$after")"
     list="$(patch_tracked_list "$after" "$app" "$ns" | patch_ignore_live "$ns")"

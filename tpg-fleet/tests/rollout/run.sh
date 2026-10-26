@@ -3,6 +3,7 @@
 #   canary   (default) the wave-0 cluster alone first, then batches of maxParallel per wave
 #   batches  no canary: every cluster, by wave, in batches of maxParallel
 #   all      one batch with every cluster
+# and, with P_PAIRS (tpg-restore, Round 23), the same three modes over the pairs of clusterMap.
 # Runs the script with a stub lib.sh (inventory c0 wave 0, c1 and c2 wave 1, c3 wave 2).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -34,6 +35,59 @@ expect "all: one batch"                  "$(plan "$INV" 1 all)"       '[["c0","c
 expect "all with no cluster: no batch"   "$(plan '[]' 2 all)"         '[]'
 expect "canary without a wave-0 cluster" "$(plan '[{"name":"c1","wave":1},{"name":"c2","wave":1}]' 2 canary)" '[["c1","c2"]]'
 expect "an unknown mode fails"           "$(plan "$INV" 2 fast)"      'ERROR'
+
+# ---- tpg-restore (Round 23, phase 6a): the same script batches the normalized pairs of clusterMap
+# (P_PAIRS, from the validate step) instead of clusters: canary = the first pair alone, batches = chunks of
+# maxParallel in the order of the list (no waves), all = one batch. An item carries what the step needs.
+pairs_plan() {  # pairs_plan PAIRS_JSON MAX_PARALLEL MODE -> batches as lists of pair indexes (or ERROR)
+  (cd "$TMP" && P_PAIRS="$1" bash "$TMP/plan.sh" wf false "$2" ${3:+"$3"} 2>/dev/null) || { echo ERROR; return; }
+  jq -c 'map(map(.index))' /tmp/batches.json
+}
+mkpairs() {  # mkpairs N -> N normalized pairs (only the fields the batching reads)
+  jq -cn --argjson n "$1" '[range(0; $n) | {index: ., method: (if . == 0 then "latest" else "time" end), source: {cluster: "c1", namespace: "pg-a", instance: "a"},
+    target: {cluster: ("t" + (. % 2 | tostring)), namespace: "pg-t", instance: ("t" + (. | tostring))}}]'
+}
+P4="$(mkpairs 4)"
+expect "pairs: canary is the first pair alone, then batches of maxParallel" "$(pairs_plan "$P4" 2 canary)" '[[0],[1,2],[3]]'
+expect "pairs: batches, maxParallel 2, in list order"                          "$(pairs_plan "$P4" 2 batches)" '[[0,1],[2,3]]'
+expect "pairs: batches, maxParallel 1"                                         "$(pairs_plan "$P4" 1 batches)" '[[0],[1],[2],[3]]'
+expect "pairs: all is one batch (maxParallel ignored)"                         "$(pairs_plan "$P4" 1 all)" '[[0,1,2,3]]'
+expect "pairs: one pair with canary is one batch"                              "$(pairs_plan "$(mkpairs 1)" 2 canary)" '[[0]]'
+expect "pairs: no pair, no batch"                                              "$(pairs_plan '[]' 2 all)" '[]'
+expect "pairs: an unknown mode fails"                                          "$(pairs_plan "$P4" 2 fast)" 'ERROR'
+expect "pairs: a maxParallel that is not a number fails"                       "$(pairs_plan "$P4" x all)" 'ERROR'
+(cd "$TMP" && P_PAIRS="$P4" bash "$TMP/plan.sh" wf false 2 canary >/dev/null 2>&1)
+expect "pairs: an item carries index, cluster, instance, method and the pair as base64 of its JSON" \
+  "$(jq -c '.[0][0] | [.index, .cluster, .instance, .method, (.pair | @base64d | fromjson | .target.instance)]' /tmp/batches.json)" '[0,"t0","t0","latest","t0"]'
+# Argo substitutes {{item.pair}} with the JSON-escaped text of the field, so a pair that crossed as JSON text
+# reached the step as {\"inPlace\":false,...} (a backslash before every quote: not JSON, INVALID_PAIR). Nothing
+# that crosses Argo in an item may hold a quote or a backslash: the pair is base64 (plan-batches.sh).
+QP="$(jq -c '.[0].label = "a \"quoted\" \\ label" | .[1].label = "x"' <<<"$P4")"
+(cd "$TMP" && P_PAIRS="$QP" bash "$TMP/plan.sh" wf false 2 all >/dev/null 2>&1)
+expect "pairs: no field of an item holds a quote or a backslash (Argo escapes them in {{item.x}})" \
+  "$(jq -c '[.[][] | to_entries[] | select(.value | tostring | test("[\"\\\\]")) | .key]' /tmp/batches.json)" '[]'
+expect "pairs: the pair of an item is plain base64" \
+  "$(jq -c '[.[][] | .pair | test("^[A-Za-z0-9+/=]+$")] | all' /tmp/batches.json)" 'true'
+expect "pairs: the pair of an item decodes to the pair, quotes and backslashes intact" \
+  "$(jq -r '.[0][0].pair | @base64d | fromjson | .label' /tmp/batches.json)" 'a "quoted" \ label'
+# every {{item.<field>}} a template uses: these fields carry names, numbers and booleans only, except pair (base64);
+# a new field has to be added here knowing that Argo escapes quotes and backslashes in it
+expect "templates: the item fields used by withParam steps are the known plain ones" \
+  "$(grep -hoE '\{\{item\.[A-Za-z]+\}\}' "$ROOT"/workflows/templates/*.yaml | sort -u | tr -d '{}' | paste -sd' ' -)" \
+  'item.cluster item.instance item.method item.name item.namespace item.pair item.previous item.replicas item.scheduled'
+expect "pairs: an item also carries the target namespace (the mutex of the pair step is per target cluster and namespace)" \
+  "$(jq -c '.[0][0].namespace' /tmp/batches.json)" '"pg-t"'
+RT="$ROOT/workflows/templates/tpg-restore.yaml"
+expect "tpg-restore: restore-batch hands the namespace of the item to the pair step" \
+  "$(yq -r '.spec.templates[] | select(.name == "restore-batch") | .steps[0][0].arguments.parameters[] | select(.name == "namespace") | .value' "$RT")" '{{item.namespace}}'
+expect "tpg-restore: the pair step holds a mutex per target cluster and namespace (besides the one per instance)" \
+  "$(yq -r '.spec.templates[] | select(.name == "restore-pair") | .synchronization.mutexes[].name' "$RT" | paste -sd' ' -)" \
+  'tpg-instance-{{inputs.parameters.cluster}}-{{inputs.parameters.instance}} tpg-restore-ns-{{inputs.parameters.cluster}}-{{inputs.parameters.namespace}}'
+expect "pairs: has-batches is true" "$(cat /tmp/has-batches)" 'true'
+(cd "$TMP" && P_PAIRS='[]' bash "$TMP/plan.sh" wf false 2 all >/dev/null 2>&1)
+expect "pairs: has-batches is false without a pair" "$(cat /tmp/has-batches)" 'false'
+# without P_PAIRS the script still plans clusters (the inventory above): one script, two item kinds
+expect "clusters are still planned when P_PAIRS is empty" "$(P_PAIRS='' plan "$INV" 2 batches)" '[["c0","c1"],["c2","c3"]]'
 echo
 echo "rollout: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

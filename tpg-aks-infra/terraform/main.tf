@@ -220,7 +220,7 @@ module "jumpbox" {
   vm_size             = var.jumpbox_vm_size
   os_disk_gb          = var.jumpbox_os_disk_gb
   # jumpbox_setup_method = "cloud-init": setup-jumpbox.sh runs at first boot
-  cloud_init_script   = local.jumpbox_cloud_init ? file("${path.module}/../scripts/jumpbox/setup-jumpbox.sh") : null
+  cloud_init_script = local.jumpbox_cloud_init ? file("${path.module}/../scripts/jumpbox/setup-jumpbox.sh") : null
 
   create_role_assignments = var.create_role_assignments
   role_assignments = merge(

@@ -23,7 +23,8 @@ RC=0; OUT="$(python3 "$ROOT/tools/unused-keys/audit.py" 2>&1)" || RC=$?
 
 # the lint on a copy with planted keys
 C="$TMP/fleet"; mkdir -p "$C"
-cp -r "$ROOT/tools" "$ROOT/charts" "$ROOT/clusters" "$ROOT/workflows" "$ROOT/bootstrap" "$C/"
+mkdir -p "$C/helm_artifacts"; cp -r "$ROOT/helm_artifacts/instance" "$C/helm_artifacts/"
+cp -r "$ROOT/tools" "$ROOT/clusters" "$ROOT/workflows" "$ROOT/bootstrap" "$C/"
 sed -i 's/^  walStorageSize: 10Gi$/  walStorageSize: 10Gi\n  retentionDays: 35/' "$C/clusters/_template/instance.yaml"
 RC=0; OUT="$(INFRA_DIR=/nonexistent python3 "$C/tools/unused-keys/audit.py" 2>&1)" || RC=$?
 [[ "$RC" -ne 0 ]] && grep -q "FAIL chart instance.retentionDays: clusters/_template/instance.yaml: changing it changes no rendered object" <<<"$OUT" \
@@ -42,7 +43,7 @@ cp "$ROOT/workflows/templates/tpg-backup.yaml" "$C/workflows/templates/tpg-backu
 python3 - "$C/tools/unused-keys/allow-list.yaml" <<'PY'
 import sys, yaml
 p = sys.argv[1]; d = yaml.safe_load(open(p))
-d["chart"]["instance.walStorageSize"] = {"reason": "test", "readBy": "charts/tpg-instance/values.yaml"}
+d["chart"]["instance.walStorageSize"] = {"reason": "test", "readBy": "helm_artifacts/instance/tpg-instance/values.yaml"}
 yaml.safe_dump(d, open(p, "w"), sort_keys=False)
 PY
 RC=0; OUT="$(INFRA_DIR=/nonexistent python3 "$C/tools/unused-keys/audit.py" 2>&1)" || RC=$?

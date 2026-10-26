@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/<org>/tpg-fleet/workflows/params/schemas/params-scale-instance.schema.json",
+  "title": "Parameter file of tpg-scale-instance",
+  "description": "The parameter file of `argo submit --from workflowtemplate/tpg-scale-instance --parameter-file`: the inputs of the WorkflowTemplate tpg-scale-instance. Generated from workflows/params/types.yaml and the template by workflows/params/params_schema.py. The shape, the types, the allowed values and the mandatory inputs; the validate step of the workflow and the admission policy tpg-workflow-parameters remain the authority (inputs that are mandatory in some cases only, combinations, registered clusters, the inside of clusterMap).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "clusters": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*\\[\\s*[\"\\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?[\"\\x27]?(\\s*,\\s*[\"\\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?[\"\\x27]?)*\\s*\\]\\s*$",
+          "not": {
+            "pattern": "(^|,)[\\[\\s\"\\x27]*all[\\]\\s\"\\x27]*(,|$)"
+          }
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "not": {
+              "const": "all"
+            }
+          }
+        }
+      ],
+      "description": "List: registered clusters in brackets, [aks-tpg-poc-01] (also with one value) (without clusterMap) [List; mandatory in some cases (the validate step decides)]"
+    },
+    "instances": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*\\[\\s*[\"\\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?[\"\\x27]?(\\s*,\\s*[\"\\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?[\"\\x27]?)*\\s*\\]\\s*$",
+          "not": {
+            "pattern": "(^|,)[\\[\\s\"\\x27]*all[\\]\\s\"\\x27]*(,|$)"
+          }
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "not": {
+              "const": "all"
+            }
+          }
+        }
+      ],
+      "description": "List: instances to scale, in brackets, [orders-db], on every listed cluster; each must be declared there (without clusterMap) [List; mandatory in some cases (the validate step decides)]"
+    },
+    "clusterMap": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*(\\{|[^\\s:#][^:]*:)"
+        }
+      ],
+      "description": "Map (YAML or JSON): cluster -> {maxReadReplicas, instances: {instance -> {replicas, enableHAIfNeeded}}}; the inputs below are the defaults. Example: {aks-tpg-poc-01: {maxReadReplicas: 4, instances: {orders-db: {replicas: 3}, billing-db: {replicas: 0}}}, aks-tpg-poc-02: {instances: {reporting-db: {replicas: 1}}}} [Map]"
+    },
+    "replicas": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        }
+      ],
+      "description": "Integer: read replicas (0 to maxReadReplicas, default maximum 3); 0 makes a single node (high availability off) [Integer; mandatory in some cases (the validate step decides)]"
+    },
+    "maxReadReplicas": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      ],
+      "description": "Integer, 1 or more: new cap on readReplicas for every selected cluster (clusters.<c>.cluster.maxReadReplicas, default 3); empty keeps it. Alone (no instances) it only changes the cap; below the read replicas of an instance of the cluster it is refused (MAX_BELOW_CURRENT) [Integer]"
+    },
+    "pushMode": {
+      "enum": [
+        "direct",
+        "pr"
+      ],
+      "description": "direct: push to the fleet branch; pr: open a pull request and continue after it is merged [Enum; mandatory]"
+    },
+    "enableHAIfNeeded": {
+      "enum": [
+        true,
+        false,
+        "true",
+        "false"
+      ],
+      "description": "replicas > 0 on an instance without high availability: turn it on (true) or fail (false) [Boolean]",
+      "default": "true"
+    },
+    "rolloutMode": {
+      "enum": [
+        "canary",
+        "batches",
+        "all"
+      ],
+      "description": "all (default): every cluster at once; canary: one wave-0 cluster first, then batches of maxParallel; batches: no canary, batches of maxParallel. A failed batch stops the later ones [Enum]",
+      "default": "all"
+    },
+    "maxParallel": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      ],
+      "description": "Clusters per batch for rolloutMode canary and batches [Integer]",
+      "default": "2"
+    },
+    "dryRun": {
+      "enum": [
+        true,
+        false,
+        "true",
+        "false"
+      ],
+      "description": "[Boolean]",
+      "default": "false"
+    },
+    "timeoutSeconds": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      ],
+      "description": "[Integer]",
+      "default": "900"
+    },
+    "prTimeoutSeconds": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      ],
+      "description": "[Integer]",
+      "default": "3600"
+    },
+    "toolsImage": {
+      "type": "string",
+      "description": "[String]",
+      "default": "alpine/k8s:1.35.8"
+    }
+  },
+  "required": [
+    "pushMode"
+  ]
+}

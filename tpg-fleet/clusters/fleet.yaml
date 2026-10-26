@@ -6,22 +6,23 @@
 #                                       (Argo CD label tpg.fleet/managed=true)
 #     operator.version                  required: operator chart version (OCI tag)
 #     cluster / backup                  optional overrides of _template/cluster.yaml
-#     instances.<instance>              one Postgres instance, namespace pg-<instance>
+#     instances.<instance>              one Postgres instance, namespace instance.namespace
+#                                       (default pg-<instance>; immutable; instances may share one)
 #       instance / backup               overrides of _template/instance.yaml
 #
 #       overlays.postgres / .postgresValues   {current, previous: {path, commit}}: the
 #                                     overlay file applied at the initial deployment
 #                                     (tpg-day0, tpg-create-instance), relative to
-#                                     charts/tpg-instance/; previous is a record
+#                                     helm_artifacts/instance/tpg-instance/; previous is a record
 #       patches.postgres / .postgresValues    the same for the patch file of tpg-patch,
 #                                     applied after the overlay (it wins)
 #     operator.overlays.values        {current, previous}: the operator values overlay
 #                                     (tpg-day0), a repository path; its copy
-#                                     overlays/operator/clusters/<cluster>.yaml is read
+#                                     helm_artifacts/operator/overlays/clusters/<cluster>.yaml is read
 #                                     by the tpg-operator Application first
 #     operator.patches.values         {current, previous}: the operator values patch
 #                                     (tpg-patch), a repository path; its copy
-#                                     patches/operator/clusters/<cluster>.yaml is read
+#                                     helm_artifacts/operator/patches/clusters/<cluster>.yaml is read
 #                                     after the overlay copy
 #
 # The workflows edit this file (tpg-day0, tpg-upgrade, tpg-patch,

@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/<org>/tpg-fleet/workflows/params/schemas/params-backup.schema.json",
+  "title": "Parameter file of tpg-backup",
+  "description": "The parameter file of `argo submit --from workflowtemplate/tpg-backup --parameter-file`: the inputs of the WorkflowTemplate tpg-backup. Generated from workflows/params/types.yaml and the template by workflows/params/params_schema.py. The shape, the types, the allowed values and the mandatory inputs; the validate step of the workflow and the admission policy tpg-workflow-parameters remain the authority (inputs that are mandatory in some cases only, combinations, registered clusters, the inside of clusterMap).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "backupType": {
+      "enum": [
+        "full",
+        "incremental",
+        "differential"
+      ],
+      "description": "full (starts a chain), incremental (changes since the previous backup; daily schedule) or differential (changes since the last full; manual) [Enum]",
+      "default": "full"
+    },
+    "clusters": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*all\\s*$"
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*(all|\\[\\s*[\"\\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?[\"\\x27]?(\\s*,\\s*[\"\\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?[\"\\x27]?)*\\s*\\])\\s*$",
+          "not": {
+            "pattern": "(^|,)[\\[\\s\"\\x27]*all[\\]\\s\"\\x27]*(,|$)"
+          }
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "not": {
+              "const": "all"
+            }
+          }
+        }
+      ],
+      "description": "List: registered clusters in brackets, [aks-tpg-poc-01, aks-tpg-poc-02] (also with one value), or all (without clusterMap) [List]",
+      "default": "all"
+    },
+    "instances": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*all\\s*$"
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*(all|\\[\\s*[\"\\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?[\"\\x27]?(\\s*,\\s*[\"\\x27]?[a-z0-9]([-a-z0-9]*[a-z0-9])?[\"\\x27]?)*\\s*\\])\\s*$",
+          "not": {
+            "pattern": "(^|,)[\\[\\s\"\\x27]*all[\\]\\s\"\\x27]*(,|$)"
+          }
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "not": {
+              "const": "all"
+            }
+          }
+        }
+      ],
+      "description": "List: instances to back up in brackets, [orders-db], or all / empty for every instance (without clusterMap) [List]"
+    },
+    "clusterMap": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*(\\{|[^\\s:#][^:]*:)"
+        }
+      ],
+      "description": "Map (YAML or JSON): cluster -> {instances: {instance -> {backupType, backupTimeoutSeconds}}}; the inputs are the defaults [Map]"
+    },
+    "backupTimeoutSeconds": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      ],
+      "description": "[Integer]",
+      "default": "10800"
+    },
+    "scheduledOnly": {
+      "enum": [
+        true,
+        false,
+        "true",
+        "false"
+      ],
+      "description": "true (CronWorkflows): skip instances with backup.scheduled false in clusters/fleet.yaml [Boolean]",
+      "default": "false"
+    },
+    "toolsImage": {
+      "type": "string",
+      "description": "[String]",
+      "default": "alpine/k8s:1.35.8"
+    }
+  }
+}

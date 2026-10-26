@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # postgres-upgrade.sh WORKFLOW_NAME CLUSTER TARGET_VERSION INSTANCES TIMEOUT_SECONDS
 # tpg-upgrade component=postgres: upgrade Postgres instances on one cluster with
-# PostgresVersionUpgrade. INSTANCES is all or a comma-separated list.
+# PostgresVersionUpgrade. INSTANCES is all or a comma-separated list (internal form: upgrade-cluster.sh
+# turns the bracketed instances input into it).
 # With clusterMap, each instance's postgresVersion, preUpgradeBackup and
 # allowMajor come from the map; TARGET_VERSION (targetVersion, may be empty) and
 # the inputs are their defaults.
@@ -9,6 +10,8 @@
 # and a Succeeded backup from the last 26 hours (P_PRE_BACKUP=true takes one first).
 # After the upgrade, clusters.<cluster>.instances.<instance>.instance.postgresVersion is
 # written to clusters/fleet.yaml (PUSH_MODE direct | pr) and the Application is synced.
+# A restored instance (tpg-restore, instance.restored): the version written here differs from its restore-patch's, so the chart renders it
+# over the restore-patch (templates/_helpers.tpl tpg.restoredPostgres); the restore-patch itself is never touched.
 # P_DRY_RUN=true records the plan per instance and changes nothing.
 # Records result.<cluster>.<instance>. Exits 1 if any instance FAILED.
 WF="$1"; C="$2"; SELECTED="$4"; TIMEOUT="$5"
@@ -40,9 +43,10 @@ _pvu_finished() {
 }
 
 upgrade_one() {
-  local i="$1" ns="pg-$1" key="result.${C}.$1" cur cur_major b phase name start j stamp TYPE dbv spec_v spec_wait
+  local i="$1" ns key="result.${C}.$1" cur cur_major b phase name start j stamp TYPE dbv spec_v spec_wait
   local TARGET target_major target_num ALLOW_MAJOR PRE_BACKUP
   ifail() { record "$key" FAILED "$1" "${2:-}"; any_failed=1; }
+  ns="$(instance_ns "$C" "$i")" || { ifail FLEET_UNREADABLE "$FLEET_UNREADABLE_DETAIL"; return; }
   TARGET="$(cmap_ival "$C" "$i" postgresVersion "$DEFAULT_TARGET")"
   [[ -n "$TARGET" ]] || { record "$key" SKIPPED_NOT_SELECTED "" "no postgresVersion for ${i}"; return; }
   target_major="$(major_of "$TARGET")"
@@ -179,7 +183,7 @@ YAML
 git_clone "$WORK/repo"
 if [[ "$SELECTED" != "all" ]]; then
   for i in $(split_list "$SELECTED"); do
-    inventory_instances "$C" | grep -qx "$i" || { record "result.${C}.${i}" FAILED UNKNOWN_INSTANCE "not declared for ${C} in ${FLEET_REL}"; any_failed=1; }
+    inventory_instances "$C" | grep -Fqx -- "$i" || { record "result.${C}.${i}" FAILED UNKNOWN_INSTANCE "not declared for ${C} in ${FLEET_REL}"; any_failed=1; }
   done
 fi
 for i in $(inventory_instances "$C"); do

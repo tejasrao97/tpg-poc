@@ -88,6 +88,7 @@ assert "missing AppProject tpg-hub is named" 'AppProject tpg-hub: appproject/tpg
 assert "missing admission policy is named (cluster-scoped)" \
   'ValidatingAdmissionPolicy tpg-application-sync: validatingadmissionpolicy/tpg-application-sync not found on aks-tpg-hub$'
 assert "missing tpg-patch WorkflowTemplate is named" 'WorkflowTemplate tpg-patch: workflowtemplate/tpg-patch not found on aks-tpg-hub'
+assert "missing tpg-backup-expire WorkflowTemplate is named (Round 23)" 'WorkflowTemplate tpg-backup-expire: workflowtemplate/tpg-backup-expire not found on aks-tpg-hub'
 assert "the run ends with the summary" '^=+ verify summary =+$'
 assert "the missing StorageClass on the hub is an issue (35-vault.sh creates it)" \
   '^ +[0-9]+\. StorageClass tpg-data-retain \(disk SKU StandardSSD_LRS\)$'
@@ -147,6 +148,54 @@ PY
 run_verify > "$TMP/all"
 assert "a matching SKU passes" 'OK +StorageClass tpg-data-retain \(disk SKU StandardSSD_LRS\)'
 refute "and is not in the summary" '^ +[0-9]+\. StorageClass tpg-data-retain'
+
+echo
+echo "== case 3b: instances in the namespaces of clusters/fleet.yaml (Round 23)"
+# the tpg-fleet clone the verify step reads: app-a and app-b share the namespace "shared" (app-a owns the Secrets),
+# orders-db is in its default namespace pg-orders-db, which does not exist on the cluster yet
+FLEETDIR="$TMP/fleetclone"; mkdir -p "$FLEETDIR/clusters" "$FLEETDIR/workflows/params"
+cp "$FLEET/workflows/params/cluster-map-keys.yaml" "$FLEETDIR/workflows/params/"
+cat > "$FLEETDIR/clusters/fleet.yaml" <<'YAML'
+clusters:
+  aks-tpg-poc-01:
+    operator: {version: v4.5.0}
+    instances:
+      app-a: {instance: {namespace: shared, postgresVersion: postgres-17.6}}
+      app-b: {instance: {namespace: shared, sharedSecretsOwner: false, postgresVersion: postgres-17.6}}
+      orders-db: {instance: {postgresVersion: postgres-17.6}}
+YAML
+python3 - "$STUB_KUBECTL_STATE" <<'PY'
+import json, sys
+json.dump({"crds": ["postgres.sql.tanzu.vmware.com"], "deployments": [], "statefulsets": [], "secrets": [], "services": [],
+           "namespaces": ["shared"], "postgres": [{"namespace": "shared", "name": "app-a"}]}, open(sys.argv[1], "w"))
+PY
+ORIG_FLD="${FLEET_LOCAL_DIR-}"; export FLEET_LOCAL_DIR="$FLEETDIR"
+run_verify > "$TMP/all"
+assert "an instance is checked in its fleet.yaml namespace, not in pg-<instance>" 'OK +instance aks-tpg-poc-01/app-a in namespace shared'
+assert "a Postgres object missing from its namespace is a warning that names the namespace" \
+  'Postgres aks-tpg-poc-01/app-b.*postgres/app-b not found on aks-tpg-poc-01 \(namespace shared\)'
+assert "a namespace that does not exist yet is a warning" 'namespace pg-orders-db of instance aks-tpg-poc-01/orders-db.*namespace/pg-orders-db not found'
+refute "exactly one owner of the shared Secrets in a namespace is no finding" 'namespace shared shared Secrets'
+cat > "$FLEETDIR/clusters/fleet.yaml" <<'YAML'
+clusters:
+  aks-tpg-poc-01:
+    operator: {version: v4.5.0}
+    instances:
+      app-a: {instance: {namespace: shared, postgresVersion: postgres-17.6}}
+      app-b: {instance: {namespace: shared, postgresVersion: postgres-17.6}}
+      app-c: {instance: {namespace: other, sharedSecretsOwner: false, postgresVersion: postgres-17.6}}
+      app-d: {instance: {namespace: kube-system, postgresVersion: postgres-17.6}}
+      app-e: {instance: {namespace: kube-team, postgresVersion: postgres-17.6}}
+      app-f: {instance: {namespace: vault-secrets-operator-system, postgresVersion: postgres-17.6}}
+YAML
+run_verify > "$TMP/all"
+assert "two owners in one namespace are an issue" 'namespace shared shared Secrets'
+assert "and the issue names them" '2 of the instances app-a, app-b render the shared Secrets'
+assert "a namespace without an owner is an issue" 'namespace other shared Secrets'
+assert "a reserved namespace is an issue" 'instance aks-tpg-poc-01/app-d namespace kube-system'
+assert "a name starting with kube- is an issue (the reserved prefix of cluster-map-keys.yaml)" 'instance aks-tpg-poc-01/app-e namespace kube-team'
+assert "a namespace the fleet installs into (the Vault Secrets Operator) is an issue" 'instance aks-tpg-poc-01/app-f namespace vault-secrets-operator-system'
+if [[ -n "$ORIG_FLD" ]]; then export FLEET_LOCAL_DIR="$ORIG_FLD"; else unset FLEET_LOCAL_DIR; fi
 
 # ------------------------------------------------------------------ summary only
 # scripts/lib/findings.sh with synthetic findings: the grouping, the per-cluster
